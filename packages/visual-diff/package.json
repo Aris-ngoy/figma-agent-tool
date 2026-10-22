@@ -1,0 +1,22 @@
+{
+	"name": "@figma-agent-tool/visual-diff",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts",
+		"./fixtures": "./fixtures/index.ts"
+	},
+	"scripts": {
+		"lint": "biome lint .",
+		"typecheck": "tsc --noEmit",
+		"fixtures": "bun fixtures/generate.ts"
+	},
+	"dependencies": {
+		"pixelmatch": "^8.0.0",
+		"pngjs": "^7.0.0"
+	},
+	"devDependencies": {
+		"@types/pngjs": "^6.0.5"
+	}
+}
