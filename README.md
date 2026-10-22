@@ -38,3 +38,7 @@ bun run check      # Biome lint + format
 
 3. In Figma desktop: Plugins → Development → Import plugin from manifest… and pick `packages/figma-plugin/manifest.json`. Run it in the file you want to bridge; the panel shows whether it's connected and which file is bridged.
 4. Ask your agent to call `get_status` to check the connection.
+
+## Artifacts
+
+Image outputs such as `export_node_image` are written to `.figma-agent/` in the server's working directory and returned as file paths (inline images only on request). Set `FIGMA_AGENT_ARTIFACTS_DIR` to write them elsewhere. Add `.figma-agent/` to your project's `.gitignore`; this repo already ignores it.

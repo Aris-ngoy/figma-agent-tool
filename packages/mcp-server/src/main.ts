@@ -18,7 +18,10 @@ if (!Number.isInteger(port) || port < 0 || port > 65535) {
 const bridge = startBridge({ port });
 console.error(`[bridge] listening on ws://${BRIDGE_HOSTNAME}:${bridge.port}`);
 
-const server = createMcpServer({ bridge });
+const server = createMcpServer({
+	bridge,
+	artifactsDir: process.env.FIGMA_AGENT_ARTIFACTS_DIR || undefined,
+});
 await server.connect(new StdioServerTransport());
 
 async function shutdown() {

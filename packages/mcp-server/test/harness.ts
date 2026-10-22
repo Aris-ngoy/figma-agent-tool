@@ -1,6 +1,9 @@
 // Seam 1 harness: the real MCP server and bridge, driven by an in-memory MCP
 // client, with a fake plugin that speaks the real protocol over WebSocket.
 import { afterEach } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	type Handshake,
 	parseServerMessage,
@@ -9,8 +12,8 @@ import {
 } from "@figma-agent-tool/protocol";
 import {
 	document,
+	exchanges,
 	handshake as handshakeFixture,
-	pingResponse,
 } from "@figma-agent-tool/protocol/fixtures";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -26,13 +29,19 @@ afterEach(async () => {
 
 export async function startHarness({
 	setup,
+	artifactsDir,
 }: {
 	setup?: (server: McpServer, bridge: Bridge) => void;
+	artifactsDir?: string;
 } = {}) {
 	const bridge = startBridge({ port: 0 });
 	cleanups.push(() => bridge.stop());
 
-	const server = createMcpServer({ bridge });
+	const scratch = await mkdtemp(join(tmpdir(), "figma-agent-test-"));
+	cleanups.push(() => rm(scratch, { recursive: true, force: true }));
+	artifactsDir ??= join(scratch, "artifacts");
+
+	const server = createMcpServer({ bridge, artifactsDir });
 	setup?.(server, bridge);
 	const client = new Client({ name: "test-client", version: "0.0.0" });
 	const [clientTransport, serverTransport] =
@@ -44,6 +53,7 @@ export async function startHarness({
 	return {
 		bridge,
 		client,
+		artifactsDir,
 		async callTool(name: string, args: Record<string, unknown> = {}) {
 			return client.callTool({ name, arguments: args });
 		},
@@ -55,13 +65,26 @@ export async function startHarness({
 	};
 }
 
-/** Answers server requests from the shared document and message fixtures. */
+/** Answers server requests by replaying the shared message fixtures. */
 function answer(message: ServerMessage): Response | undefined {
 	if (message.type !== "request") return undefined;
-	switch (message.command) {
-		case "ping":
-			return { ...pingResponse, id: message.id };
+	const exchange = exchanges.find(
+		([request]) =>
+			request.command === message.command &&
+			Bun.deepEquals(request.params, message.params),
+	);
+	if (!exchange) {
+		return {
+			type: "response",
+			id: message.id,
+			ok: false,
+			error: {
+				code: "no_fixture",
+				message: `Fake plugin has no fixture for ${message.command} ${JSON.stringify(message.params)}`,
+			},
+		};
 	}
+	return { ...exchange[1], id: message.id };
 }
 
 async function connectFakePlugin(port: number, handshake: Handshake) {

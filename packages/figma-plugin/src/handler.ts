@@ -16,8 +16,40 @@ type CommandImplementations = {
 	) => CommandResult<C> | Promise<CommandResult<C>>;
 };
 
+/** A command failure with a machine-readable code for the server. */
+class CommandError extends Error {
+	constructor(
+		readonly code: string,
+		message: string,
+	) {
+		super(message);
+	}
+}
+
 const implementations: CommandImplementations = {
 	ping: () => ({ pong: true }),
+
+	async export_node_image({ nodeId, scale }) {
+		const node = await figma.getNodeByIdAsync(nodeId);
+		if (!node) {
+			throw new CommandError(
+				"node_not_found",
+				`No node with ID ${nodeId} exists in this file.`,
+			);
+		}
+		if (!("exportAsync" in node)) {
+			throw new CommandError(
+				"not_exportable",
+				`Node ${nodeId} is a ${node.type} and cannot be exported. Export a ` +
+					"frame, component or other layer on the canvas instead.",
+			);
+		}
+		const bytes = await node.exportAsync({
+			format: "PNG",
+			constraint: { type: "SCALE", value: scale },
+		});
+		return { png: figma.base64Encode(bytes) };
+	},
 };
 
 export function createCommandHandler({
@@ -49,12 +81,17 @@ export function createCommandHandler({
 				return failure(id, "invalid_params", params.error.message);
 			}
 			try {
-				const result = await implementations[command](params.data);
+				// `params` was parsed with this command's schema; TypeScript can't
+				// correlate the two through the union, hence the cast.
+				const implementation = implementations[command] as (
+					params: unknown,
+				) => Promise<unknown>;
+				const result = await implementation(params.data);
 				return { type: "response", id, ok: true, result };
 			} catch (error) {
 				return failure(
 					id,
-					"command_failed",
+					error instanceof CommandError ? error.code : "command_failed",
 					error instanceof Error ? error.message : String(error),
 				);
 			}
