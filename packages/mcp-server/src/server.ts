@@ -1,13 +1,10 @@
 // The MCP tool surface. Figma-backed tools go through `registerFigmaTool`,
 // which turns bridge failures into actionable tool errors.
-import {
-	McpServer,
-	type ToolCallback,
-} from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import packageJson from "../package.json" with { type: "json" };
-import { type Bridge, BridgeRequestError } from "./bridge";
+import type { Bridge } from "./bridge";
+import { registerReadTools } from "./read-tools";
 
 export function createMcpServer({ bridge }: { bridge: Bridge }): McpServer {
 	const server = new McpServer({
@@ -41,35 +38,7 @@ export function createMcpServer({ bridge }: { bridge: Bridge }): McpServer {
 		},
 	);
 
+	registerReadTools(server, bridge);
+
 	return server;
-}
-
-type FigmaToolConfig<Shape extends z.ZodRawShape> = {
-	title?: string;
-	description: string;
-	inputSchema?: Shape;
-};
-
-/** Registers a tool that needs the plugin; bridge failures become tool errors. */
-export function registerFigmaTool<Shape extends z.ZodRawShape>(
-	server: McpServer,
-	name: string,
-	config: FigmaToolConfig<Shape>,
-	handler: ToolCallback<Shape>,
-) {
-	const callback = (async (...args: Parameters<typeof handler>) => {
-		try {
-			return await (handler as (...a: typeof args) => Promise<CallToolResult>)(
-				...args,
-			);
-		} catch (error) {
-			if (error instanceof BridgeRequestError) return toolError(error.message);
-			throw error;
-		}
-	}) as ToolCallback<Shape>;
-	server.registerTool(name, config, callback);
-}
-
-function toolError(message: string): CallToolResult {
-	return { content: [{ type: "text", text: message }], isError: true };
 }

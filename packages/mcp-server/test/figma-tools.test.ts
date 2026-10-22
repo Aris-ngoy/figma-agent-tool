@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { registerFigmaTool } from "../src/server";
+import { registerFigmaTool } from "../src/figma-tool";
 import { startHarness } from "./harness";
 
 // No Figma-backed tool ships in the walking skeleton, so these tests register

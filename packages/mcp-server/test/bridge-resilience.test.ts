@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { CLOSE_CODE_REPLACED } from "@figma-agent-tool/protocol";
 import { handshake } from "@figma-agent-tool/protocol/fixtures";
-import { registerFigmaTool } from "../src/server";
+import { registerFigmaTool } from "../src/figma-tool";
 import { startHarness } from "./harness";
 
 // Registers a tool on the plugin's `ping` command through the same helper
