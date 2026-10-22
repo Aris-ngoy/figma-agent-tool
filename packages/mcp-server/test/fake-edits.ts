@@ -21,6 +21,7 @@ import {
 	fontNotFoundError,
 	nodeNotFoundResponse,
 	notAComponentError,
+	prefixIds,
 } from "@figma-agent-tool/protocol/fixtures";
 
 class FakeCommandError extends Error {
@@ -65,7 +66,6 @@ const NEW_NODES: Record<
 	},
 };
 
-/** Returns a failure for the whole command, or the command's result. */
 export function createFakeEditor(doc: DocumentFixture) {
 	let created = 0;
 
@@ -131,6 +131,7 @@ export function createFakeEditor(doc: DocumentFixture) {
 	}
 
 	return {
+		/** Returns a failure for the whole command, or the command's result. */
 		create_nodes({
 			parentId,
 			nodes,
@@ -244,12 +245,4 @@ function paint(input: PaintInput) {
 	const out = { ...input };
 	if (out.opacity === 1) delete out.opacity;
 	return out;
-}
-
-function prefixIds(node: SerializedNode, prefix: string): SerializedNode {
-	return {
-		...node,
-		id: `${prefix}${node.id}`,
-		children: node.children?.map((child) => prefixIds(child, prefix)),
-	};
 }

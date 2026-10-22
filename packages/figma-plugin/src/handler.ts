@@ -132,7 +132,8 @@ export function createCommandHandler({
 				const result = await implementation(params.data);
 				return { type: "response", id, ok: true, result };
 			} catch (error) {
-				return { type: "response", id, ok: false, error: toBridgeError(error) };
+				const { code, message } = toBridgeError(error);
+				return failure(id, code, message);
 			}
 		},
 	};

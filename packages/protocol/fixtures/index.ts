@@ -374,6 +374,18 @@ export function createdNodeId(n: number): string {
 	return `100:${n}`;
 }
 
+/** Copies a subtree with every ID prefixed, as Figma does for instance sublayers. */
+export function prefixIds(
+	node: SerializedNode,
+	prefix: string,
+): SerializedNode {
+	return {
+		...node,
+		id: `${prefix}${node.id}`,
+		children: node.children?.map((child) => prefixIds(child, prefix)),
+	};
+}
+
 /** Per-node error when a text edit needs a font that isn't installed. */
 export function fontNotFoundError(font: { family: string; style: string }) {
 	return {

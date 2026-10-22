@@ -10,6 +10,7 @@ import {
 	type DocumentFixture,
 	findNode,
 	framePng,
+	prefixIds,
 } from "@figma-agent-tool/protocol/fixtures";
 
 const mixed = Symbol("figma.mixed");
@@ -348,14 +349,6 @@ function guardText(node: MockNode, loadedFonts: Set<string>) {
 			},
 		});
 	}
-}
-
-function prefixIds(node: SerializedNode, prefix: string): SerializedNode {
-	return {
-		...node,
-		id: `${prefix}${node.id}`,
-		children: node.children?.map((child) => prefixIds(child, prefix)),
-	};
 }
 
 function toPaint(paint: Paint) {
