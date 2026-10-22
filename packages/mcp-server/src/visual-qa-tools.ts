@@ -140,14 +140,11 @@ export function registerVisualQaTools(
 				"png",
 				diffPng,
 			);
-			const paths = {
+			const structuredContent = {
+				...summary,
 				designPath: design.path,
 				actualPath: actual.path,
 				diffPath,
-			};
-			const structuredContent = {
-				...summary,
-				...paths,
 				...(markdown && {
 					markdown: renderMarkdown(summary, {
 						design: design.path,

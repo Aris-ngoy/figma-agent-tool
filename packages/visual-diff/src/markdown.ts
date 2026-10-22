@@ -1,5 +1,5 @@
 // A compact, deterministic Markdown summary of a comparison, for PRs and agents.
-import type { ComparisonReport } from "./compare";
+import type { ComparisonReport, Rect } from "./compare";
 
 export type ImagePaths = { design?: string; actual?: string; diff?: string };
 
@@ -60,14 +60,5 @@ export function renderMarkdown(
 
 const round = (value: number) => Math.round(value * 1000) / 1000;
 
-const box = ({
-	x,
-	y,
-	width,
-	height,
-}: {
-	x: number;
-	y: number;
-	width: number;
-	height: number;
-}) => `${width}×${height} at ${x},${y}`;
+const box = ({ x, y, width, height }: Rect) =>
+	`${width}×${height} at ${x},${y}`;

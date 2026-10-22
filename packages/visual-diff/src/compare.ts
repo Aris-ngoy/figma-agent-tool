@@ -96,12 +96,7 @@ export function compare(
 	const scale = { x: width / design.width, y: height / design.height };
 
 	const masks = collectMasks(design, settings, scale);
-	const ignoreMask = new Uint8Array(width * height);
-	for (const mask of masks) {
-		for (let y = mask.y; y < mask.y + mask.height; y++) {
-			ignoreMask.fill(1, y * width + mask.x, y * width + mask.x + mask.width);
-		}
-	}
+	const ignoreMask = rasterizeMasks(masks, width, height);
 	const maskedPixels = ignoreMask.reduce((sum, value) => sum + value, 0);
 
 	const diff = new Uint8Array(width * height * 4);
@@ -119,24 +114,8 @@ export function compare(
 		},
 	);
 
-	// Mismatched pixels are the ones pixelmatch painted in DIFF_COLOR; its
-	// grayscale backdrop and yellow anti-aliasing pixels never are.
-	const mismatchMap = new Uint8Array(width * height);
-	for (let i = 0; i < mismatchMap.length; i++) {
-		const pos = i * 4;
-		mismatchMap[i] = Number(
-			diff[pos] === DIFF_COLOR[0] &&
-				diff[pos + 1] === DIFF_COLOR[1] &&
-				diff[pos + 2] === DIFF_COLOR[2],
-		);
-		if (ignoreMask[i]) {
-			for (let c = 0; c < 3; c++) {
-				diff[pos + c] = Math.round(
-					((diff[pos + c] as number) + (MASK_TINT[c] as number)) / 2,
-				);
-			}
-		}
-	}
+	const mismatchMap = findMismatches(diff);
+	tintMasked(diff, ignoreMask);
 
 	const comparedPixels = width * height - maskedPixels;
 	const ratio =
@@ -153,6 +132,51 @@ export function compare(
 		masks,
 		diffPng: encodePng({ width, height, data: diff }),
 	};
+}
+
+/** One byte per pixel, 1 where any mask covers it. */
+function rasterizeMasks(
+	masks: readonly Rect[],
+	width: number,
+	height: number,
+): Uint8Array {
+	const ignoreMask = new Uint8Array(width * height);
+	for (const mask of masks) {
+		for (let y = mask.y; y < mask.y + mask.height; y++) {
+			ignoreMask.fill(1, y * width + mask.x, y * width + mask.x + mask.width);
+		}
+	}
+	return ignoreMask;
+}
+
+/**
+ * One byte per pixel, 1 where pixelmatch painted DIFF_COLOR; its grayscale
+ * backdrop and yellow anti-aliasing pixels never are.
+ */
+function findMismatches(diff: Uint8Array): Uint8Array {
+	const mismatchMap = new Uint8Array(diff.length / 4);
+	for (let i = 0; i < mismatchMap.length; i++) {
+		const pos = i * 4;
+		mismatchMap[i] = Number(
+			diff[pos] === DIFF_COLOR[0] &&
+				diff[pos + 1] === DIFF_COLOR[1] &&
+				diff[pos + 2] === DIFF_COLOR[2],
+		);
+	}
+	return mismatchMap;
+}
+
+/** Blends masked pixels of the diff image towards MASK_TINT. */
+function tintMasked(diff: Uint8Array, ignoreMask: Uint8Array) {
+	for (let i = 0; i < ignoreMask.length; i++) {
+		if (!ignoreMask[i]) continue;
+		const pos = i * 4;
+		for (let c = 0; c < 3; c++) {
+			diff[pos + c] = Math.round(
+				((diff[pos + c] as number) + (MASK_TINT[c] as number)) / 2,
+			);
+		}
+	}
 }
 
 function checkAlignment(

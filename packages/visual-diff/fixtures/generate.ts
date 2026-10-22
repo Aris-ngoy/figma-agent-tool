@@ -70,18 +70,20 @@ function render(
 	return PNG.sync.write(png);
 }
 
-const replace = (from: Shape, to: Partial<Shape>) =>
-	scene.map((shape) => (shape === from ? { ...shape, ...to } : shape));
+/** The scene with some of its shapes changed. */
+const replace = (...changes: [Shape, Partial<Shape>][]) =>
+	scene.map((shape) => {
+		const change = changes.find(([from]) => from === shape)?.[1];
+		return change ? { ...shape, ...change } : shape;
+	});
 
 const fixtures: Record<string, Buffer> = {
 	"design.png": render(scene, 1),
 	"actual-identical.png": render(scene, 3),
-	"actual-shifted.png": render(replace(card, { y: card.y + 16 }), 3),
-	"actual-recolored.png": render(replace(button, { color: "#dc2626" }), 3),
+	"actual-shifted.png": render(replace([card, { y: card.y + 16 }]), 3),
+	"actual-recolored.png": render(replace([button, { color: "#dc2626" }]), 3),
 	"actual-status-bar.png": render(
-		replace(clock, { width: 40 }).map((shape) =>
-			shape === battery ? { ...shape, width: 18 } : shape,
-		),
+		replace([clock, { width: 40 }], [battery, { width: 18 }]),
 		3,
 	),
 	"actual-wrong-aspect.png": render(scene, 3, { width: 393, height: 393 }),
