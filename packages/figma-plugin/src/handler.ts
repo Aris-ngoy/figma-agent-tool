@@ -10,6 +10,8 @@ import {
 	Request,
 	type Response,
 } from "@figma-agent-tool/protocol";
+import { createNodes, updateNodes } from "./edit";
+import { CommandError, nodeNotFound, toBridgeError } from "./errors";
 import { serializeNode } from "./serialize";
 
 type CommandImplementations = {
@@ -17,23 +19,6 @@ type CommandImplementations = {
 		params: CommandParams<C>,
 	) => CommandResult<C> | Promise<CommandResult<C>>;
 };
-
-/** A command failure with a machine-readable code for the server. */
-class CommandError extends Error {
-	constructor(
-		readonly code: string,
-		message: string,
-	) {
-		super(message);
-	}
-}
-
-function nodeNotFound(id: string) {
-	return new CommandError(
-		"node_not_found",
-		`No node with ID "${id}" exists in this file. Node IDs look like "12:34"; get them from get_selection, list_frames or a parent node's children.`,
-	);
-}
 
 const implementations: CommandImplementations = {
 	ping: () => ({ pong: true }),
@@ -101,6 +86,9 @@ const implementations: CommandImplementations = {
 		});
 		return { png: figma.base64Encode(bytes) };
 	},
+
+	create_nodes: createNodes,
+	update_nodes: updateNodes,
 };
 
 function pageRef(page: PageNode) {
@@ -144,11 +132,7 @@ export function createCommandHandler({
 				const result = await implementation(params.data);
 				return { type: "response", id, ok: true, result };
 			} catch (error) {
-				return failure(
-					id,
-					error instanceof CommandError ? error.code : "command_failed",
-					error instanceof Error ? error.message : String(error),
-				);
+				return { type: "response", id, ok: false, error: toBridgeError(error) };
 			}
 		},
 	};

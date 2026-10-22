@@ -55,39 +55,51 @@ export const ColorStop = z.object({
 	opacity: z.number(),
 });
 
+const paintExtras = {
+	opacity: z.number().optional(),
+	visible: z.literal(false).optional(),
+};
+const SolidPaint = z.object({
+	type: z.literal("SOLID"),
+	color: HexColor,
+	...paintExtras,
+});
+const GradientPaint = z.object({
+	type: z.enum([
+		"GRADIENT_LINEAR",
+		"GRADIENT_RADIAL",
+		"GRADIENT_ANGULAR",
+		"GRADIENT_DIAMOND",
+	]),
+	stops: z.array(ColorStop),
+	...paintExtras,
+});
+const ImagePaint = z.object({
+	type: z.literal("IMAGE"),
+	imageHash: z.string().nullable(),
+	scaleMode: z.string(),
+	...paintExtras,
+});
+
 /** A compact Figma Paint: solids as hex, gradients as stops, images by hash. */
 export const Paint = z.discriminatedUnion("type", [
-	z.object({
-		type: z.literal("SOLID"),
-		color: HexColor,
-		opacity: z.number().optional(),
-		visible: z.literal(false).optional(),
-	}),
-	z.object({
-		type: z.enum([
-			"GRADIENT_LINEAR",
-			"GRADIENT_RADIAL",
-			"GRADIENT_ANGULAR",
-			"GRADIENT_DIAMOND",
-		]),
-		stops: z.array(ColorStop),
-		opacity: z.number().optional(),
-		visible: z.literal(false).optional(),
-	}),
-	z.object({
-		type: z.literal("IMAGE"),
-		imageHash: z.string().nullable(),
-		scaleMode: z.string(),
-		opacity: z.number().optional(),
-		visible: z.literal(false).optional(),
-	}),
+	SolidPaint,
+	GradientPaint,
+	ImagePaint,
 	z.object({
 		type: z.enum(["VIDEO", "PATTERN", "SHADER"]),
-		opacity: z.number().optional(),
-		visible: z.literal(false).optional(),
+		...paintExtras,
 	}),
 ]);
 export type Paint = z.infer<typeof Paint>;
+
+/** The paints agents can write: the read shape, minus video/pattern/shader. */
+export const PaintInput = z.discriminatedUnion("type", [
+	SolidPaint,
+	GradientPaint,
+	ImagePaint,
+]);
+export type PaintInput = z.infer<typeof PaintInput>;
 
 export const FontName = z.object({ family: z.string(), style: z.string() });
 
@@ -197,6 +209,123 @@ export function isFrameType(type: string): boolean {
 	return (FRAME_TYPES as readonly string[]).includes(type);
 }
 
+/** A failure the plugin reports, with a machine-readable code. */
+export const BridgeError = z.object({
+	code: z.string(),
+	message: z.string(),
+});
+export type BridgeError = z.infer<typeof BridgeError>;
+
+const Sizing = z.enum(["FIXED", "HUG", "FILL"]);
+
+/**
+ * Properties `create_nodes` and `update_nodes` set. They mirror the read
+ * shape (`SerializedNode`), every field optional; only the given ones change.
+ */
+export const NodeProps = z.object({
+	name: z.string().optional(),
+	x: z.number().optional(),
+	y: z.number().optional(),
+	width: z.number().positive().optional(),
+	height: z.number().positive().optional(),
+	rotation: z.number().optional(),
+	opacity: z.number().min(0).max(1).optional(),
+	visible: z.boolean().optional(),
+	cornerRadius: CornerRadius.optional(),
+	fills: z.array(PaintInput).optional(),
+	strokes: z.array(PaintInput).optional(),
+	strokeWeight: z.number().min(0).optional(),
+	text: z
+		.object({
+			characters: z.string(),
+			fontName: FontName,
+			fontSize: z.number().positive(),
+			textAlignHorizontal: z.enum(["LEFT", "CENTER", "RIGHT", "JUSTIFIED"]),
+		})
+		.partial()
+		.optional(),
+	layout: z
+		.object({
+			// NONE turns auto-layout off.
+			mode: z.enum(["NONE", "HORIZONTAL", "VERTICAL"]),
+			itemSpacing: z.number(),
+			padding: z
+				.object({
+					top: z.number(),
+					right: z.number(),
+					bottom: z.number(),
+					left: z.number(),
+				})
+				.partial(),
+			primaryAxisAlignItems: z.enum(["MIN", "CENTER", "MAX", "SPACE_BETWEEN"]),
+			counterAxisAlignItems: z.enum(["MIN", "CENTER", "MAX", "BASELINE"]),
+			wrap: z.boolean(),
+			// Applies to the node itself: HUG its content, FILL its auto-layout
+			// parent, or keep a FIXED size.
+			sizing: z.object({ horizontal: Sizing, vertical: Sizing }).partial(),
+		})
+		.partial()
+		.optional(),
+});
+export type NodeProps = z.infer<typeof NodeProps>;
+
+export const CREATABLE_TYPES = [
+	"FRAME",
+	"TEXT",
+	"RECTANGLE",
+	"INSTANCE",
+] as const;
+
+export type NodeSpec = NodeProps & {
+	type: (typeof CREATABLE_TYPES)[number];
+	componentId?: string;
+	children?: NodeSpec[];
+};
+
+/** One node to create, with its children nested below it. */
+export const NodeSpec: z.ZodType<NodeSpec> = NodeProps.extend({
+	type: z.enum(CREATABLE_TYPES),
+	// The COMPONENT an INSTANCE is created from.
+	componentId: z.string().min(1).optional(),
+	get children() {
+		return z.array(NodeSpec).optional();
+	},
+});
+
+export type CreatedNode =
+	| {
+			ok: true;
+			id: string;
+			name: string;
+			type: string;
+			children?: CreatedNode[];
+	  }
+	| { ok: false; error: BridgeError };
+
+/** Per-spec outcome of `create_nodes`, in the order the specs were given. */
+export const CreatedNode: z.ZodType<CreatedNode> = z.discriminatedUnion("ok", [
+	z.object({
+		ok: z.literal(true),
+		id: z.string(),
+		name: z.string(),
+		type: z.string(),
+		get children() {
+			return z.array(CreatedNode).optional();
+		},
+	}),
+	z.object({ ok: z.literal(false), error: BridgeError }),
+]);
+
+export const NodeUpdate = NodeProps.extend({ id: z.string().min(1) });
+export type NodeUpdate = z.infer<typeof NodeUpdate>;
+
+/** Per-update outcome of `update_nodes`, in the order the updates were given. */
+export const UpdatedNode = z.discriminatedUnion("ok", [
+	z.object({ id: z.string(), ok: z.literal(true) }),
+	z.object({ id: z.string(), ok: z.literal(false), error: BridgeError }),
+]);
+export type UpdatedNode = z.infer<typeof UpdatedNode>;
+
 /** How many levels of children to include below each returned node. */
 export const Depth = z.number().int().min(0).max(100);
 export const DEFAULT_DEPTH = 2;
@@ -237,6 +366,18 @@ export const commands = {
 		// PNG bytes, base64-encoded so they survive the JSON bridge.
 		result: z.object({ png: z.base64() }),
 	},
+	create_nodes: {
+		params: z.object({
+			// Defaults to the current page.
+			parentId: z.string().min(1).optional(),
+			nodes: z.array(NodeSpec).min(1),
+		}),
+		result: z.object({ nodes: z.array(CreatedNode) }),
+	},
+	update_nodes: {
+		params: z.object({ updates: z.array(NodeUpdate).min(1) }),
+		result: z.object({ nodes: z.array(UpdatedNode) }),
+	},
 } as const;
 
 export type CommandName = keyof typeof commands;
@@ -257,12 +398,6 @@ export const Request = z.object({
 	params: z.unknown(),
 });
 export type Request = z.infer<typeof Request>;
-
-export const BridgeError = z.object({
-	code: z.string(),
-	message: z.string(),
-});
-export type BridgeError = z.infer<typeof BridgeError>;
 
 /** Plugin → server, answers the request with the same `id`. */
 export const Response = z.discriminatedUnion("ok", [

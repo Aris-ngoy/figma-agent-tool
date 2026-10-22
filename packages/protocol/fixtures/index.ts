@@ -361,6 +361,173 @@ export const exportMissingNodeResponse = nodeNotFoundResponse(
 	exportMissingNodeRequest.params.nodeId,
 );
 
+/** Fonts installed for the fixture file; loading any other font fails. */
+export const availableFonts = [
+	{ family: "Inter", style: "Regular" },
+	{ family: "Inter", style: "Italic" },
+	{ family: "Inter", style: "Semi Bold" },
+	{ family: "Inter", style: "Bold" },
+];
+
+/** The ID the fakes give the `n`th node created in a session (from 1). */
+export function createdNodeId(n: number): string {
+	return `100:${n}`;
+}
+
+/** Per-node error when a text edit needs a font that isn't installed. */
+export function fontNotFoundError(font: { family: string; style: string }) {
+	return {
+		code: "font_not_found",
+		message: `Font "${font.family} ${font.style}" isn't available in this file. Use an installed font, such as one an existing text node's fontName shows.`,
+	};
+}
+
+/** Per-node error when an INSTANCE spec's componentId isn't a component. */
+export function notAComponentError(id: string, type?: string) {
+	return {
+		code: "component_not_found",
+		message: `${type ? `Node ${id} is a ${type}, not` : `No node with ID "${id}" exists, so it isn't`} a COMPONENT. Use a component's ID (a variant's, for component sets); list_frames lists the components on each page.`,
+	};
+}
+
+/** Builds a sign-in card inside the empty Home frame. */
+export const createNodesRequest = {
+	type: "request",
+	id: "req-8",
+	command: "create_nodes",
+	params: {
+		parentId: "1:10",
+		nodes: [
+			{
+				type: "FRAME",
+				name: "Card",
+				width: 345,
+				height: 200,
+				cornerRadius: 16,
+				fills: [{ type: "SOLID", color: "#f5f5f5" }],
+				layout: {
+					mode: "VERTICAL",
+					itemSpacing: 12,
+					padding: { top: 24, right: 24, bottom: 24, left: 24 },
+					sizing: { vertical: "HUG" },
+				},
+				children: [
+					{
+						type: "TEXT",
+						name: "Heading",
+						text: {
+							characters: "Sign in",
+							fontName: { family: "Inter", style: "Bold" },
+							fontSize: 24,
+						},
+					},
+					{ type: "INSTANCE", componentId: "2:1", name: "Submit" },
+				],
+			},
+			{
+				type: "RECTANGLE",
+				name: "Backdrop",
+				x: 0,
+				y: 600,
+				width: 393,
+				height: 252,
+				fills: [{ type: "SOLID", color: "#3366ff", opacity: 0.2 }],
+			},
+		],
+	},
+} satisfies Request;
+
+export const createNodesResponse = {
+	type: "response",
+	id: "req-8",
+	ok: true,
+	result: {
+		nodes: [
+			{
+				ok: true,
+				id: createdNodeId(1),
+				name: "Card",
+				type: "FRAME",
+				children: [
+					{ ok: true, id: createdNodeId(2), name: "Heading", type: "TEXT" },
+					{ ok: true, id: createdNodeId(3), name: "Submit", type: "INSTANCE" },
+				],
+			},
+			{ ok: true, id: createdNodeId(4), name: "Backdrop", type: "RECTANGLE" },
+		],
+	},
+} satisfies Response;
+
+/** A batch where some specs fail: each failure is reported in place. */
+export const createNodesPartlyRequest = {
+	type: "request",
+	id: "req-9",
+	command: "create_nodes",
+	params: {
+		nodes: [
+			{
+				type: "TEXT",
+				text: {
+					characters: "Hello",
+					fontName: { family: "Comic Neue", style: "Regular" },
+				},
+			},
+			{ type: "INSTANCE", componentId: "1:1" },
+			{ type: "RECTANGLE", name: "Kept" },
+		],
+	},
+} satisfies Request;
+
+export const createNodesPartlyResponse = {
+	type: "response",
+	id: "req-9",
+	ok: true,
+	result: {
+		nodes: [
+			{
+				ok: false,
+				error: fontNotFoundError({ family: "Comic Neue", style: "Regular" }),
+			},
+			{ ok: false, error: notAComponentError("1:1", "FRAME") },
+			{ ok: true, id: createdNodeId(1), name: "Kept", type: "RECTANGLE" },
+		],
+	},
+} satisfies Response;
+
+/** Updates three nodes; the unknown ID and the missing font fail alone. */
+export const updateNodesRequest = {
+	type: "request",
+	id: "req-10",
+	command: "update_nodes",
+	params: {
+		updates: [
+			{ id: "1:2", text: { characters: "Hi again" } },
+			{ id: "9:99", opacity: 0.5 },
+			{
+				id: "1:4",
+				text: { fontName: { family: "Comic Neue", style: "Bold" } },
+			},
+		],
+	},
+} satisfies Request;
+
+export const updateNodesResponse = {
+	type: "response",
+	id: "req-10",
+	ok: true,
+	result: {
+		nodes: [
+			{ id: "1:2", ok: true },
+			{ id: "9:99", ok: false, error: nodeNotFoundResponse("", "9:99").error },
+			{
+				id: "1:4",
+				ok: false,
+				error: fontNotFoundError({ family: "Comic Neue", style: "Bold" }),
+			},
+		],
+	},
+} satisfies Response;
+
 /**
  * Every request the fakes know how to answer, paired with the plugin's
  * response. The fake plugin matches on command + params; the plugin tests
@@ -374,4 +541,7 @@ export const exchanges: [Request, Response][] = [
 	[exportFrameRequest, exportFrameResponse],
 	[exportPageRequest, exportPageResponse],
 	[exportMissingNodeRequest, exportMissingNodeResponse],
+	[createNodesRequest, createNodesResponse],
+	[createNodesPartlyRequest, createNodesPartlyResponse],
+	[updateNodesRequest, updateNodesResponse],
 ];

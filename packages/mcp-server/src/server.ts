@@ -6,6 +6,7 @@ import { z } from "zod";
 import packageJson from "../package.json" with { type: "json" };
 import { DEFAULT_ARTIFACTS_DIR, pngSize, writeArtifact } from "./artifacts";
 import type { Bridge } from "./bridge";
+import { registerEditTools } from "./edit-tools";
 import { registerFigmaTool } from "./figma-tool";
 import { registerReadTools } from "./read-tools";
 
@@ -49,6 +50,7 @@ export function createMcpServer({
 	);
 
 	registerReadTools(server, bridge);
+	registerEditTools(server, bridge);
 
 	registerFigmaTool(
 		server,

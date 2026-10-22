@@ -5,6 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	type BridgeError,
 	commands,
 	type Handshake,
 	isFrameType,
@@ -15,6 +16,7 @@ import {
 	type ServerMessage,
 } from "@figma-agent-tool/protocol";
 import {
+	type DocumentFixture,
 	document,
 	exchanges,
 	findNode,
@@ -29,6 +31,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { type Bridge, startBridge } from "../src/bridge";
 import { createMcpServer } from "../src/server";
+import { createFakeEditor } from "./fake-edits";
 
 const cleanups: (() => unknown)[] = [];
 
@@ -83,8 +86,22 @@ export async function startHarness({
 	};
 }
 
-/** Answers server requests from the shared document and message fixtures. */
-function answer(message: ServerMessage): Response | undefined {
+type FakeDocument = {
+	document: DocumentFixture;
+	editor: ReturnType<typeof createFakeEditor>;
+};
+
+/** A copy of the document fixture that this fake plugin's edits change. */
+function fakeDocument(): FakeDocument {
+	const copy = structuredClone(document);
+	return { document: copy, editor: createFakeEditor(copy) };
+}
+
+/** Answers server requests from the plugin's document and the fixtures. */
+function answer(
+	message: ServerMessage,
+	{ document, editor }: FakeDocument,
+): Response | undefined {
 	if (message.type !== "request") return undefined;
 	const { id } = message;
 	const ok = (result: unknown): Response => ({
@@ -93,6 +110,10 @@ function answer(message: ServerMessage): Response | undefined {
 		ok: true,
 		result,
 	});
+	const okOrFailure = (result: object | BridgeError): Response =>
+		"code" in result
+			? { type: "response", id, ok: false, error: result }
+			: ok(result);
 	const currentPage = document.pages.find(
 		(page) => page.id === document.currentPageId,
 	);
@@ -108,13 +129,13 @@ function answer(message: ServerMessage): Response | undefined {
 			return ok({
 				page: currentPage && pageRef(currentPage),
 				nodes: document.selection.map((nodeId) =>
-					limitDepth(findNode(nodeId) as SerializedNode, depth),
+					limitDepth(findNode(nodeId, document) as SerializedNode, depth),
 				),
 			});
 		}
 		case "get_node": {
 			const params = commands.get_node.params.parse(message.params);
-			const node = findNode(params.id);
+			const node = findNode(params.id, document);
 			if (!node) return nodeNotFoundResponse(id, params.id);
 			return ok({ node: limitDepth(node, params.depth) });
 		}
@@ -145,6 +166,14 @@ function answer(message: ServerMessage): Response | undefined {
 					})),
 			});
 		}
+		case "create_nodes":
+			return okOrFailure(
+				editor.create_nodes(commands.create_nodes.params.parse(message.params)),
+			);
+		case "update_nodes":
+			return ok(
+				editor.update_nodes(commands.update_nodes.params.parse(message.params)),
+			);
 		default:
 			return replayExchange(message);
 	}
@@ -183,6 +212,7 @@ async function connectFakePlugin(
 ) {
 	const socket = new WebSocket(`ws://127.0.0.1:${port}`);
 	const requests: Request[] = [];
+	const fake = fakeDocument();
 	const closed = new Promise<CloseEvent>((resolve) =>
 		socket.addEventListener("close", resolve, { once: true }),
 	);
@@ -192,7 +222,7 @@ async function connectFakePlugin(
 			const message = parseServerMessage(JSON.parse(String(event.data)));
 			if (message.type === "handshake_ack") resolve();
 			if (message.type === "request") requests.push(message);
-			const response = answers ? answer(message) : undefined;
+			const response = answers ? answer(message, fake) : undefined;
 			if (response) socket.send(JSON.stringify(response));
 		});
 	});
@@ -203,7 +233,8 @@ async function connectFakePlugin(
 	await acknowledged;
 
 	return {
-		document,
+		/** This plugin's copy of the document fixture, edits included. */
+		document: fake.document,
 		/** Requests the server sent this plugin, in order. */
 		requests,
 		/** Resolves when the connection closes, from either side. */

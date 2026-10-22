@@ -1,11 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
 	document,
-	getNodeRequest,
-	getNodeResponse,
+	exchanges,
 	handshake,
-	listPagesRequest,
-	listPagesResponse,
 	pingRequest,
 	pingResponse,
 } from "../fixtures";
@@ -55,15 +52,14 @@ describe("document fixture", () => {
 		}
 	});
 
-	test("read command responses are valid results for their commands", () => {
-		const pairs = [
-			[getNodeRequest, getNodeResponse],
-			[listPagesRequest, listPagesResponse],
-		] as const;
-		for (const [request, response] of pairs) {
+	test("every exchange pairs valid params with a valid correlated response", () => {
+		for (const [request, response] of exchanges) {
 			expect(response.id).toBe(request.id);
-			const { result } = commands[request.command];
-			expect(result.parse(response.result)).toEqual(response.result);
+			const { params, result } = commands[request.command];
+			expect(params.parse(request.params)).toEqual(request.params as never);
+			if (response.ok) {
+				expect(result.parse(response.result)).toEqual(response.result as never);
+			}
 		}
 	});
 });

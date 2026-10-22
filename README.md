@@ -47,3 +47,7 @@ bun run check      # Biome lint + format
 ## Artifacts
 
 Image outputs such as `export_node_image` are written to `.figma-agent/` in the server's working directory and returned as file paths (inline images only on request). Set `FIGMA_AGENT_ARTIFACTS_DIR` to write them elsewhere. Add `.figma-agent/` to your project's `.gitignore`; this repo already ignores it.
+
+## Editing
+
+`create_nodes` and `update_nodes` take batches: a whole screen (frames with nested `children`, text, rectangles, component instances) can be built in one call. Properties use the same shape `get_node` returns. Each item succeeds or fails on its own, and the result lists every item in input order with its new ID or an error code (`font_not_found`, `component_not_found`, `unsupported_property`, …). Each batch is committed as one undo step, so Cmd+Z in Figma reverts the agent's last call.
