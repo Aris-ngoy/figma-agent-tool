@@ -117,8 +117,7 @@ export function registerDeviceTools(
 				`device-${device.platform}-${device.deviceId}`,
 				png,
 			);
-			const { content, structuredContent } = jsonResult({ ...image, device });
-			const result: CallToolResult = { content, structuredContent };
+			const result: CallToolResult = jsonResult({ ...image, device });
 			if (inline) {
 				result.content.push({
 					type: "image",

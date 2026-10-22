@@ -4,7 +4,7 @@ import { z } from "zod";
 import {
 	ActiveDevice,
 	type ConnectOptions,
-	type Device,
+	Device,
 	DevicePlatform,
 	type DeviceRunner,
 	DeviceRunnerError,
@@ -25,7 +25,7 @@ const YoqaDevice = z.object({
 	name: z.string(),
 	osVersion: z.string(),
 	platform: DevicePlatform,
-	kind: z.enum(["simulator", "emulator", "physical"]),
+	kind: Device.shape.kind,
 	state: z.string().optional(),
 	model: z.string().optional(),
 	unavailableReason: z.string().optional(),
@@ -131,11 +131,10 @@ async function runnerError(response: Response): Promise<DeviceRunnerError> {
 	try {
 		body = YoqaError.parse(JSON.parse(text));
 	} catch {}
-	const reason = body
-		? body.detail
-			? `${body.error}: ${body.detail}`
-			: body.error
-		: `HTTP ${response.status}${text ? ` ${text}` : ""}`;
+	let reason: string;
+	if (!body) reason = `HTTP ${response.status}${text ? ` ${text}` : ""}`;
+	else if (body.detail) reason = `${body.error}: ${body.detail}`;
+	else reason = body.error;
 	return new DeviceRunnerError(
 		`Yoqa runner error: ${reason}. See ${YOQA_DOCS_URL} for device setup.`,
 	);

@@ -26,6 +26,15 @@ function integerEnv(
 	return value;
 }
 
+function urlEnv(name: string, fallback: string): string {
+	const raw = process.env[name] || fallback;
+	if (!URL.canParse(raw) || !/^https?:$/.test(new URL(raw).protocol)) {
+		console.error(`Invalid ${name}: ${raw}`);
+		process.exit(1);
+	}
+	return raw;
+}
+
 const bridge = startBridge({
 	port: integerEnv("FIGMA_AGENT_BRIDGE_PORT", DEFAULT_BRIDGE_PORT, {
 		min: 0,
@@ -39,15 +48,6 @@ const bridge = startBridge({
 	),
 });
 console.error(`[bridge] listening on ws://${BRIDGE_HOSTNAME}:${bridge.port}`);
-
-function urlEnv(name: string, fallback: string): string {
-	const raw = process.env[name] || fallback;
-	if (!URL.canParse(raw) || !/^https?:$/.test(new URL(raw).protocol)) {
-		console.error(`Invalid ${name}: ${raw}`);
-		process.exit(1);
-	}
-	return raw;
-}
 
 const server = createMcpServer({
 	bridge,
