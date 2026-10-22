@@ -1,0 +1,22 @@
+{
+	"name": "figma-agent-tool",
+	"version": "0.0.0",
+	"type": "module",
+	"license": "MIT",
+	"packageManager": "bun@1.2.23",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/Aris-ngoy/figma-agent-tool.git"
+	},
+	"scripts": {
+		"lint": "biome lint .",
+		"format": "biome format --write .",
+		"check": "biome check .",
+		"check:fix": "biome check --write .",
+		"prepare": "husky"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.6.2",
+		"husky": "9.1.7"
+	}
+}
