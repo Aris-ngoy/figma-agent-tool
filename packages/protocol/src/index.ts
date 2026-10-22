@@ -6,6 +6,13 @@ export const PROTOCOL_VERSION = 1;
 /** Default localhost port the MCP server hosts the bridge on. */
 export const DEFAULT_BRIDGE_PORT = 3055;
 
+/**
+ * WebSocket close code the server uses when a newer plugin connection
+ * replaces this one. The plugin must not reconnect on it, or two open plugin
+ * instances would keep replacing each other.
+ */
+export const CLOSE_CODE_REPLACED = 4001;
+
 export const Capabilities = z.object({
 	motion: z.boolean(),
 });

@@ -7,11 +7,7 @@ import {
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import packageJson from "../package.json" with { type: "json" };
-import {
-	type Bridge,
-	BridgeNotConnectedError,
-	PluginCommandError,
-} from "./bridge";
+import { type Bridge, BridgeRequestError } from "./bridge";
 
 export function createMcpServer({ bridge }: { bridge: Bridge }): McpServer {
 	const server = new McpServer({
@@ -67,12 +63,7 @@ export function registerFigmaTool<Shape extends z.ZodRawShape>(
 				...args,
 			);
 		} catch (error) {
-			if (
-				error instanceof BridgeNotConnectedError ||
-				error instanceof PluginCommandError
-			) {
-				return toolError(error.message);
-			}
+			if (error instanceof BridgeRequestError) return toolError(error.message);
 			throw error;
 		}
 	}) as ToolCallback<Shape>;

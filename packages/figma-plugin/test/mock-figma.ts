@@ -7,8 +7,15 @@ import type { document as documentFixture } from "@figma-agent-tool/protocol/fix
 type DocumentFixture = typeof documentFixture;
 
 export function installMockFigma(document: DocumentFixture) {
+	const storage = new Map<string, unknown>();
 	const mock = {
 		fileKey: document.fileKey,
+		clientStorage: {
+			getAsync: async (key: string) => storage.get(key),
+			setAsync: async (key: string, value: unknown) => {
+				storage.set(key, value);
+			},
+		},
 		root: {
 			name: document.name,
 			children: document.pages.map((page) => ({ ...page, type: "PAGE" })),

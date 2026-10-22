@@ -3,6 +3,7 @@
 import {
 	type BridgeError,
 	type Capabilities,
+	CLOSE_CODE_REPLACED,
 	type CommandName,
 	type CommandParams,
 	type CommandResult,
@@ -17,6 +18,9 @@ import packageJson from "../package.json" with { type: "json" };
 
 export const BRIDGE_HOSTNAME = "127.0.0.1";
 
+/** How long a command may run before the agent gets a timeout error. */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
 export type BridgeStatus =
 	| { connected: false; port: number }
 	| {
@@ -29,8 +33,11 @@ export type BridgeStatus =
 
 export type Bridge = ReturnType<typeof startBridge>;
 
+/** Base class for bridge failures the agent should see as tool errors. */
+export class BridgeRequestError extends Error {}
+
 /** Thrown when a Figma-backed command runs without a connected plugin. */
-export class BridgeNotConnectedError extends Error {
+export class BridgeNotConnectedError extends BridgeRequestError {
 	constructor(port: number) {
 		super(
 			"No Figma plugin is connected. Open the Figma Agent Tool plugin in " +
@@ -41,8 +48,31 @@ export class BridgeNotConnectedError extends Error {
 	}
 }
 
+/** The plugin didn't answer a command within its timeout. */
+export class BridgeTimeoutError extends BridgeRequestError {
+	constructor(command: CommandName, timeoutMs: number) {
+		super(
+			`The Figma plugin did not answer \`${command}\` within ${timeoutMs} ms, ` +
+				"so the command timed out. Check that the plugin is still open and " +
+				"Figma isn't busy, then retry.",
+		);
+		this.name = "BridgeTimeoutError";
+	}
+}
+
+/** The plugin connection went away while a command was in flight. */
+export class BridgeConnectionLostError extends BridgeRequestError {
+	constructor(command: CommandName, reason: string) {
+		super(
+			`The Figma plugin connection ${reason} while \`${command}\` was ` +
+				"running, so its result is unknown. Check the document, then retry.",
+		);
+		this.name = "BridgeConnectionLostError";
+	}
+}
+
 /** The plugin answered a request with an error response. */
-export class PluginCommandError extends Error {
+export class PluginCommandError extends BridgeRequestError {
 	readonly code: string;
 	constructor({ code, message }: BridgeError) {
 		super(message);
@@ -59,16 +89,26 @@ type Session = {
 };
 
 type Pending = {
+	command: CommandName;
 	resolve: (result: unknown) => void;
 	reject: (error: Error) => void;
 };
 
-export function startBridge({ port }: { port: number }) {
+export function startBridge({
+	port,
+	requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+	log = console.error,
+}: {
+	port: number;
+	requestTimeoutMs?: number;
+	/** Diagnostics sink; stdout belongs to MCP, so this defaults to stderr. */
+	log?: (message: string) => void;
+}) {
 	let session: Session | undefined;
 	const pending = new Map<string, Pending>();
 
-	function rejectPending(error: Error) {
-		for (const { reject } of pending.values()) reject(error);
+	function rejectPending(error: (command: CommandName) => Error) {
+		for (const { command, reject } of pending.values()) reject(error(command));
 		pending.clear();
 	}
 
@@ -87,10 +127,11 @@ export function startBridge({ port }: { port: number }) {
 				try {
 					message = parsePluginMessage(JSON.parse(String(data)));
 				} catch (error) {
-					console.error("[bridge] dropped invalid plugin message", error);
+					log(`[bridge] dropped invalid plugin message: ${error}`);
 					return;
 				}
 				if (message.type === "handshake") {
+					const replaced = session?.socket !== socket ? session : undefined;
 					session = {
 						socket,
 						file: message.file,
@@ -102,7 +143,25 @@ export function startBridge({ port }: { port: number }) {
 						serverVersion: packageJson.version,
 					};
 					socket.send(JSON.stringify(ack));
-					console.error(`[bridge] plugin connected: ${message.file.name}`);
+					if (replaced) {
+						// One bridged file at a time: the newest plugin instance wins.
+						log(
+							`[bridge] warning: a newer plugin connection (“${message.file.name}”) ` +
+								`replaced the one for “${replaced.file.name}”`,
+						);
+						rejectPending(
+							(command) =>
+								new BridgeConnectionLostError(
+									command,
+									"was replaced by a newer one",
+								),
+						);
+						replaced.socket.close(
+							CLOSE_CODE_REPLACED,
+							"Replaced by a newer plugin connection",
+						);
+					}
+					log(`[bridge] plugin connected: ${message.file.name}`);
 					return;
 				}
 				const request = pending.get(message.id);
@@ -114,8 +173,10 @@ export function startBridge({ port }: { port: number }) {
 			close(socket) {
 				if (session?.socket !== socket) return;
 				session = undefined;
-				rejectPending(new BridgeNotConnectedError(server.port ?? port));
-				console.error("[bridge] plugin disconnected");
+				rejectPending(
+					(command) => new BridgeConnectionLostError(command, "closed"),
+				);
+				log("[bridge] plugin disconnected");
 			},
 		},
 	});
@@ -147,16 +208,26 @@ export function startBridge({ port }: { port: number }) {
 				command,
 				params,
 			};
+			let timeout: ReturnType<typeof setTimeout> | undefined;
 			const result = await new Promise<unknown>((resolve, reject) => {
-				pending.set(message.id, { resolve, reject });
+				pending.set(message.id, { command, resolve, reject });
+				timeout = setTimeout(() => {
+					pending.delete(message.id);
+					reject(new BridgeTimeoutError(command, requestTimeoutMs));
+				}, requestTimeoutMs);
 				session?.socket.send(JSON.stringify(message));
-			});
+			}).finally(() => clearTimeout(timeout));
 			return commands[command].result.parse(result) as CommandResult<C>;
 		},
 
-		async stop() {
-			rejectPending(new BridgeNotConnectedError(boundPort));
-			await server.stop(true);
+		stop() {
+			rejectPending(
+				(command) => new BridgeConnectionLostError(command, "closed"),
+			);
+			// Not awaited: in Bun 1.2 the returned promise never settles once the
+			// server has closed a socket itself (connection replacement), although
+			// the server does stop.
+			void server.stop(true);
 		},
 	};
 }

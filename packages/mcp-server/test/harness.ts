@@ -4,6 +4,7 @@ import { afterEach } from "bun:test";
 import {
 	type Handshake,
 	parseServerMessage,
+	type Request,
 	type Response,
 	type ServerMessage,
 } from "@figma-agent-tool/protocol";
@@ -26,10 +27,17 @@ afterEach(async () => {
 
 export async function startHarness({
 	setup,
+	requestTimeoutMs,
 }: {
 	setup?: (server: McpServer, bridge: Bridge) => void;
+	requestTimeoutMs?: number;
 } = {}) {
-	const bridge = startBridge({ port: 0 });
+	const logs: string[] = [];
+	const bridge = startBridge({
+		port: 0,
+		requestTimeoutMs,
+		log: (message) => logs.push(message),
+	});
 	cleanups.push(() => bridge.stop());
 
 	const server = createMcpServer({ bridge });
@@ -44,11 +52,13 @@ export async function startHarness({
 	return {
 		bridge,
 		client,
+		/** Everything the bridge logged, in order. */
+		logs,
 		async callTool(name: string, args: Record<string, unknown> = {}) {
 			return client.callTool({ name, arguments: args });
 		},
-		async connectFakePlugin(handshake: Handshake = handshakeFixture) {
-			const plugin = await connectFakePlugin(bridge.port, handshake);
+		async connectFakePlugin(options: FakePluginOptions = {}) {
+			const plugin = await connectFakePlugin(bridge.port, options);
 			cleanups.push(() => plugin.close());
 			return plugin;
 		},
@@ -64,14 +74,28 @@ function answer(message: ServerMessage): Response | undefined {
 	}
 }
 
-async function connectFakePlugin(port: number, handshake: Handshake) {
+type FakePluginOptions = {
+	handshake?: Handshake;
+	/** When false, the plugin receives requests but never answers them. */
+	answers?: boolean;
+};
+
+async function connectFakePlugin(
+	port: number,
+	{ handshake = handshakeFixture, answers = true }: FakePluginOptions,
+) {
 	const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+	const requests: Request[] = [];
+	const closed = new Promise<CloseEvent>((resolve) =>
+		socket.addEventListener("close", resolve, { once: true }),
+	);
 	const acknowledged = new Promise<void>((resolve, reject) => {
 		socket.addEventListener("error", () => reject(new Error("socket error")));
 		socket.addEventListener("message", (event) => {
 			const message = parseServerMessage(JSON.parse(String(event.data)));
 			if (message.type === "handshake_ack") resolve();
-			const response = answer(message);
+			if (message.type === "request") requests.push(message);
+			const response = answers ? answer(message) : undefined;
 			if (response) socket.send(JSON.stringify(response));
 		});
 	});
@@ -83,12 +107,12 @@ async function connectFakePlugin(port: number, handshake: Handshake) {
 
 	return {
 		document,
+		/** Requests the server sent this plugin, in order. */
+		requests,
+		/** Resolves when the connection closes, from either side. */
+		closed,
 		async close() {
-			if (socket.readyState === WebSocket.CLOSED) return;
-			const closed = new Promise((resolve) =>
-				socket.addEventListener("close", resolve, { once: true }),
-			);
-			socket.close();
+			if (socket.readyState !== WebSocket.CLOSED) socket.close();
 			await closed;
 		},
 	};
