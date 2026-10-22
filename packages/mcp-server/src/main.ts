@@ -10,6 +10,7 @@ import {
 	startBridge,
 } from "./bridge";
 import { createMcpServer } from "./server";
+import { createYoqaRunner, DEFAULT_YOQA_URL } from "./yoqa-runner";
 
 function integerEnv(
 	name: string,
@@ -39,8 +40,20 @@ const bridge = startBridge({
 });
 console.error(`[bridge] listening on ws://${BRIDGE_HOSTNAME}:${bridge.port}`);
 
+function urlEnv(name: string, fallback: string): string {
+	const raw = process.env[name] || fallback;
+	if (!URL.canParse(raw) || !/^https?:$/.test(new URL(raw).protocol)) {
+		console.error(`Invalid ${name}: ${raw}`);
+		process.exit(1);
+	}
+	return raw;
+}
+
 const server = createMcpServer({
 	bridge,
+	deviceRunner: createYoqaRunner({
+		baseUrl: urlEnv("FIGMA_AGENT_YOQA_URL", DEFAULT_YOQA_URL),
+	}),
 	artifactsDir: process.env.FIGMA_AGENT_ARTIFACTS_DIR || undefined,
 });
 await server.connect(new StdioServerTransport());

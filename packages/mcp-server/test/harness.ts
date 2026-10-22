@@ -29,6 +29,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { type Bridge, startBridge } from "../src/bridge";
 import { createMcpServer } from "../src/server";
+import { createYoqaRunner } from "../src/yoqa-runner";
+import { startFakeYoqa } from "./fake-yoqa";
 
 const cleanups: (() => unknown)[] = [];
 
@@ -40,10 +42,13 @@ export async function startHarness({
 	setup,
 	requestTimeoutMs,
 	artifactsDir,
+	yoqaRunning = true,
 }: {
 	setup?: (server: McpServer, bridge: Bridge) => void;
 	requestTimeoutMs?: number;
 	artifactsDir?: string;
+	/** When false, the runner URL points at a port nothing listens on. */
+	yoqaRunning?: boolean;
 } = {}) {
 	const logs: string[] = [];
 	const bridge = startBridge({
@@ -57,7 +62,12 @@ export async function startHarness({
 	cleanups.push(() => rm(scratch, { recursive: true, force: true }));
 	artifactsDir ??= join(scratch, "artifacts");
 
-	const server = createMcpServer({ bridge, artifactsDir });
+	const yoqa = startFakeYoqa();
+	cleanups.push(() => yoqa.stop());
+	if (!yoqaRunning) yoqa.stop();
+	const deviceRunner = createYoqaRunner({ baseUrl: yoqa.url });
+
+	const server = createMcpServer({ bridge, artifactsDir, deviceRunner });
 	setup?.(server, bridge);
 	const client = new Client({ name: "test-client", version: "0.0.0" });
 	const [clientTransport, serverTransport] =
@@ -72,6 +82,7 @@ export async function startHarness({
 		/** Everything the bridge logged, in order. */
 		logs,
 		artifactsDir,
+		yoqa,
 		async callTool(name: string, args: Record<string, unknown> = {}) {
 			return client.callTool({ name, arguments: args });
 		},

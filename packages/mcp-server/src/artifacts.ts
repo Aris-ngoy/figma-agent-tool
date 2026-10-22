@@ -30,7 +30,18 @@ export function pngSize(bytes: Uint8Array): { width: number; height: number } {
 	const isPng =
 		bytes.length >= 24 &&
 		PNG_SIGNATURE.every((byte, index) => bytes[index] === byte);
-	if (!isPng) throw new Error("The plugin returned bytes that are not a PNG.");
+	if (!isPng) throw new Error("Expected a PNG image but got other bytes.");
 	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	return { width: view.getUint32(16), height: view.getUint32(20) };
+}
+
+/** Writes a PNG artifact and returns its path and pixel size. */
+export async function writePngArtifact(
+	artifactsDir: string,
+	name: string,
+	bytes: Uint8Array,
+): Promise<{ path: string; width: number; height: number }> {
+	const size = pngSize(bytes);
+	const path = await writeArtifact(artifactsDir, name, "png", bytes);
+	return { path, ...size };
 }

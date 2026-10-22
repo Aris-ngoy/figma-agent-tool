@@ -4,16 +4,20 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import packageJson from "../package.json" with { type: "json" };
-import { DEFAULT_ARTIFACTS_DIR, pngSize, writeArtifact } from "./artifacts";
+import { DEFAULT_ARTIFACTS_DIR, writePngArtifact } from "./artifacts";
 import type { Bridge } from "./bridge";
+import { type DeviceRunner, RunnerStatus } from "./device-runner";
+import { registerDeviceTools } from "./device-tools";
 import { registerFigmaTool } from "./figma-tool";
 import { registerReadTools } from "./read-tools";
 
 export function createMcpServer({
 	bridge,
 	artifactsDir = DEFAULT_ARTIFACTS_DIR,
+	deviceRunner,
 }: {
 	bridge: Bridge;
+	deviceRunner: DeviceRunner;
 	/** Where image outputs are written. */
 	artifactsDir?: string;
 }): McpServer {
@@ -26,7 +30,9 @@ export function createMcpServer({
 		"get_status",
 		{
 			description:
-				"Report whether the Figma plugin bridge is connected and which file it bridges.",
+				"Report whether the Figma plugin bridge is connected and which file " +
+				"it bridges, whether the Yoqa device runner is reachable, and which " +
+				"device is active.",
 			outputSchema: {
 				bridge: z.object({
 					connected: z.boolean(),
@@ -37,10 +43,14 @@ export function createMcpServer({
 					pluginVersion: z.string().optional(),
 					capabilities: z.object({ motion: z.boolean() }).optional(),
 				}),
+				runner: RunnerStatus,
 			},
 		},
 		async () => {
-			const structuredContent = { bridge: bridge.status() };
+			const structuredContent = {
+				bridge: bridge.status(),
+				runner: await deviceRunner.status(),
+			};
 			return {
 				content: [{ type: "text", text: JSON.stringify(structuredContent) }],
 				structuredContent,
@@ -49,6 +59,7 @@ export function createMcpServer({
 	);
 
 	registerReadTools(server, bridge);
+	registerDeviceTools(server, deviceRunner, artifactsDir);
 
 	registerFigmaTool(
 		server,
@@ -83,15 +94,11 @@ export function createMcpServer({
 				nodeId,
 				scale,
 			});
-			const bytes = Buffer.from(png, "base64");
-			const { width, height } = pngSize(bytes);
-			const path = await writeArtifact(
+			const structuredContent = await writePngArtifact(
 				artifactsDir,
 				`node-${nodeId}@${scale}x`,
-				"png",
-				bytes,
+				Buffer.from(png, "base64"),
 			);
-			const structuredContent = { path, width, height };
 			const content: CallToolResult["content"] = [
 				{ type: "text", text: JSON.stringify(structuredContent) },
 			];
