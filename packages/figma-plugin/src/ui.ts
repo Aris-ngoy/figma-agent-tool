@@ -24,11 +24,13 @@ function render() {
 	if (!state || !file) return;
 	state.textContent = acknowledged ? "Connected" : "Disconnected";
 	state.dataset.connected = String(acknowledged);
-	file.textContent = handshake
-		? acknowledged
-			? `Bridging “${handshake.file.name}”`
-			: `Waiting for the MCP server on ${BRIDGE_URL}`
-		: "";
+	file.textContent = fileStatus();
+}
+
+function fileStatus(): string {
+	if (!handshake) return "";
+	if (acknowledged) return `Bridging “${handshake.file.name}”`;
+	return `Waiting for the MCP server on ${BRIDGE_URL}`;
 }
 
 function connect() {

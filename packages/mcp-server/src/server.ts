@@ -1,10 +1,9 @@
 // The MCP tool surface. Figma-backed tools go through `registerFigmaTool`,
 // which turns bridge failures into actionable tool errors.
-import type {
+import {
 	McpServer,
-	ToolCallback,
+	type ToolCallback,
 } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { McpServer as Server } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import packageJson from "../package.json" with { type: "json" };
@@ -15,7 +14,7 @@ import {
 } from "./bridge";
 
 export function createMcpServer({ bridge }: { bridge: Bridge }): McpServer {
-	const server = new Server({
+	const server = new McpServer({
 		name: "figma-agent-tool",
 		version: packageJson.version,
 	});

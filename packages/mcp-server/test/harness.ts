@@ -1,9 +1,10 @@
 // Seam 1 harness: the real MCP server and bridge, driven by an in-memory MCP
 // client, with a fake plugin that speaks the real protocol over WebSocket.
 import { afterEach } from "bun:test";
-import type { Handshake, Response } from "@figma-agent-tool/protocol";
 import {
+	type Handshake,
 	parseServerMessage,
+	type Response,
 	type ServerMessage,
 } from "@figma-agent-tool/protocol";
 import {
