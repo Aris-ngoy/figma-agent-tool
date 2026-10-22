@@ -39,7 +39,10 @@ const bridge = startBridge({
 });
 console.error(`[bridge] listening on ws://${BRIDGE_HOSTNAME}:${bridge.port}`);
 
-const server = createMcpServer({ bridge });
+const server = createMcpServer({
+	bridge,
+	artifactsDir: process.env.FIGMA_AGENT_ARTIFACTS_DIR || undefined,
+});
 await server.connect(new StdioServerTransport());
 
 async function shutdown() {

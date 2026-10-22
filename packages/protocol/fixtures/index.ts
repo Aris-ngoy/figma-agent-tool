@@ -312,3 +312,66 @@ export function pageNotFoundResponse(requestId: string, pageId: string) {
 		},
 	} satisfies Response;
 }
+
+/** A 4×2 px PNG; the mock plugin returns it for every export. */
+export const framePng =
+	"iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAYAAAB/qH1jAAAAEklEQVR4nGMwTvv/HxkzoAsAAFR1FLllEk5AAAAAAElFTkSuQmCC";
+
+export const exportFrameRequest = {
+	type: "request",
+	id: "req-5",
+	command: "export_node_image",
+	params: { nodeId: "1:2", scale: 2 },
+} satisfies Request;
+
+export const exportFrameResponse = {
+	type: "response",
+	id: "req-5",
+	ok: true,
+	result: { png: framePng },
+} satisfies Response;
+
+export const exportPageRequest = {
+	type: "request",
+	id: "req-6",
+	command: "export_node_image",
+	params: { nodeId: "0:1", scale: 1 },
+} satisfies Request;
+
+export const exportPageResponse = {
+	type: "response",
+	id: "req-6",
+	ok: false,
+	error: {
+		code: "not_exportable",
+		message:
+			"Node 0:1 is a PAGE and cannot be exported. Export a frame, component or other layer on the canvas instead.",
+	},
+} satisfies Response;
+
+export const exportMissingNodeRequest = {
+	type: "request",
+	id: "req-7",
+	command: "export_node_image",
+	params: { nodeId: "9:99", scale: 1 },
+} satisfies Request;
+
+export const exportMissingNodeResponse = nodeNotFoundResponse(
+	exportMissingNodeRequest.id,
+	exportMissingNodeRequest.params.nodeId,
+);
+
+/**
+ * Every request the fakes know how to answer, paired with the plugin's
+ * response. The fake plugin matches on command + params; the plugin tests
+ * replay each pair against the real handler.
+ */
+export const exchanges: [Request, Response][] = [
+	[pingRequest, pingResponse],
+	[getNodeRequest, getNodeResponse],
+	[getUnknownNodeRequest, getUnknownNodeResponse],
+	[listPagesRequest, listPagesResponse],
+	[exportFrameRequest, exportFrameResponse],
+	[exportPageRequest, exportPageResponse],
+	[exportMissingNodeRequest, exportMissingNodeResponse],
+];

@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
 	document,
+	exchanges,
+	exportFrameRequest,
 	findNode,
 	getNodeRequest,
 	getNodeResponse,
@@ -40,6 +42,30 @@ describe("plugin command handler", () => {
 		expect(
 			await createCommandHandler({ pluginVersion }).handle(pingRequest),
 		).toEqual(pingResponse);
+	});
+
+	test.each(
+		exchanges.map(([request, response]) => [
+			`${request.command} ${JSON.stringify(request.params)}`,
+			request,
+			response,
+		]),
+	)("replays the %s fixture exchange", async (_name, request, response) => {
+		installMockFigma(document);
+		expect(
+			await createCommandHandler({ pluginVersion }).handle(request),
+		).toEqual(response);
+	});
+
+	test("exports a node as PNG at the requested scale", async () => {
+		const figma = installMockFigma(document);
+		await createCommandHandler({ pluginVersion }).handle(exportFrameRequest);
+		expect(figma.exports).toEqual([
+			{
+				nodeId: "1:2",
+				settings: { format: "PNG", constraint: { type: "SCALE", value: 2 } },
+			},
+		]);
 	});
 
 	test("answers an unknown command with an error response", async () => {

@@ -4,7 +4,10 @@
 // Plugin API shapes (0–1 RGB, `figma.mixed`, flattened auto-layout props).
 import { afterEach } from "bun:test";
 import type { Paint, SerializedNode } from "@figma-agent-tool/protocol";
-import type { DocumentFixture } from "@figma-agent-tool/protocol/fixtures";
+import {
+	type DocumentFixture,
+	framePng,
+} from "@figma-agent-tool/protocol/fixtures";
 
 const mixed = Symbol("figma.mixed");
 
@@ -17,11 +20,17 @@ type MockNode = Record<string, unknown> & {
 export function installMockFigma(document: DocumentFixture) {
 	const storage = new Map<string, unknown>();
 	const byId = new Map<string, MockNode>();
+	const exports: { nodeId: string; settings: unknown }[] = [];
 	const loadedPages = new Set<string>([document.currentPageId]);
 
 	function register(node: MockNode, parent?: MockNode): MockNode {
 		node.parent = parent;
 		byId.set(node.id, node);
+		// Every canvas node exports the fixture PNG; tests check the settings.
+		node.exportAsync = async (settings: unknown) => {
+			exports.push({ nodeId: node.id, settings });
+			return new Uint8Array(Buffer.from(framePng, "base64"));
+		};
 		for (const child of node.children ?? []) register(child, node);
 		return node;
 	}
@@ -71,6 +80,10 @@ export function installMockFigma(document: DocumentFixture) {
 		async getNodeByIdAsync(id: string) {
 			return byId.get(id) ?? null;
 		},
+		base64Encode(data: Uint8Array) {
+			return Buffer.from(data).toString("base64");
+		},
+		exports,
 	};
 	byId.set(mock.root.id, mock.root);
 	(globalThis as { figma?: unknown }).figma = mock;

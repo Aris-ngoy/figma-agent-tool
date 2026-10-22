@@ -1,6 +1,9 @@
 // Seam 1 harness: the real MCP server and bridge, driven by an in-memory MCP
 // client, with a fake plugin that speaks the real protocol over WebSocket.
 import { afterEach } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	commands,
 	type Handshake,
@@ -13,6 +16,7 @@ import {
 } from "@figma-agent-tool/protocol";
 import {
 	document,
+	exchanges,
 	findNode,
 	handshake as handshakeFixture,
 	limitDepth,
@@ -35,9 +39,11 @@ afterEach(async () => {
 export async function startHarness({
 	setup,
 	requestTimeoutMs,
+	artifactsDir,
 }: {
 	setup?: (server: McpServer, bridge: Bridge) => void;
 	requestTimeoutMs?: number;
+	artifactsDir?: string;
 } = {}) {
 	const logs: string[] = [];
 	const bridge = startBridge({
@@ -47,7 +53,11 @@ export async function startHarness({
 	});
 	cleanups.push(() => bridge.stop());
 
-	const server = createMcpServer({ bridge });
+	const scratch = await mkdtemp(join(tmpdir(), "figma-agent-test-"));
+	cleanups.push(() => rm(scratch, { recursive: true, force: true }));
+	artifactsDir ??= join(scratch, "artifacts");
+
+	const server = createMcpServer({ bridge, artifactsDir });
 	setup?.(server, bridge);
 	const client = new Client({ name: "test-client", version: "0.0.0" });
 	const [clientTransport, serverTransport] =
@@ -61,6 +71,7 @@ export async function startHarness({
 		client,
 		/** Everything the bridge logged, in order. */
 		logs,
+		artifactsDir,
 		async callTool(name: string, args: Record<string, unknown> = {}) {
 			return client.callTool({ name, arguments: args });
 		},
@@ -134,7 +145,30 @@ function answer(message: ServerMessage): Response | undefined {
 					})),
 			});
 		}
+		default:
+			return replayExchange(message);
 	}
+}
+
+/** Answers from the recorded fixture exchanges, matching command + params. */
+function replayExchange(message: Request): Response {
+	const exchange = exchanges.find(
+		([request]) =>
+			request.command === message.command &&
+			Bun.deepEquals(request.params, message.params),
+	);
+	if (!exchange) {
+		return {
+			type: "response",
+			id: message.id,
+			ok: false,
+			error: {
+				code: "no_fixture",
+				message: `Fake plugin has no fixture for ${message.command} ${JSON.stringify(message.params)}`,
+			},
+		};
+	}
+	return { ...exchange[1], id: message.id };
 }
 
 type FakePluginOptions = {

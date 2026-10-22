@@ -6,3 +6,6 @@ dist/
 .env.*
 !.env.example
 .turbo/
+
+# Figma Agent Tool artifacts (exported images, visual QA output)
+.figma-agent/

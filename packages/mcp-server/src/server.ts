@@ -1,12 +1,22 @@
 // The MCP tool surface. Figma-backed tools go through `registerFigmaTool`,
 // which turns bridge failures into actionable tool errors.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import packageJson from "../package.json" with { type: "json" };
+import { DEFAULT_ARTIFACTS_DIR, pngSize, writeArtifact } from "./artifacts";
 import type { Bridge } from "./bridge";
+import { registerFigmaTool } from "./figma-tool";
 import { registerReadTools } from "./read-tools";
 
-export function createMcpServer({ bridge }: { bridge: Bridge }): McpServer {
+export function createMcpServer({
+	bridge,
+	artifactsDir = DEFAULT_ARTIFACTS_DIR,
+}: {
+	bridge: Bridge;
+	/** Where image outputs are written. */
+	artifactsDir?: string;
+}): McpServer {
 	const server = new McpServer({
 		name: "figma-agent-tool",
 		version: packageJson.version,
@@ -39,6 +49,57 @@ export function createMcpServer({ bridge }: { bridge: Bridge }): McpServer {
 	);
 
 	registerReadTools(server, bridge);
+
+	registerFigmaTool(
+		server,
+		"export_node_image",
+		{
+			description:
+				"Export a node as a PNG into the artifacts folder and return its path " +
+				"and pixel size. Set `inline` to also get the image in the result.",
+			inputSchema: {
+				nodeId: z.string().min(1).describe("Figma node ID, e.g. `1:2`."),
+				scale: z
+					.number()
+					.positive()
+					.max(4)
+					.default(1)
+					.describe("Export scale, as in Figma's export panel (up to 4)."),
+				inline: z
+					.boolean()
+					.default(false)
+					.describe(
+						"Also return the image inline. Costs context; off by default.",
+					),
+			},
+			outputSchema: {
+				path: z.string(),
+				width: z.number(),
+				height: z.number(),
+			},
+		},
+		async ({ nodeId, scale, inline }) => {
+			const { png } = await bridge.request("export_node_image", {
+				nodeId,
+				scale,
+			});
+			const bytes = Buffer.from(png, "base64");
+			const { width, height } = pngSize(bytes);
+			const path = await writeArtifact(
+				artifactsDir,
+				`node-${nodeId}@${scale}x`,
+				"png",
+				bytes,
+			);
+			const structuredContent = { path, width, height };
+			const content: CallToolResult["content"] = [
+				{ type: "text", text: JSON.stringify(structuredContent) },
+			];
+			if (inline)
+				content.push({ type: "image", data: png, mimeType: "image/png" });
+			return { content, structuredContent };
+		},
+	);
 
 	return server;
 }

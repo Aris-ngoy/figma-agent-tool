@@ -228,6 +228,15 @@ export const commands = {
 		params: z.object({ pageId: z.string().min(1).optional() }),
 		result: z.object({ page: PageRef, frames: z.array(FrameSummary) }),
 	},
+	export_node_image: {
+		params: z.object({
+			nodeId: z.string().min(1),
+			// Figma's own export UI offers 0.5x–4x.
+			scale: z.number().positive().max(4),
+		}),
+		// PNG bytes, base64-encoded so they survive the JSON bridge.
+		result: z.object({ png: z.base64() }),
+	},
 } as const;
 
 export type CommandName = keyof typeof commands;

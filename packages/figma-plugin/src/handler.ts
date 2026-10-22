@@ -28,6 +28,13 @@ class CommandError extends Error {
 	}
 }
 
+function nodeNotFound(id: string) {
+	return new CommandError(
+		"node_not_found",
+		`No node with ID "${id}" exists in this file. Node IDs look like "12:34"; get them from get_selection, list_frames or a parent node's children.`,
+	);
+}
+
 const implementations: CommandImplementations = {
 	ping: () => ({ pong: true }),
 
@@ -40,12 +47,7 @@ const implementations: CommandImplementations = {
 
 	get_node: async ({ id, depth }) => {
 		const node = await figma.getNodeByIdAsync(id);
-		if (!node) {
-			throw new CommandError(
-				"node_not_found",
-				`No node with ID "${id}" exists in this file. Node IDs look like "12:34"; get them from get_selection, list_frames or a parent node's children.`,
-			);
-		}
+		if (!node) throw nodeNotFound(id);
 		return { node: await serializeNode(node, depth) };
 	},
 
@@ -82,6 +84,23 @@ const implementations: CommandImplementations = {
 				})),
 		};
 	},
+
+	async export_node_image({ nodeId, scale }) {
+		const node = await figma.getNodeByIdAsync(nodeId);
+		if (!node) throw nodeNotFound(nodeId);
+		if (!("exportAsync" in node)) {
+			throw new CommandError(
+				"not_exportable",
+				`Node ${nodeId} is a ${node.type} and cannot be exported. Export a ` +
+					"frame, component or other layer on the canvas instead.",
+			);
+		}
+		const bytes = await node.exportAsync({
+			format: "PNG",
+			constraint: { type: "SCALE", value: scale },
+		});
+		return { png: figma.base64Encode(bytes) };
+	},
 };
 
 function pageRef(page: PageNode) {
@@ -117,7 +136,8 @@ export function createCommandHandler({
 				return failure(id, "invalid_params", params.error.message);
 			}
 			try {
-				// `params` was parsed with this command's own schema above.
+				// `params` was parsed with this command's schema; TypeScript can't
+				// correlate the two through the union, hence the cast.
 				const implementation = implementations[command] as (
 					params: unknown,
 				) => unknown;
