@@ -2,14 +2,21 @@
 // client, with a fake plugin that speaks the real protocol over WebSocket.
 import { afterEach } from "bun:test";
 import {
+	commands,
+	FRAME_TYPES,
 	type Handshake,
 	parseServerMessage,
 	type Response,
+	type SerializedNode,
 	type ServerMessage,
 } from "@figma-agent-tool/protocol";
 import {
 	document,
+	findNode,
 	handshake as handshakeFixture,
+	limitDepth,
+	nodeNotFoundResponse,
+	pageNotFoundResponse,
 	pingResponse,
 } from "@figma-agent-tool/protocol/fixtures";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -58,9 +65,66 @@ export async function startHarness({
 /** Answers server requests from the shared document and message fixtures. */
 function answer(message: ServerMessage): Response | undefined {
 	if (message.type !== "request") return undefined;
+	const { id } = message;
+	const ok = (result: unknown): Response => ({
+		type: "response",
+		id,
+		ok: true,
+		result,
+	});
+	const currentPage = document.pages.find(
+		(page) => page.id === document.currentPageId,
+	);
+	const pageRef = (page: { id: string; name: string }) => ({
+		id: page.id,
+		name: page.name,
+	});
 	switch (message.command) {
 		case "ping":
-			return { ...pingResponse, id: message.id };
+			return { ...pingResponse, id };
+		case "get_selection": {
+			const { depth } = commands.get_selection.params.parse(message.params);
+			return ok({
+				page: currentPage && pageRef(currentPage),
+				nodes: document.selection.map((nodeId) =>
+					limitDepth(findNode(nodeId) as SerializedNode, depth),
+				),
+			});
+		}
+		case "get_node": {
+			const params = commands.get_node.params.parse(message.params);
+			const node = findNode(params.id);
+			if (!node) return nodeNotFoundResponse(id, params.id);
+			return ok({ node: limitDepth(node, params.depth) });
+		}
+		case "list_pages":
+			return ok({
+				pages: document.pages.map((page) => ({
+					...pageRef(page),
+					current: page.id === document.currentPageId,
+				})),
+			});
+		case "list_frames": {
+			const { pageId = document.currentPageId } =
+				commands.list_frames.params.parse(message.params);
+			const page = document.pages.find((p) => p.id === pageId);
+			if (!page) return pageNotFoundResponse(id, pageId);
+			const frameTypes: readonly string[] = FRAME_TYPES;
+			return ok({
+				page: pageRef(page),
+				frames: page.children
+					.filter((node) => frameTypes.includes(node.type))
+					.map(({ id, name, type, x, y, width, height }) => ({
+						id,
+						name,
+						type,
+						x,
+						y,
+						width,
+						height,
+					})),
+			});
+		}
 	}
 }
 
