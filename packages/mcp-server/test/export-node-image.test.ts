@@ -54,18 +54,21 @@ describe("export_node_image", () => {
 			tmpdir(),
 			`figma-agent-configured-${crypto.randomUUID()}`,
 		);
-		const harness = await startHarness({
-			artifactsDir: join(root, "nested"),
-		});
-		await harness.connectFakePlugin();
-		const result = await harness.callTool("export_node_image", {
-			nodeId: "1:2",
-			scale: 2,
-		});
-		const { path } = result.structuredContent as ExportResult;
-		expect(dirname(path)).toBe(harness.artifactsDir);
-		expect(await Bun.file(path).exists()).toBe(true);
-		await rm(root, { recursive: true, force: true });
+		try {
+			const harness = await startHarness({
+				artifactsDir: join(root, "nested"),
+			});
+			await harness.connectFakePlugin();
+			const result = await harness.callTool("export_node_image", {
+				nodeId: "1:2",
+				scale: 2,
+			});
+			const { path } = result.structuredContent as ExportResult;
+			expect(dirname(path)).toBe(harness.artifactsDir);
+			expect(await Bun.file(path).exists()).toBe(true);
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
 	});
 
 	test("keeps earlier exports instead of overwriting them", async () => {

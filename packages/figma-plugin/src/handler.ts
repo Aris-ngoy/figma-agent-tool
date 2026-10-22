@@ -85,7 +85,7 @@ export function createCommandHandler({
 				// correlate the two through the union, hence the cast.
 				const implementation = implementations[command] as (
 					params: unknown,
-				) => Promise<unknown>;
+				) => unknown;
 				const result = await implementation(params.data);
 				return { type: "response", id, ok: true, result };
 			} catch (error) {
