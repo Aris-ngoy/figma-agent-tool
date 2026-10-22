@@ -7,8 +7,10 @@ on:
 
 jobs:
   check:
-    name: Lint & format
+    name: Lint, format, typecheck, build & test
     runs-on: ubuntu-latest
+    env:
+      TURBO_TELEMETRY_DISABLED: 1
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -16,3 +18,4 @@ jobs:
           bun-version-file: package.json
       - run: bun install --frozen-lockfile
       - run: bunx biome ci .
+      - run: bunx turbo run build lint typecheck test

@@ -9,7 +9,10 @@
 		"url": "git+https://github.com/Aris-ngoy/figma-agent-tool.git"
 	},
 	"scripts": {
-		"lint": "biome lint .",
+		"build": "turbo run build",
+		"lint": "turbo run lint",
+		"typecheck": "turbo run typecheck",
+		"test": "turbo run test",
 		"format": "biome format --write .",
 		"check": "biome check .",
 		"check:fix": "biome check --write .",
@@ -19,7 +22,14 @@
 	"devDependencies": {
 		"@ai-hero/sandcastle": "0.12.0",
 		"@biomejs/biome": "2.6.2",
+		"@types/bun": "^1.4.3",
 		"husky": "9.1.7",
+		"turbo": "^2.11.10",
+		"typescript": "^7.0.2",
 		"zod": "4.6.7"
-	}
+	},
+	"private": true,
+	"workspaces": [
+		"packages/*"
+	]
 }

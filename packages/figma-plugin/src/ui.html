@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<style>
+			body {
+				margin: 0;
+				padding: 12px;
+				font: 12px/1.4 Inter, system-ui, sans-serif;
+				color: var(--figma-color-text, #000);
+				background: var(--figma-color-bg, #fff);
+			}
+			#state::before {
+				content: "";
+				display: inline-block;
+				width: 8px;
+				height: 8px;
+				margin-right: 6px;
+				border-radius: 50%;
+				background: var(--figma-color-icon-danger, #f24822);
+			}
+			#state[data-connected="true"]::before {
+				background: var(--figma-color-icon-success, #14ae5c);
+			}
+			#state {
+				font-weight: 600;
+			}
+			#file {
+				margin-top: 6px;
+				color: var(--figma-color-text-secondary, #666);
+			}
+		</style>
+	</head>
+	<body>
+		<div id="state">Disconnected</div>
+		<div id="file"></div>
+		<!-- UI_SCRIPT -->
+	</body>
+</html>
