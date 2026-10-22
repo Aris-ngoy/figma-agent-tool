@@ -107,8 +107,11 @@ export function startBridge({
 	let session: Session | undefined;
 	const pending = new Map<string, Pending>();
 
-	function rejectPending(error: (command: CommandName) => Error) {
-		for (const { command, reject } of pending.values()) reject(error(command));
+	/** Fails every in-flight command because the plugin connection `reason`. */
+	function rejectPending(reason: string) {
+		for (const { command, reject } of pending.values()) {
+			reject(new BridgeConnectionLostError(command, reason));
+		}
 		pending.clear();
 	}
 
@@ -149,13 +152,7 @@ export function startBridge({
 							`[bridge] warning: a newer plugin connection (“${message.file.name}”) ` +
 								`replaced the one for “${replaced.file.name}”`,
 						);
-						rejectPending(
-							(command) =>
-								new BridgeConnectionLostError(
-									command,
-									"was replaced by a newer one",
-								),
-						);
+						rejectPending("was replaced by a newer one");
 						replaced.socket.close(
 							CLOSE_CODE_REPLACED,
 							"Replaced by a newer plugin connection",
@@ -173,9 +170,7 @@ export function startBridge({
 			close(socket) {
 				if (session?.socket !== socket) return;
 				session = undefined;
-				rejectPending(
-					(command) => new BridgeConnectionLostError(command, "closed"),
-				);
+				rejectPending("closed");
 				log("[bridge] plugin disconnected");
 			},
 		},
@@ -221,9 +216,7 @@ export function startBridge({
 		},
 
 		stop() {
-			rejectPending(
-				(command) => new BridgeConnectionLostError(command, "closed"),
-			);
+			rejectPending("closed");
 			// Not awaited: in Bun 1.2 the returned promise never settles once the
 			// server has closed a socket itself (connection replacement), although
 			// the server does stop.

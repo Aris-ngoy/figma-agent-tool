@@ -25,8 +25,9 @@ function element<T extends HTMLElement>(id: string): T {
 function render() {
 	const state = client?.state();
 	const connected = state?.status === "connected";
-	element("state").textContent = connected ? "Connected" : "Disconnected";
-	element("state").dataset.connected = String(connected);
+	const status = element("state");
+	status.textContent = connected ? "Connected" : "Disconnected";
+	status.dataset.connected = String(connected);
 	element("file").textContent = state ? fileStatus(state) : "";
 	element("command").textContent = commandStatus(state);
 	element("reconnect").hidden = state?.status !== "replaced";

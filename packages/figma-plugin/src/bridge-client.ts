@@ -128,8 +128,6 @@ export function createBridgeClient({
 			connect();
 		},
 
-		close() {
-			disconnect();
-		},
+		close: disconnect,
 	};
 }
