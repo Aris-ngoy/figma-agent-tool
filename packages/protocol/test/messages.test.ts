@@ -56,13 +56,14 @@ describe("document fixture", () => {
 	});
 
 	test("read command responses are valid results for their commands", () => {
-		for (const response of [getNodeResponse, listPagesResponse]) {
-			const request = [getNodeRequest, listPagesRequest].find(
-				(r) => r.id === response.id,
-			);
-			expect(request).toBeDefined();
-			const command = commands[request?.command ?? "ping"];
-			expect(command.result.parse(response.result)).toEqual(response.result);
+		const pairs = [
+			[getNodeRequest, getNodeResponse],
+			[listPagesRequest, listPagesResponse],
+		] as const;
+		for (const [request, response] of pairs) {
+			expect(response.id).toBe(request.id);
+			const { result } = commands[request.command];
+			expect(result.parse(response.result)).toEqual(response.result);
 		}
 	});
 });

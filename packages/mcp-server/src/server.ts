@@ -6,8 +6,6 @@ import packageJson from "../package.json" with { type: "json" };
 import type { Bridge } from "./bridge";
 import { registerReadTools } from "./read-tools";
 
-export { registerFigmaTool } from "./figma-tool";
-
 export function createMcpServer({ bridge }: { bridge: Bridge }): McpServer {
 	const server = new McpServer({
 		name: "figma-agent-tool",

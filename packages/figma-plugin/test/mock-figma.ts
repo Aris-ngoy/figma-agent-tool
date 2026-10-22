@@ -131,12 +131,7 @@ function toFigmaNode(node: SerializedNode): MockNode {
 			]),
 		);
 		mock.getMainComponentAsync = async () =>
-			mainComponent &&
-			(await (
-				globalThis as unknown as {
-					figma: { getNodeByIdAsync(id: string): Promise<unknown> };
-				}
-			).figma.getNodeByIdAsync(mainComponent.id));
+			mainComponent && (await figma.getNodeByIdAsync(mainComponent.id));
 		// In dynamic-page mode the sync getter throws.
 		Object.defineProperty(mock, "mainComponent", {
 			get: () => {

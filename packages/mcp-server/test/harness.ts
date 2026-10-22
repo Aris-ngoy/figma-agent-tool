@@ -3,8 +3,8 @@
 import { afterEach } from "bun:test";
 import {
 	commands,
-	FRAME_TYPES,
 	type Handshake,
+	isFrameType,
 	parseServerMessage,
 	type Response,
 	type SerializedNode,
@@ -109,11 +109,10 @@ function answer(message: ServerMessage): Response | undefined {
 				commands.list_frames.params.parse(message.params);
 			const page = document.pages.find((p) => p.id === pageId);
 			if (!page) return pageNotFoundResponse(id, pageId);
-			const frameTypes: readonly string[] = FRAME_TYPES;
 			return ok({
 				page: pageRef(page),
 				frames: page.children
-					.filter((node) => frameTypes.includes(node.type))
+					.filter((node) => isFrameType(node.type))
 					.map(({ id, name, type, x, y, width, height }) => ({
 						id,
 						name,

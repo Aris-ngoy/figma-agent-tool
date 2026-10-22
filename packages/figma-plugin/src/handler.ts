@@ -4,8 +4,8 @@ import {
 	type CommandParams,
 	type CommandResult,
 	commands,
-	FRAME_TYPES,
 	type Handshake,
+	isFrameType,
 	PROTOCOL_VERSION,
 	Request,
 	type Response,
@@ -27,8 +27,6 @@ class CommandError extends Error {
 		super(message);
 	}
 }
-
-const frameTypes: readonly string[] = FRAME_TYPES;
 
 const implementations: CommandImplementations = {
 	ping: () => ({ pong: true }),
@@ -72,7 +70,7 @@ const implementations: CommandImplementations = {
 		return {
 			page: pageRef(page),
 			frames: page.children
-				.filter((node) => frameTypes.includes(node.type))
+				.filter((node) => isFrameType(node.type))
 				.map(({ id, name, type, x, y, width, height }) => ({
 					id,
 					name,

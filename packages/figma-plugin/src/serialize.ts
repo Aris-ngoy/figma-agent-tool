@@ -22,8 +22,9 @@ export async function serializeNode(
 	if ("rotation" in node && node.rotation !== 0) {
 		out.rotation = round(node.rotation);
 	}
-	if ("opacity" in node && node.opacity !== 1)
+	if ("opacity" in node && node.opacity !== 1) {
 		out.opacity = round(node.opacity);
+	}
 	if ("cornerRadius" in node) {
 		const radius = cornerRadius(node);
 		if (radius !== 0) out.cornerRadius = radius;

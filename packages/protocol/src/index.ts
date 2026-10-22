@@ -186,6 +186,10 @@ export const FRAME_TYPES = [
 	"SECTION",
 ] as const;
 
+export function isFrameType(type: string): boolean {
+	return (FRAME_TYPES as readonly string[]).includes(type);
+}
+
 /** How many levels of children to include below each returned node. */
 export const Depth = z.number().int().min(0).max(100);
 export const DEFAULT_DEPTH = 2;
