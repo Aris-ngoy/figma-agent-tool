@@ -164,7 +164,9 @@ function whyDangling(
 	page: PageRef,
 ): Pick<DanglingEdge, "reason" | "message"> | undefined {
 	const { action, to } = edge;
-	if (action === "BACK" || action === "CLOSE" || action === "URL") return;
+	if (action === "BACK" || action === "CLOSE" || action === "URL") {
+		return undefined;
+	}
 	if (to === null) {
 		return {
 			reason: "no_destination",
