@@ -999,6 +999,351 @@ export const PrototypeGraph = z.object({
 });
 export type PrototypeGraph = z.infer<typeof PrototypeGraph>;
 
+// Motion: Figma's beta keyframe animation API. Shapes mirror the Plugin API's
+// (colors as 0–1 RGBA, times in seconds); it may change, so the Motion
+// commands sit behind the `motion` capability.
+
+/** Why Motion commands fail when the Figma version has no Motion API. */
+export function motionUnsupportedError(): BridgeError {
+	return {
+		code: "motion_unsupported",
+		message:
+			"Motion animations are not supported in this Figma version: the " +
+			"connected plugin found no Motion API. Update Figma, or animate with " +
+			"prototype reactions instead: set_reactions with a transition " +
+			"(SMART_ANIMATE, DISSOLVE, MOVE_IN, PUSH, SLIDE_IN, …), easing and duration.",
+	};
+}
+
+const VariableAlias = z.object({
+	type: z.literal("VARIABLE_ALIAS"),
+	id: z.string().min(1),
+});
+
+const Seconds = z.number().min(0);
+
+const RGBA = z.object({
+	r: z.number().min(0).max(1),
+	g: z.number().min(0).max(1),
+	b: z.number().min(0).max(1),
+	a: z.number().min(0).max(1),
+});
+
+/** A Motion easing: Transition's presets plus HOLD; springs take a 0–1 `bounce`. */
+export const MotionEasing = z.object({
+	type: z.enum([
+		"EASE_IN",
+		"EASE_OUT",
+		"EASE_IN_AND_OUT",
+		"LINEAR",
+		"EASE_IN_BACK",
+		"EASE_OUT_BACK",
+		"EASE_IN_AND_OUT_BACK",
+		"CUSTOM_CUBIC_BEZIER",
+		"GENTLE",
+		"QUICK",
+		"BOUNCY",
+		"SLOW",
+		"CUSTOM_SPRING",
+		"HOLD",
+	]),
+	easingFunctionCubicBezier: z
+		.object({ x1: z.number(), y1: z.number(), x2: z.number(), y2: z.number() })
+		.optional(),
+	easingFunctionSpring: z
+		.object({ bounce: z.number().min(0).max(1) })
+		.optional(),
+});
+export type MotionEasing = z.infer<typeof MotionEasing>;
+
+const Point = { x: z.number(), y: z.number() };
+
+/** A keyframe's value, typed like the property it animates. */
+export const KeyframeValue = z.discriminatedUnion("type", [
+	z.object({ type: z.literal("FLOAT"), value: z.number() }),
+	z.object({ type: z.literal("COLOR"), value: RGBA }),
+	z.object({ type: z.literal("TEXT_DATA"), value: z.string() }),
+	z.object({ type: z.literal("VECTOR"), value: z.object(Point) }),
+	z.object({ type: z.literal("BOOL"), value: z.boolean() }),
+	z.object({
+		type: z.literal("CIRCLE"),
+		value: z.object({ ...Point, radius: z.number() }),
+	}),
+	z.object({
+		type: z.literal("LINE"),
+		value: z.object({ ...Point, x2: z.number(), y2: z.number() }),
+	}),
+	z.object({
+		type: z.literal("CIRCLE_POINT"),
+		value: z.object({ ...Point, radius: z.number(), angle: z.number() }),
+	}),
+	z.object({
+		type: z.literal("COLOR_POINT"),
+		value: z.object({ ...Point, color: RGBA }),
+	}),
+]);
+export type KeyframeValue = z.infer<typeof KeyframeValue>;
+
+export const KEYFRAME_PROPERTIES = [
+	"CORNER_RADIUS",
+	"STROKE_WEIGHT",
+	"STACK_SPACING",
+	"STACK_PADDING_LEFT",
+	"STACK_PADDING_TOP",
+	"STACK_PADDING_RIGHT",
+	"STACK_PADDING_BOTTOM",
+	"WIDTH",
+	"HEIGHT",
+	"RECTANGLE_TOP_LEFT_CORNER_RADIUS",
+	"RECTANGLE_TOP_RIGHT_CORNER_RADIUS",
+	"RECTANGLE_BOTTOM_LEFT_CORNER_RADIUS",
+	"RECTANGLE_BOTTOM_RIGHT_CORNER_RADIUS",
+	"BORDER_TOP_WEIGHT",
+	"BORDER_BOTTOM_WEIGHT",
+	"BORDER_LEFT_WEIGHT",
+	"BORDER_RIGHT_WEIGHT",
+	"STACK_COUNTER_SPACING",
+	"OPACITY",
+	"GRID_ROW_GAP",
+	"GRID_COLUMN_GAP",
+	"TRANSLATION_X",
+	"TRANSLATION_Y",
+	"TRANSLATION_XY",
+	"ROTATION",
+	"SCALE_X",
+	"SCALE_Y",
+	"SCALE_XY",
+	"PATH_TRIM_START",
+	"PATH_TRIM_END",
+] as const;
+
+export const EFFECT_KEYFRAME_FIELDS = [
+	"OFFSET_X",
+	"OFFSET_Y",
+	"RADIUS",
+	"SPREAD",
+	"COLOR",
+	"REFRACTION_RADIUS",
+	"SPECULAR_ANGLE",
+	"SPECULAR_INTENSITY",
+	"CHROMATIC_ABERRATION",
+	"SPLAY",
+	"REFRACTION_INTENSITY",
+	"START_RADIUS",
+	"NOISE_SIZE_X",
+	"NOISE_SIZE_Y",
+	"DENSITY",
+	"EFFECT_OPACITY",
+	"SECONDARY_COLOR",
+] as const;
+
+/**
+ * What a keyframe track animates: a node PROPERTY, or a paint (fills,
+ * strokes) or effect by index. An effect track names its `field`; a
+ * `propertyId` targets a shader or component property of the paint/effect.
+ */
+export const KeyframeField = z
+	.discriminatedUnion("type", [
+		z.object({
+			type: z.literal("PROPERTY"),
+			name: z.enum(KEYFRAME_PROPERTIES),
+		}),
+		z.object({
+			type: z.literal("INDEXED_ITEM"),
+			collection: z.enum(["fills", "strokes", "effects"]),
+			index: z.number().int().min(0),
+			field: z.enum(EFFECT_KEYFRAME_FIELDS).optional(),
+			propertyId: z.string().min(1).optional(),
+		}),
+	])
+	.refine(
+		(field) =>
+			field.type === "PROPERTY" ||
+			(field.collection === "effects"
+				? (field.field === undefined) !== (field.propertyId === undefined)
+				: field.field === undefined),
+		"An effects track needs exactly one of `field` or `propertyId`; fills and strokes tracks take no `field`.",
+	);
+export type KeyframeField = z.infer<typeof KeyframeField>;
+
+/** A stable key for a field, e.g. `OPACITY`, `fills.0` or `effects.1.RADIUS`. */
+export function keyframeFieldKey(field: KeyframeField): string {
+	if (field.type === "PROPERTY") return field.name;
+	const sub = field.field ?? field.propertyId;
+	return [field.collection, field.index, ...(sub ? [sub] : [])].join(".");
+}
+
+const FIELD_ORDER = ["PROPERTY", "fills", "strokes", "effects"];
+
+/**
+ * Keyframe tracks in a fixed order (properties as listed in
+ * KEYFRAME_PROPERTIES, then fills, strokes and effects by index), so reads
+ * are deterministic.
+ */
+export function compareKeyframeTracks(
+	{ field: a }: { field: KeyframeField },
+	{ field: b }: { field: KeyframeField },
+): number {
+	const group = (field: KeyframeField) =>
+		FIELD_ORDER.indexOf(
+			field.type === "PROPERTY" ? field.type : field.collection,
+		);
+	if (group(a) !== group(b)) return group(a) - group(b);
+	if (a.type === "PROPERTY" && b.type === "PROPERTY") {
+		return (
+			KEYFRAME_PROPERTIES.indexOf(a.name) - KEYFRAME_PROPERTIES.indexOf(b.name)
+		);
+	}
+	if (a.type === "INDEXED_ITEM" && b.type === "INDEXED_ITEM") {
+		if (a.index !== b.index) return a.index - b.index;
+	}
+	return keyframeFieldKey(a).localeCompare(keyframeFieldKey(b));
+}
+
+/** A keyframe; `easing` shapes the curve from the previous keyframe. */
+export const Keyframe = z.object({
+	id: z.string().min(1).optional(),
+	timelinePosition: Seconds,
+	easing: z.union([MotionEasing, VariableAlias]).optional(),
+	value: KeyframeValue,
+});
+export type Keyframe = z.infer<typeof Keyframe>;
+
+/**
+ * A manual keyframe track on one field. `baseValue` is the value outside the
+ * keyframes. Read tracks carry IDs; written ones may keep or omit them.
+ */
+export const KeyframeTrack = z.object({
+	field: KeyframeField,
+	id: z.string().min(1).optional(),
+	baseValue: KeyframeValue.optional(),
+	keyframes: z.array(Keyframe),
+});
+export type KeyframeTrack = z.infer<typeof KeyframeTrack>;
+
+const AnimationStylePropValue = z.union([
+	z.string(),
+	z.number(),
+	z.boolean(),
+	MotionEasing,
+	VariableAlias,
+]);
+
+/**
+ * An animation style applied to a node: a Figma preset (with its `duration`
+ * and configured `props`) or a CUSTOM style made of presets. `id` identifies
+ * this application; `styleId` the style.
+ */
+export const AppliedAnimationStyle = z.discriminatedUnion("type", [
+	z.object({
+		type: z.literal("FIGMA"),
+		id: z.string(),
+		styleId: z.string(),
+		name: z.string(),
+		description: z.string().optional(),
+		duration: Seconds.optional(),
+		timelineOffset: Seconds.optional(),
+		props: z.record(z.string(), AnimationStylePropValue).optional(),
+	}),
+	z.object({
+		type: z.literal("CUSTOM"),
+		id: z.string(),
+		styleId: z.string(),
+		name: z.string(),
+		timelineOffset: Seconds.optional(),
+	}),
+]);
+export type AppliedAnimationStyle = z.infer<typeof AppliedAnimationStyle>;
+
+/** An animation style to apply; applied styles read back can be passed as-is. */
+export const AnimationStyleInput = z
+	.object({
+		type: z.enum(["FIGMA", "CUSTOM"]).default("FIGMA"),
+		styleId: z.string().min(1),
+		duration: Seconds.optional(),
+		timelineOffset: Seconds.optional(),
+		props: z.record(z.string(), AnimationStylePropValue).optional(),
+	})
+	.refine(
+		(style) =>
+			style.type === "FIGMA" ||
+			(style.duration === undefined && style.props === undefined),
+		"A CUSTOM animation style takes only a `timelineOffset`.",
+	);
+export type AnimationStyleInput = z.infer<typeof AnimationStyleInput>;
+
+/**
+ * An animation style the file offers: a Figma preset, whose `props` describe
+ * each configurable property's type and default, or a local CUSTOM style.
+ */
+export const AvailableAnimationStyle = z.object({
+	type: z.enum(["FIGMA", "CUSTOM"]),
+	styleId: z.string(),
+	name: z.string(),
+	description: z.string().optional(),
+	props: z.record(z.string(), z.string()).optional(),
+});
+export type AvailableAnimationStyle = z.infer<typeof AvailableAnimationStyle>;
+
+/** A Motion timeline; for now Figma gives each top-level frame one. */
+export const MotionTimeline = z.object({
+	id: z.string(),
+	duration: z.number().positive(),
+});
+
+/** A node's Motion animations: applied styles and manual keyframe tracks. */
+export const NodeMotion = z.object({
+	nodeId: z.string(),
+	// The timelines containing the node (its top-level frame's).
+	timelines: z.array(MotionTimeline),
+	animationStyles: z.array(AppliedAnimationStyle),
+	keyframeTracks: z.array(KeyframeTrack),
+});
+export type NodeMotion = z.infer<typeof NodeMotion>;
+
+/** The error for a node that can't carry Motion animations (pages). */
+export function noMotionError(id: string, type: string): BridgeError {
+	return {
+		code: "no_motion",
+		message: `Node ${id} is a ${type}, which can't be animated. Use a frame or another layer on the canvas.`,
+	};
+}
+
+export function animationStyleNotFoundError(
+	type: "FIGMA" | "CUSTOM",
+	styleId: string,
+): BridgeError {
+	return {
+		code: "animation_style_not_found",
+		message: `No ${type} animation style with ID "${styleId}" exists in this file. List them with get_motion and \`availableStyles: true\`.`,
+	};
+}
+
+/**
+ * Why a keyframe track can't animate `field` on a node with these many fills,
+ * strokes and effects (undefined when it can).
+ */
+export function keyframeFieldError(
+	nodeId: string,
+	field: KeyframeField,
+	counts: Record<"fills" | "strokes" | "effects", number>,
+): BridgeError | undefined {
+	if (field.type === "PROPERTY") return undefined;
+	const count = counts[field.collection];
+	if (field.index < count) return undefined;
+	return {
+		code: "invalid_keyframe_field",
+		message: `Node ${nodeId} has ${count} ${field.collection}, so there's no ${field.collection}[${field.index}] to animate.`,
+	};
+}
+
+export function noTimelineError(nodeId: string): BridgeError {
+	return {
+		code: "no_timeline",
+		message: `Node ${nodeId} isn't in a frame with a Motion timeline, so there's no timeline duration to set. Animate the node first.`,
+	};
+}
+
 /** A node and its ancestors, as the restructuring checks need them. */
 export type TreeNode = {
 	id: string;
@@ -1237,6 +1582,39 @@ export const commands = {
 			nodes: z.array(FlowNode),
 			missing: z.array(z.string()),
 		}),
+	},
+	// Motion commands need the `motion` capability.
+	get_motion: {
+		params: z.object({
+			nodeId: z.string().min(1),
+			// Also list the animation styles the file offers.
+			availableStyles: z.boolean().default(false),
+		}),
+		result: NodeMotion.extend({
+			availableStyles: z.array(AvailableAnimationStyle).optional(),
+		}),
+	},
+	set_motion: {
+		params: z.object({
+			nodeId: z.string().min(1),
+			// replace: the given lists replace the node's styles / manual tracks;
+			// append: styles are added, tracks replace only their own field's.
+			// An omitted list leaves that part untouched.
+			mode: z.enum(["replace", "append"]).default("replace"),
+			animationStyles: z.array(AnimationStyleInput).optional(),
+			keyframeTracks: z
+				.array(KeyframeTrack)
+				.refine(
+					(tracks) =>
+						new Set(tracks.map((t) => keyframeFieldKey(t.field))).size ===
+						tracks.length,
+					"Give each field at most one keyframe track.",
+				)
+				.optional(),
+			// Duration of the timeline containing the node (its top-level frame's).
+			timelineDuration: z.number().positive().optional(),
+		}),
+		result: NodeMotion,
 	},
 } as const;
 

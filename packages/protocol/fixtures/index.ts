@@ -3,10 +3,14 @@
 // two can't drift apart.
 import type {
 	Action,
+	AppliedAnimationStyle,
+	AvailableAnimationStyle,
 	DesignSystem,
 	FlowNode,
 	FlowStart,
 	Handshake,
+	KeyframeField,
+	KeyframeTrack,
 	NodeAction,
 	Reaction,
 	Request,
@@ -15,6 +19,8 @@ import type {
 	Transition,
 } from "../src";
 import {
+	animationStyleNotFoundError,
+	keyframeFieldKey,
 	layerError,
 	notAGroupError,
 	PROTOCOL_VERSION,
@@ -750,6 +756,148 @@ const reactions: Record<string, Reaction[]> = {
 	"4:51": [onClick(navigate("4:1", "NAVIGATE", null))],
 };
 
+/** ID Figma gives the `n`th animation style applied to a node (in the fakes). */
+export function appliedStyleId(nodeId: string, n: number): string {
+	return `${nodeId}/style-${n}`;
+}
+
+/** ID of a node's manual keyframe track on `field`, unless one is given. */
+export function keyframeTrackId(nodeId: string, field: KeyframeField): string {
+	return `${nodeId}/track-${keyframeFieldKey(field)}`;
+}
+
+/** ID of a track's `index`th keyframe, unless one is given. */
+export function keyframeId(trackId: string, index: number): string {
+	return `${trackId}/kf-${index}`;
+}
+
+/** ID of the Motion timeline of a top-level frame. */
+export function timelineId(frameId: string): string {
+	return `Timeline:${frameId}`;
+}
+
+const fadeIn = {
+	type: "FIGMA",
+	styleId: "motion:fade-in",
+	name: "Fade in",
+	description: "Fades the layer in from transparent.",
+	props: { from: "number, 0–1 (default 0)" },
+} satisfies AvailableAnimationStyle;
+
+const translationY = { type: "PROPERTY", name: "TRANSLATION_Y" } as const;
+const firstFill = {
+	type: "INDEXED_ITEM",
+	collection: "fills",
+	index: 0,
+} as const;
+
+/** Motion animations in the document: styles on offer, timelines, per node. */
+const motion = {
+	// Figma's presets, then the file's local custom animation styles.
+	styles: [
+		fadeIn,
+		{
+			type: "FIGMA",
+			styleId: "motion:slide-in",
+			name: "Slide in",
+			props: {
+				direction: "'left' | 'right' | 'up' | 'down' (default 'right')",
+				distance: "number (default 100)",
+			},
+		},
+		{
+			type: "CUSTOM",
+			styleId: "S:card-enter,",
+			name: "Card enter",
+			description: "Fade, then slide up.",
+		},
+	] as AvailableAnimationStyle[],
+	// Timeline duration of each top-level frame that has a timeline.
+	timelines: { "1:1": 2, "1:10": 1.5 } as Record<string, number>,
+	nodes: {
+		// Login's button fades in, rises and shifts color.
+		"1:3": {
+			animationStyles: [
+				{
+					type: "FIGMA",
+					id: appliedStyleId("1:3", 1),
+					styleId: fadeIn.styleId,
+					name: fadeIn.name,
+					description: fadeIn.description,
+					duration: 0.3,
+					timelineOffset: 0,
+					props: { from: 0 },
+				},
+			],
+			keyframeTracks: [
+				{
+					field: translationY,
+					id: keyframeTrackId("1:3", translationY),
+					baseValue: { type: "FLOAT", value: 0 },
+					keyframes: [
+						{
+							id: keyframeId(keyframeTrackId("1:3", translationY), 0),
+							timelinePosition: 0,
+							easing: { type: "EASE_OUT" },
+							value: { type: "FLOAT", value: 24 },
+						},
+						{
+							id: keyframeId(keyframeTrackId("1:3", translationY), 1),
+							timelinePosition: 0.4,
+							easing: {
+								type: "CUSTOM_SPRING",
+								easingFunctionSpring: { bounce: 0.2 },
+							},
+							value: { type: "FLOAT", value: 0 },
+						},
+					],
+				},
+				{
+					field: firstFill,
+					id: keyframeTrackId("1:3", firstFill),
+					baseValue: { type: "COLOR", value: { r: 0.2, g: 0.4, b: 1, a: 1 } },
+					keyframes: [
+						{
+							id: keyframeId(keyframeTrackId("1:3", firstFill), 0),
+							timelinePosition: 0.4,
+							easing: { type: "HOLD" },
+							value: { type: "COLOR", value: { r: 0, g: 0, b: 0, a: 1 } },
+						},
+						{
+							id: keyframeId(keyframeTrackId("1:3", firstFill), 1),
+							timelinePosition: 1,
+							easing: {
+								type: "CUSTOM_CUBIC_BEZIER",
+								easingFunctionCubicBezier: { x1: 0.4, y1: 0, x2: 0.2, y2: 1 },
+							},
+							value: { type: "COLOR", value: { r: 0.2, g: 0.4, b: 1, a: 1 } },
+						},
+					],
+				},
+			],
+		},
+		// The title enters with the custom style, a little later.
+		"1:2": {
+			animationStyles: [
+				{
+					type: "CUSTOM",
+					id: appliedStyleId("1:2", 1),
+					styleId: "S:card-enter,",
+					name: "Card enter",
+					timelineOffset: 0.2,
+				},
+			],
+			keyframeTracks: [],
+		},
+	} as Record<
+		string,
+		{
+			animationStyles: AppliedAnimationStyle[];
+			keyframeTracks: KeyframeTrack[];
+		}
+	>,
+};
+
 /**
  * In-memory Figma document both test seams are built from. Nodes are written
  * in their serialized (agent-facing) form at full depth: the fake plugin
@@ -782,6 +930,7 @@ export const document = {
 		},
 	],
 	reactions,
+	motion,
 	styles: styles as DesignSystem["styles"],
 	collections: collections as DesignSystem["collections"],
 };
@@ -832,6 +981,12 @@ export const handshake = {
 	protocolVersion: PROTOCOL_VERSION,
 	pluginVersion: "0.0.0",
 	file: { key: document.fileKey, name: document.name },
+	capabilities: { motion: true },
+} satisfies Handshake;
+
+/** A plugin in a Figma version without the Motion API. */
+export const noMotionHandshake = {
+	...handshake,
 	capabilities: { motion: false },
 } satisfies Handshake;
 
@@ -1647,6 +1802,114 @@ export const ungroupFrameResponse = {
 	},
 } satisfies Response;
 
+export const getMotionRequest = {
+	type: "request",
+	id: "req-27",
+	command: "get_motion",
+	params: { nodeId: "1:3", availableStyles: true },
+} satisfies Request;
+
+export const getMotionResponse = {
+	type: "response",
+	id: "req-27",
+	ok: true,
+	result: {
+		nodeId: "1:3",
+		timelines: [{ id: timelineId("1:1"), duration: 2 }],
+		...motion.nodes["1:3"],
+		availableStyles: motion.styles,
+	},
+} satisfies Response;
+
+const opacity = { type: "PROPERTY", name: "OPACITY" } as const;
+const fadeInKeyframes = [
+	{
+		timelinePosition: 0,
+		easing: { type: "EASE_IN_AND_OUT" },
+		value: { type: "FLOAT", value: 0 },
+	},
+	{
+		timelinePosition: 0.4,
+		easing: { type: "EASE_IN_AND_OUT" },
+		value: { type: "FLOAT", value: 1 },
+	},
+] as const;
+
+/** Home's tab bar slides up and fades in over a shorter timeline. */
+export const setMotionRequest = {
+	type: "request",
+	id: "req-28",
+	command: "set_motion",
+	params: {
+		nodeId: "1:10",
+		mode: "replace",
+		animationStyles: [
+			{
+				type: "FIGMA",
+				styleId: "motion:slide-in",
+				duration: 0.4,
+				props: { direction: "up", distance: 40 },
+			},
+		],
+		keyframeTracks: [
+			{
+				field: opacity,
+				keyframes: fadeInKeyframes,
+			},
+		],
+		timelineDuration: 1.2,
+	},
+} satisfies Request;
+
+export const setMotionResponse = {
+	type: "response",
+	id: "req-28",
+	ok: true,
+	result: {
+		nodeId: "1:10",
+		timelines: [{ id: timelineId("1:10"), duration: 1.2 }],
+		animationStyles: [
+			{
+				type: "FIGMA",
+				id: appliedStyleId("1:10", 1),
+				styleId: "motion:slide-in",
+				name: "Slide in",
+				duration: 0.4,
+				props: { direction: "up", distance: 40 },
+			},
+		],
+		keyframeTracks: [
+			{
+				field: opacity,
+				id: keyframeTrackId("1:10", opacity),
+				keyframes: fadeInKeyframes.map((keyframe, index) => ({
+					id: keyframeId(keyframeTrackId("1:10", opacity), index),
+					...keyframe,
+				})),
+			},
+		],
+	},
+} satisfies Response;
+
+/** An unknown animation style fails the call, and nothing is written. */
+export const setUnknownMotionStyleRequest = {
+	type: "request",
+	id: "req-29",
+	command: "set_motion",
+	params: {
+		nodeId: "1:3",
+		mode: "replace",
+		animationStyles: [{ type: "FIGMA", styleId: "motion:wobble" }],
+	},
+} satisfies Request;
+
+export const setUnknownMotionStyleResponse = {
+	type: "response",
+	id: "req-29",
+	ok: false,
+	error: animationStyleNotFoundError("FIGMA", "motion:wobble"),
+} satisfies Response;
+
 /**
  * Every request the fakes know how to answer, paired with the plugin's
  * response. The fake plugin matches on command + params; the plugin tests
@@ -1679,4 +1942,7 @@ export const exchanges: [Request, Response][] = [
 	[reparentIntoTextRequest, reparentIntoTextResponse],
 	[groupNodesRequest, groupNodesResponse],
 	[ungroupFrameRequest, ungroupFrameResponse],
+	[getMotionRequest, getMotionResponse],
+	[setMotionRequest, setMotionResponse],
+	[setUnknownMotionStyleRequest, setUnknownMotionStyleResponse],
 ];

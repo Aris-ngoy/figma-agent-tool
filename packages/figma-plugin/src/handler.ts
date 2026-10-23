@@ -19,6 +19,7 @@ import {
 	toBridgeError,
 } from "./errors";
 import { getFlowNodes, listFlows, setFlowStart } from "./flows";
+import { getMotion, motionSupported, setMotion } from "./motion";
 import { getReactions, removeReactions, setReactions } from "./reactions";
 import {
 	deleteNodes,
@@ -111,6 +112,8 @@ const implementations: CommandImplementations = {
 	list_flows: listFlows,
 	set_flow_start: setFlowStart,
 	get_flow_nodes: getFlowNodes,
+	get_motion: getMotion,
+	set_motion: setMotion,
 };
 
 function pageRef(page: PageNode) {
@@ -129,8 +132,7 @@ export function createCommandHandler({
 				protocolVersion: PROTOCOL_VERSION,
 				pluginVersion,
 				file: { key: figma.fileKey ?? null, name: figma.root.name },
-				// Motion detection lands with the capability-gated Motion tools.
-				capabilities: { motion: false },
+				capabilities: { motion: motionSupported() },
 			};
 		},
 

@@ -12,6 +12,7 @@ import { registerEditTools } from "./edit-tools";
 import { registerFigmaTool } from "./figma-tool";
 import { registerFlowTools } from "./flow-tools";
 import { registerHandoffTools } from "./handoff-tools";
+import { registerMotionTools } from "./motion-tools";
 import { registerReactionTools } from "./reaction-tools";
 import { registerReadTools } from "./read-tools";
 import { registerRestructureTools } from "./restructure-tools";
@@ -70,6 +71,7 @@ export function createMcpServer({
 	registerReactionTools(server, bridge);
 	registerFlowTools(server, bridge);
 	registerHandoffTools(server, bridge);
+	registerMotionTools(server, bridge);
 	registerVisualQaTools(server, { artifactsDir, bridge, deviceRunner });
 	registerDeviceTools(server, deviceRunner, artifactsDir);
 
