@@ -10,6 +10,7 @@ import {
 	commands,
 	parsePluginMessage,
 	parseServerMessage,
+	Reaction,
 	SerializedNode,
 } from "../src";
 
@@ -48,6 +49,14 @@ describe("document fixture", () => {
 		for (const page of document.pages) {
 			for (const node of page.children) {
 				expect(SerializedNode.parse(node)).toEqual(node);
+			}
+		}
+	});
+
+	test("every reaction parses unchanged, so reads can be written back", () => {
+		for (const reactions of Object.values(document.reactions)) {
+			for (const reaction of reactions) {
+				expect(Reaction.parse(reaction)).toEqual(reaction);
 			}
 		}
 	});

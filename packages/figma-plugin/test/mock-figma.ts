@@ -3,7 +3,11 @@
 // sandbox. Fixture nodes are in serialized form; this turns them back into
 // Plugin API shapes (0–1 RGB, `figma.mixed`, flattened auto-layout props).
 import { afterEach } from "bun:test";
-import type { Paint, SerializedNode } from "@figma-agent-tool/protocol";
+import type {
+	Paint,
+	Reaction,
+	SerializedNode,
+} from "@figma-agent-tool/protocol";
 import {
 	availableFonts,
 	createdNodeId,
@@ -53,6 +57,7 @@ export function installMockFigma(document: DocumentFixture) {
 			siblings.splice(siblings.indexOf(node), 1);
 			unregister(node);
 		};
+		mockReactions(node, document.reactions[node.id] ?? []);
 		if (node.children && node.type !== "INSTANCE") canAppend(node);
 		if (node.type === "TEXT") guardText(node, loadedFonts);
 		if (node.type === "COMPONENT") {
@@ -204,6 +209,25 @@ export function installMockFigma(document: DocumentFixture) {
 }
 
 const newGeometry = { x: 0, y: 0, width: 100, height: 100 };
+
+/**
+ * Like Figma with dynamic-page access: `reactions` is read-only and
+ * `setReactionsAsync` writes. Reads also carry the deprecated `action`.
+ */
+function mockReactions(node: MockNode, initial: Reaction[]) {
+	let stored = structuredClone(initial);
+	Object.defineProperty(node, "reactions", {
+		enumerable: true,
+		get: () =>
+			stored.map((reaction) => ({ ...reaction, action: reaction.actions[0] })),
+		set: () => {
+			throw new Error("Cannot write to reactions; use setReactionsAsync");
+		},
+	});
+	node.setReactionsAsync = async (reactions: Reaction[]) => {
+		stored = structuredClone(reactions);
+	};
+}
 
 afterEach(() => {
 	delete (globalThis as { figma?: unknown }).figma;

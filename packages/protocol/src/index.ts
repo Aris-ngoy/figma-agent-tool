@@ -326,6 +326,320 @@ export const UpdatedNode = z.discriminatedUnion("ok", [
 ]);
 export type UpdatedNode = z.infer<typeof UpdatedNode>;
 
+const Vector = z.object({ x: z.number(), y: z.number() });
+
+export const TRIGGER_TYPES = [
+	"ON_CLICK",
+	"ON_HOVER",
+	"ON_PRESS",
+	"ON_DRAG",
+	"AFTER_TIMEOUT",
+	"MOUSE_UP",
+	"MOUSE_DOWN",
+	"MOUSE_ENTER",
+	"MOUSE_LEAVE",
+	"ON_KEY_DOWN",
+	"ON_MEDIA_HIT",
+	"ON_MEDIA_END",
+] as const;
+
+/**
+ * What starts a reaction, as in the Plugin API. Times (`timeout`, `delay`,
+ * `mediaHitTime`) are in seconds; `keyCodes` are key or gamepad button codes.
+ */
+export const Trigger = z.discriminatedUnion("type", [
+	z.object({ type: z.enum(["ON_CLICK", "ON_HOVER", "ON_PRESS", "ON_DRAG"]) }),
+	z.object({ type: z.literal("AFTER_TIMEOUT"), timeout: z.number().min(0) }),
+	z.object({
+		type: z.enum(["MOUSE_UP", "MOUSE_DOWN"]),
+		delay: z.number().min(0),
+	}),
+	z.object({
+		type: z.enum(["MOUSE_ENTER", "MOUSE_LEAVE"]),
+		delay: z.number().min(0),
+		deprecatedVersion: z.boolean().optional(),
+	}),
+	z.object({
+		type: z.literal("ON_KEY_DOWN"),
+		device: z.enum([
+			"KEYBOARD",
+			"XBOX_ONE",
+			"PS4",
+			"SWITCH_PRO",
+			"UNKNOWN_CONTROLLER",
+		]),
+		keyCodes: z.array(z.number().int()),
+	}),
+	z.object({ type: z.literal("ON_MEDIA_HIT"), mediaHitTime: z.number() }),
+	z.object({ type: z.literal("ON_MEDIA_END") }),
+]);
+export type Trigger = z.infer<typeof Trigger>;
+
+/** A preset curve, a custom cubic bezier, or a custom spring. */
+export const Easing = z.discriminatedUnion("type", [
+	z.object({
+		type: z.enum([
+			"EASE_IN",
+			"EASE_OUT",
+			"EASE_IN_AND_OUT",
+			"LINEAR",
+			"EASE_IN_BACK",
+			"EASE_OUT_BACK",
+			"EASE_IN_AND_OUT_BACK",
+			// Spring presets.
+			"GENTLE",
+			"QUICK",
+			"BOUNCY",
+			"SLOW",
+		]),
+	}),
+	z.object({
+		type: z.literal("CUSTOM_CUBIC_BEZIER"),
+		easingFunctionCubicBezier: z.object({
+			x1: z.number(),
+			y1: z.number(),
+			x2: z.number(),
+			y2: z.number(),
+		}),
+	}),
+	z.object({
+		type: z.literal("CUSTOM_SPRING"),
+		easingFunctionSpring: z.object({
+			mass: z.number(),
+			stiffness: z.number(),
+			damping: z.number(),
+			initialVelocity: z.number(),
+		}),
+	}),
+]);
+export type Easing = z.infer<typeof Easing>;
+
+/** How a NODE action animates; `duration` is in seconds. Null is instant. */
+export const Transition = z.discriminatedUnion("type", [
+	z.object({
+		type: z.enum(["DISSOLVE", "SMART_ANIMATE", "SCROLL_ANIMATE"]),
+		easing: Easing,
+		duration: z.number().min(0),
+	}),
+	z.object({
+		type: z.enum(["MOVE_IN", "MOVE_OUT", "PUSH", "SLIDE_IN", "SLIDE_OUT"]),
+		direction: z.enum(["LEFT", "RIGHT", "TOP", "BOTTOM"]),
+		matchLayers: z.boolean().default(false),
+		easing: Easing,
+		duration: z.number().min(0),
+	}),
+]);
+export type Transition = z.infer<typeof Transition>;
+
+export const NAVIGATIONS = [
+	"NAVIGATE",
+	"SWAP",
+	"OVERLAY",
+	"SCROLL_TO",
+	"CHANGE_TO",
+] as const;
+
+const MEDIA_ACTIONS = [
+	"PLAY",
+	"PAUSE",
+	"TOGGLE_PLAY_PAUSE",
+	"MUTE",
+	"UNMUTE",
+	"TOGGLE_MUTE_UNMUTE",
+	"SKIP_FORWARD",
+	"SKIP_BACKWARD",
+	"SKIP_TO",
+] as const;
+
+/** A variable value or expression, passed through as Figma reports it. */
+const VariableData = z.object({
+	type: z.string().optional(),
+	resolvedType: z.string().optional(),
+	value: z.unknown().optional(),
+});
+
+// Written out because Action is recursive (CONDITIONAL blocks hold actions),
+// so zod can't infer it.
+export type Action =
+	| { type: "BACK" | "CLOSE" }
+	| { type: "URL"; url: string; openInNewTab?: boolean }
+	| {
+			type: "UPDATE_MEDIA_RUNTIME";
+			destinationId?: string | null;
+			mediaAction: (typeof MEDIA_ACTIONS)[number];
+			amountToSkip?: number;
+			newTimestamp?: number;
+	  }
+	| {
+			type: "SET_VARIABLE";
+			variableId: string | null;
+			variableValue?: z.infer<typeof VariableData>;
+	  }
+	| {
+			type: "SET_VARIABLE_MODE";
+			variableCollectionId: string | null;
+			variableModeId: string | null;
+	  }
+	| {
+			type: "CONDITIONAL";
+			conditionalBlocks: {
+				condition?: z.infer<typeof VariableData>;
+				actions: Action[];
+			}[];
+	  }
+	| {
+			type: "NODE";
+			destinationId: string | null;
+			navigation: (typeof NAVIGATIONS)[number];
+			transition: Transition | null;
+			preserveScrollPosition?: boolean;
+			overlayRelativePosition?: { x: number; y: number };
+			resetVideoPosition?: boolean;
+			resetScrollPosition?: boolean;
+			resetInteractiveComponents?: boolean;
+	  };
+
+/**
+ * What a reaction does, as in the Plugin API. NODE actions go to
+ * `destinationId`: NAVIGATE, OVERLAY and SWAP (swap overlay) need a top-level
+ * frame, CHANGE_TO a component variant, SCROLL_TO any layer.
+ */
+export const Action: z.ZodType<Action, unknown> = z.discriminatedUnion("type", [
+	z.object({ type: z.enum(["BACK", "CLOSE"]) }),
+	z.object({
+		type: z.literal("URL"),
+		url: z.string(),
+		openInNewTab: z.boolean().optional(),
+	}),
+	z.object({
+		type: z.literal("UPDATE_MEDIA_RUNTIME"),
+		destinationId: z.string().nullable().optional(),
+		mediaAction: z.enum(MEDIA_ACTIONS),
+		// Seconds, for SKIP_FORWARD/SKIP_BACKWARD and SKIP_TO.
+		amountToSkip: z.number().optional(),
+		newTimestamp: z.number().optional(),
+	}),
+	z.object({
+		type: z.literal("SET_VARIABLE"),
+		variableId: z.string().nullable(),
+		variableValue: VariableData.optional(),
+	}),
+	z.object({
+		type: z.literal("SET_VARIABLE_MODE"),
+		variableCollectionId: z.string().nullable(),
+		variableModeId: z.string().nullable(),
+	}),
+	z.object({
+		type: z.literal("CONDITIONAL"),
+		conditionalBlocks: z.array(
+			z.object({
+				// The last block may have no condition: it's the "else".
+				condition: VariableData.optional(),
+				get actions() {
+					return z.array(Action);
+				},
+			}),
+		),
+	}),
+	z.object({
+		type: z.literal("NODE"),
+		destinationId: z.string().min(1).nullable(),
+		navigation: z.enum(NAVIGATIONS),
+		transition: Transition.nullable(),
+		preserveScrollPosition: z.boolean().optional(),
+		overlayRelativePosition: Vector.optional(),
+		resetVideoPosition: z.boolean().optional(),
+		resetScrollPosition: z.boolean().optional(),
+		resetInteractiveComponents: z.boolean().optional(),
+	}),
+]);
+
+/** A prototype interaction: a trigger and the actions it runs, in order. */
+export const Reaction = z.object({
+	trigger: Trigger.nullable(),
+	actions: z.array(Action),
+});
+export type Reaction = z.infer<typeof Reaction>;
+
+/** Which reactions `remove_reactions` removes; every given field must match. */
+export const ReactionMatch = z.object({
+	trigger: z.enum(TRIGGER_TYPES).optional(),
+	// Matches when any action (conditional ones included) goes to this node.
+	destinationId: z.string().min(1).optional(),
+});
+export type ReactionMatch = z.infer<typeof ReactionMatch>;
+
+export function matchesReaction(
+	reaction: Reaction,
+	{ trigger, destinationId }: ReactionMatch,
+): boolean {
+	if (trigger && reaction.trigger?.type !== trigger) return false;
+	if (
+		destinationId &&
+		!nodeActions(reaction.actions).some(
+			(action) => action.destinationId === destinationId,
+		)
+	) {
+		return false;
+	}
+	return true;
+}
+
+export type NodeAction = Extract<Action, { type: "NODE" }>;
+
+/** Every NODE action, including those inside conditional blocks. */
+export function nodeActions(actions: Action[]): NodeAction[] {
+	return actions.flatMap((action) => {
+		if (action.type === "NODE") return [action];
+		if (action.type === "CONDITIONAL") {
+			return action.conditionalBlocks.flatMap((block) =>
+				nodeActions(block.actions),
+			);
+		}
+		return [];
+	});
+}
+
+/**
+ * Why a NODE action can't go to `destination` (undefined when it can). A
+ * top-level node is a direct child of a page.
+ */
+export function destinationError(
+	{ destinationId, navigation }: NodeAction,
+	destination: { type: string; topLevel: boolean } | undefined,
+): BridgeError | undefined {
+	if (destinationId === null) return undefined;
+	const invalid = (message: string) => ({
+		code: "invalid_destination",
+		message,
+	});
+	if (!destination) {
+		return invalid(
+			`${navigation} destination "${destinationId}" doesn't exist in this file. Use a node ID from list_frames or get_node.`,
+		);
+	}
+	const { type, topLevel } = destination;
+	switch (navigation) {
+		case "NAVIGATE":
+		case "OVERLAY":
+		case "SWAP":
+			if (topLevel && (type === "FRAME" || type === "COMPONENT")) return;
+			return invalid(
+				`${navigation} needs a top-level frame as its destination, but ${destinationId} is a ${topLevel ? "top-level" : "nested"} ${type}. Use a frame from list_frames.`,
+			);
+		case "CHANGE_TO":
+			if (type === "COMPONENT") return;
+			return invalid(
+				`CHANGE_TO needs a component variant as its destination, but ${destinationId} is a ${type}.`,
+			);
+		case "SCROLL_TO":
+			if (type !== "PAGE" && type !== "DOCUMENT") return;
+			return invalid(
+				`SCROLL_TO needs a layer as its destination, but ${destinationId} is a ${type}.`,
+			);
+	}
+}
+
 /** How many levels of children to include below each returned node. */
 export const Depth = z.number().int().min(0).max(100);
 export const DEFAULT_DEPTH = 2;
@@ -377,6 +691,31 @@ export const commands = {
 	update_nodes: {
 		params: z.object({ updates: z.array(NodeUpdate).min(1) }),
 		result: z.object({ nodes: z.array(UpdatedNode) }),
+	},
+	get_reactions: {
+		params: z.object({ nodeId: z.string().min(1) }),
+		result: z.object({ nodeId: z.string(), reactions: z.array(Reaction) }),
+	},
+	set_reactions: {
+		params: z.object({
+			nodeId: z.string().min(1),
+			reactions: z.array(Reaction),
+			// replace swaps out every reaction; append adds after the existing ones.
+			mode: z.enum(["replace", "append"]).default("replace"),
+		}),
+		result: z.object({ nodeId: z.string(), reactions: z.array(Reaction) }),
+	},
+	remove_reactions: {
+		params: z.object({
+			nodeId: z.string().min(1),
+			// Without a match, every reaction is removed.
+			match: ReactionMatch.optional(),
+		}),
+		result: z.object({
+			nodeId: z.string(),
+			removed: z.number().int(),
+			reactions: z.array(Reaction),
+		}),
 	},
 } as const;
 

@@ -12,6 +12,7 @@ import {
 } from "@figma-agent-tool/protocol";
 import { createNodes, updateNodes } from "./edit";
 import { CommandError, nodeNotFound, toBridgeError } from "./errors";
+import { getReactions, removeReactions, setReactions } from "./reactions";
 import { serializeNode } from "./serialize";
 
 type CommandImplementations = {
@@ -89,6 +90,9 @@ const implementations: CommandImplementations = {
 
 	create_nodes: createNodes,
 	update_nodes: updateNodes,
+	get_reactions: getReactions,
+	set_reactions: setReactions,
+	remove_reactions: removeReactions,
 };
 
 function pageRef(page: PageNode) {

@@ -1,7 +1,13 @@
 // Shared protocol fixtures. The fake plugin (MCP server tests) and the real
 // plugin's command handler (plugin tests) replay these same messages, so the
 // two can't drift apart.
-import type { Handshake, Request, Response, SerializedNode } from "../src";
+import type {
+	Handshake,
+	Reaction,
+	Request,
+	Response,
+	SerializedNode,
+} from "../src";
 import { PROTOCOL_VERSION } from "../src";
 
 const loginScreen = {
@@ -165,6 +171,195 @@ const buttonComponent = {
 } satisfies SerializedNode;
 
 /**
+ * Prototype reactions by node ID, covering every trigger, transition and
+ * easing kind (written as the Plugin API reports them, durations in seconds).
+ */
+const reactions: Record<string, Reaction[]> = {
+	// Button: sign in pushes to Home, Enter jumps there, hover scrolls to the title.
+	"1:3": [
+		{
+			trigger: { type: "ON_CLICK" },
+			actions: [
+				{
+					type: "NODE",
+					destinationId: "1:10",
+					navigation: "NAVIGATE",
+					transition: {
+						type: "PUSH",
+						direction: "LEFT",
+						matchLayers: false,
+						easing: {
+							type: "CUSTOM_CUBIC_BEZIER",
+							easingFunctionCubicBezier: { x1: 0.2, y1: 0, x2: 0, y2: 1 },
+						},
+						duration: 0.3,
+					},
+					resetScrollPosition: true,
+				},
+			],
+		},
+		{
+			trigger: { type: "ON_KEY_DOWN", device: "KEYBOARD", keyCodes: [13] },
+			actions: [
+				{
+					type: "NODE",
+					destinationId: "1:10",
+					navigation: "NAVIGATE",
+					transition: null,
+				},
+			],
+		},
+		{
+			trigger: { type: "ON_HOVER" },
+			actions: [
+				{
+					type: "NODE",
+					destinationId: "1:2",
+					navigation: "SCROLL_TO",
+					transition: {
+						type: "SMART_ANIMATE",
+						easing: { type: "GENTLE" },
+						duration: 0.6,
+					},
+				},
+			],
+		},
+	],
+	// Title: hovering opens Home as an overlay, leaving closes it.
+	"1:2": [
+		{
+			trigger: { type: "MOUSE_ENTER", delay: 0.2, deprecatedVersion: false },
+			actions: [
+				{
+					type: "NODE",
+					destinationId: "1:10",
+					navigation: "OVERLAY",
+					transition: {
+						type: "MOVE_IN",
+						direction: "BOTTOM",
+						matchLayers: false,
+						easing: {
+							type: "CUSTOM_SPRING",
+							easingFunctionSpring: {
+								mass: 1,
+								stiffness: 300,
+								damping: 20,
+								initialVelocity: 0,
+							},
+						},
+						duration: 0.8,
+					},
+					overlayRelativePosition: { x: 0, y: 400 },
+				},
+			],
+		},
+		{
+			trigger: { type: "MOUSE_LEAVE", delay: 0, deprecatedVersion: false },
+			actions: [{ type: "CLOSE" }],
+		},
+		{
+			trigger: { type: "ON_PRESS" },
+			actions: [
+				{ type: "URL", url: "https://example.com/help", openInNewTab: true },
+			],
+		},
+	],
+	"1:10": [
+		{
+			trigger: { type: "AFTER_TIMEOUT", timeout: 3 },
+			actions: [
+				{
+					type: "NODE",
+					destinationId: "1:1",
+					navigation: "NAVIGATE",
+					transition: {
+						type: "DISSOLVE",
+						easing: { type: "EASE_OUT" },
+						duration: 0.2,
+					},
+				},
+			],
+		},
+		{ trigger: { type: "ON_DRAG" }, actions: [{ type: "BACK" }] },
+		{
+			trigger: { type: "ON_KEY_DOWN", device: "PS4", keyCodes: [1] },
+			actions: [
+				{
+					type: "NODE",
+					destinationId: "1:1",
+					navigation: "SWAP",
+					transition: {
+						type: "SLIDE_OUT",
+						direction: "RIGHT",
+						matchLayers: true,
+						easing: { type: "EASE_IN_AND_OUT_BACK" },
+						duration: 0.4,
+					},
+				},
+			],
+		},
+		{
+			trigger: { type: "MOUSE_DOWN", delay: 0 },
+			actions: [
+				{
+					type: "SET_VARIABLE_MODE",
+					variableCollectionId: "VariableCollectionId:1:1",
+					variableModeId: "1:0",
+				},
+				{
+					type: "CONDITIONAL",
+					conditionalBlocks: [
+						{
+							condition: {
+								type: "BOOLEAN",
+								resolvedType: "BOOLEAN",
+								value: true,
+							},
+							actions: [{ type: "BACK" }],
+						},
+						{ actions: [{ type: "CLOSE" }] },
+					],
+				},
+			],
+		},
+	],
+	"1:20": [
+		{
+			trigger: { type: "MOUSE_UP", delay: 0.1 },
+			actions: [
+				{
+					type: "SET_VARIABLE",
+					variableId: "VariableID:1:2",
+					variableValue: { type: "FLOAT", resolvedType: "FLOAT", value: 2 },
+				},
+			],
+		},
+		{
+			trigger: { type: "ON_MEDIA_HIT", mediaHitTime: 1.5 },
+			actions: [
+				{
+					type: "UPDATE_MEDIA_RUNTIME",
+					destinationId: null,
+					mediaAction: "SKIP_TO",
+					newTimestamp: 0,
+				},
+			],
+		},
+		{
+			trigger: { type: "ON_MEDIA_END" },
+			actions: [
+				{
+					type: "UPDATE_MEDIA_RUNTIME",
+					destinationId: null,
+					mediaAction: "PLAY",
+				},
+			],
+		},
+		{ trigger: null, actions: [{ type: "BACK" }] },
+	],
+};
+
+/**
  * In-memory Figma document both test seams are built from. Nodes are written
  * in their serialized (agent-facing) form at full depth: the fake plugin
  * serves them directly and the mocked `figma` global is built from them.
@@ -186,6 +381,7 @@ export const document = {
 			children: [buttonComponent] as SerializedNode[],
 		},
 	],
+	reactions,
 };
 export type DocumentFixture = typeof document;
 
@@ -540,6 +736,111 @@ export const updateNodesResponse = {
 	},
 } satisfies Response;
 
+export const getReactionsRequest = {
+	type: "request",
+	id: "req-11",
+	command: "get_reactions",
+	params: { nodeId: "1:3" },
+} satisfies Request;
+
+export const getReactionsResponse = {
+	type: "response",
+	id: "req-11",
+	ok: true,
+	result: { nodeId: "1:3", reactions: reactions["1:3"] as Reaction[] },
+} satisfies Response;
+
+/** Tapping Home slides Login in from the top, after Home's own reactions. */
+const slideToLogin = {
+	trigger: { type: "ON_CLICK" },
+	actions: [
+		{
+			type: "NODE",
+			destinationId: "1:1",
+			navigation: "NAVIGATE",
+			transition: {
+				type: "SLIDE_IN",
+				direction: "TOP",
+				matchLayers: false,
+				easing: { type: "EASE_IN_AND_OUT" },
+				duration: 0.5,
+			},
+		},
+	],
+} satisfies Reaction;
+
+export const appendReactionsRequest = {
+	type: "request",
+	id: "req-12",
+	command: "set_reactions",
+	params: { nodeId: "1:10", mode: "append", reactions: [slideToLogin] },
+} satisfies Request;
+
+export const appendReactionsResponse = {
+	type: "response",
+	id: "req-12",
+	ok: true,
+	result: {
+		nodeId: "1:10",
+		reactions: [...(reactions["1:10"] as Reaction[]), slideToLogin],
+	},
+} satisfies Response;
+
+/** Navigating to a node that doesn't exist fails, and nothing is written. */
+export const setDanglingReactionRequest = {
+	type: "request",
+	id: "req-13",
+	command: "set_reactions",
+	params: {
+		nodeId: "1:2",
+		mode: "replace",
+		reactions: [
+			{
+				trigger: { type: "ON_CLICK" },
+				actions: [
+					{
+						type: "NODE",
+						destinationId: "9:99",
+						navigation: "NAVIGATE",
+						transition: null,
+					},
+				],
+			},
+		],
+	},
+} satisfies Request;
+
+export const setDanglingReactionResponse = {
+	type: "response",
+	id: "req-13",
+	ok: false,
+	error: {
+		code: "invalid_destination",
+		message:
+			'NAVIGATE destination "9:99" doesn\'t exist in this file. Use a node ID from list_frames or get_node.',
+	},
+} satisfies Response;
+
+export const removeReactionsRequest = {
+	type: "request",
+	id: "req-14",
+	command: "remove_reactions",
+	params: { nodeId: "1:10", match: { trigger: "ON_KEY_DOWN" } },
+} satisfies Request;
+
+export const removeReactionsResponse = {
+	type: "response",
+	id: "req-14",
+	ok: true,
+	result: {
+		nodeId: "1:10",
+		removed: 1,
+		reactions: (reactions["1:10"] as Reaction[]).filter(
+			(reaction) => reaction.trigger?.type !== "ON_KEY_DOWN",
+		),
+	},
+} satisfies Response;
+
 /**
  * Every request the fakes know how to answer, paired with the plugin's
  * response. The fake plugin matches on command + params; the plugin tests
@@ -556,4 +857,8 @@ export const exchanges: [Request, Response][] = [
 	[createNodesRequest, createNodesResponse],
 	[createNodesPartlyRequest, createNodesPartlyResponse],
 	[updateNodesRequest, updateNodesResponse],
+	[getReactionsRequest, getReactionsResponse],
+	[appendReactionsRequest, appendReactionsResponse],
+	[setDanglingReactionRequest, setDanglingReactionResponse],
+	[removeReactionsRequest, removeReactionsResponse],
 ];
