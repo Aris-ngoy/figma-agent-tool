@@ -14,6 +14,7 @@
 		"test": "bun test"
 	},
 	"dependencies": {
+		"@figma-agent-tool/handoff": "workspace:*",
 		"@figma-agent-tool/protocol": "workspace:*",
 		"@figma-agent-tool/visual-diff": "workspace:*",
 		"@modelcontextprotocol/sdk": "^1.32.1",

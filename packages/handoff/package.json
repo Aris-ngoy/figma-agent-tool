@@ -1,0 +1,16 @@
+{
+	"name": "@figma-agent-tool/handoff",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"lint": "biome lint .",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@figma-agent-tool/protocol": "workspace:*"
+	}
+}

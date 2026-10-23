@@ -1,14 +1,13 @@
 // Flow tools: list and set flow starting points, and trace or export the
 // prototype graph the plugin's raw reactions describe.
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { writeExport } from "./artifacts";
 import type { Bridge } from "./bridge";
 import { jsonResult, registerFigmaTool, toolError } from "./figma-tool";
 import { traceFlow } from "./flow-graph";
 
-const traceInput = {
+export const traceInput = {
 	nodeId: z
 		.string()
 		.min(1)
@@ -127,9 +126,10 @@ export function registerFlowTools(server: McpServer, bridge: Bridge) {
 				graph,
 			};
 			if (!path) return jsonResult(exported);
-			const absolute = resolve(path);
-			await mkdir(dirname(absolute), { recursive: true });
-			await writeFile(absolute, `${JSON.stringify(exported, null, "\t")}\n`);
+			const absolute = await writeExport(
+				path,
+				`${JSON.stringify(exported, null, "\t")}\n`,
+			);
 			return jsonResult({ ...exported, path: absolute });
 		},
 	);

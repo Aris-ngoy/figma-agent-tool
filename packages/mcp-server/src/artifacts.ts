@@ -1,7 +1,7 @@
 // Image outputs land in the artifacts folder and are returned as paths, so
 // agents only pull pixels into their context when they ask for them.
 import { mkdir, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 /** Relative to the working directory; git-ignored in this repo. */
 export const DEFAULT_ARTIFACTS_DIR = ".figma-agent";
@@ -59,4 +59,15 @@ export async function writePngArtifact(
 	const size = pngSize(bytes);
 	const path = await writeArtifact(artifactsDir, name, "png", bytes);
 	return { path, ...size };
+}
+
+/**
+ * Writes an export to a path the caller chose (relative to the working
+ * directory), creating folders, and returns its absolute path.
+ */
+export async function writeExport(path: string, text: string): Promise<string> {
+	const absolute = resolve(path);
+	await mkdir(dirname(absolute), { recursive: true });
+	await writeFile(absolute, text);
+	return absolute;
 }

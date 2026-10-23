@@ -23,6 +23,13 @@
         "@figma/plugin-typings": "^1.142.0",
       },
     },
+    "packages/handoff": {
+      "name": "@figma-agent-tool/handoff",
+      "version": "0.0.0",
+      "dependencies": {
+        "@figma-agent-tool/protocol": "workspace:*",
+      },
+    },
     "packages/mcp-server": {
       "name": "@figma-agent-tool/mcp-server",
       "version": "0.0.0",
@@ -30,6 +37,7 @@
         "figma-agent-mcp": "./dist/main.js",
       },
       "dependencies": {
+        "@figma-agent-tool/handoff": "workspace:*",
         "@figma-agent-tool/protocol": "workspace:*",
         "@figma-agent-tool/visual-diff": "workspace:*",
         "@modelcontextprotocol/sdk": "^1.32.1",
@@ -89,6 +97,8 @@
     "@clack/prompts": ["@clack/prompts@1.8.1", "", { "dependencies": { "@clack/core": "1.5.1", "fast-string-width": "^3.0.2", "fast-wrap-ansi": "^0.2.0", "sisteransi": "^1.0.5" } }, "sha512-dlT1m5e/0yUL0kRNcQn7yGLVThkgbB0Ga/1AmfDDC/8ik6AIiSf2QLQO2zPYvefsHP0aFgxO93cVLCCfDp7kzQ=="],
 
     "@figma-agent-tool/figma-plugin": ["@figma-agent-tool/figma-plugin@workspace:packages/figma-plugin"],
+
+    "@figma-agent-tool/handoff": ["@figma-agent-tool/handoff@workspace:packages/handoff"],
 
     "@figma-agent-tool/mcp-server": ["@figma-agent-tool/mcp-server@workspace:packages/mcp-server"],
 

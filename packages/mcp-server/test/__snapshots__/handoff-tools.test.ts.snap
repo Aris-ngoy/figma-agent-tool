@@ -1,0 +1,255 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`export_flow_markdown renders every screen of the flow in walk order 1`] = `
+"# Flow: Onboarding
+
+- File: Sample App
+- Page: Onboarding (0:3)
+- Start: Welcome (4:1)
+- Screens: 5
+
+## Screen: Welcome (4:1)
+
+- Link: https://www.figma.com/design/FILEKEY123/Sample-App?node-id=4-1
+- Size: 393×852
+- Depth: 0
+
+### Interactions
+
+| Layer | Trigger | Action | Destination | Transition | Direction | Easing | Duration |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Get started (4:2) | ON_CLICK | NAVIGATE | Permissions (4:10) | PUSH | LEFT | EASE_IN_AND_OUT | 300ms |
+
+### Broken interactions
+
+None.
+
+### Tokens
+
+| Token | Kind | Value | Used for |
+| --- | --- | --- | --- |
+| color/primary | COLOR variable | Light: #3366ff; Dark: #6699ff | fill |
+| space/page | FLOAT variable | → space/lg | paddingLeft |
+| Heading/Large | TEXT style | Inter Bold 28/34px | text |
+| Text/Primary | PAINT style | #111111 | fill |
+
+### Components
+
+| Layer | Component | Properties |
+| --- | --- | --- |
+| Step chip (4:4) | Chip / Size=Large (3:3) | Size=Large |
+
+## Screen: Permissions (4:10)
+
+- Link: https://www.figma.com/design/FILEKEY123/Sample-App?node-id=4-10
+- Size: 393×852
+- Depth: 1
+
+### Interactions
+
+| Layer | Trigger | Action | Destination | Transition | Direction | Easing | Duration |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Permissions (4:10) | ON_DRAG | BACK | — | INSTANT | — | — | — |
+| Allow (4:11) | ON_CLICK | NAVIGATE | Done (4:20) | DISSOLVE | — | EASE_OUT | 200ms |
+| Learn more (4:12) | ON_CLICK | OVERLAY at 0,452 | Info sheet (4:30) | MOVE_IN | BOTTOM | EASE_OUT | 300ms |
+| Privacy policy (4:13) | ON_CLICK | URL | https://example.com/privacy | INSTANT | — | — | — |
+
+### Broken interactions
+
+None.
+
+### Tokens
+
+None.
+
+### Components
+
+None.
+
+## Screen: Done (4:20)
+
+- Link: https://www.figma.com/design/FILEKEY123/Sample-App?node-id=4-20
+- Size: 393×852
+- Depth: 2
+
+### Interactions
+
+| Layer | Trigger | Action | Destination | Transition | Direction | Easing | Duration |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Start over (4:21) | ON_CLICK | NAVIGATE | Welcome (4:1) | INSTANT | — | — | — |
+
+### Broken interactions
+
+| Layer | Trigger | Action | Destination | Reason |
+| --- | --- | --- | --- | --- |
+| Broken (4:22) | ON_CLICK | NAVIGATE | 4:99 | missing |
+| Broken (4:22) | ON_HOVER | NAVIGATE | 1:1 | other_page |
+| Unwired (4:23) | ON_CLICK | NAVIGATE | — | no_destination |
+
+### Tokens
+
+None.
+
+### Components
+
+None.
+
+## Screen: Info sheet (4:30)
+
+- Link: https://www.figma.com/design/FILEKEY123/Sample-App?node-id=4-30
+- Size: 393×400
+- Depth: 2
+
+### Interactions
+
+| Layer | Trigger | Action | Destination | Transition | Direction | Easing | Duration |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Close (4:31) | ON_CLICK | CLOSE | — | INSTANT | — | — | — |
+| Next tip (4:32) | ON_CLICK | SWAP | Second tip (4:40) | SMART_ANIMATE | — | GENTLE | 500ms |
+| Jump to footer (4:33) | ON_CLICK | SCROLL_TO | Footer (4:34) | INSTANT | — | — | — |
+
+### Broken interactions
+
+| Layer | Trigger | Action | Destination | Reason |
+| --- | --- | --- | --- | --- |
+| Jump to footer (4:33) | ON_PRESS | NAVIGATE | Footer (4:34) | invalid |
+
+### Tokens
+
+None.
+
+### Components
+
+None.
+
+## Screen: Second tip (4:40)
+
+- Link: https://www.figma.com/design/FILEKEY123/Sample-App?node-id=4-40
+- Size: 393×400
+- Depth: 3
+
+### Interactions
+
+| Layer | Trigger | Action | Destination | Transition | Direction | Easing | Duration |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Got it (4:41) | ON_CLICK | CLOSE | — | INSTANT | — | — | — |
+
+### Broken interactions
+
+None.
+
+### Tokens
+
+None.
+
+### Components
+
+None.
+"
+`;
+
+exports[`export_flow_markdown resolves styles, variables and instance properties on Sign in 1`] = `
+"# Flow: Sign in
+
+- File: Sample App
+- Page: Screens (0:1)
+- Start: Login (1:1)
+- Screens: 2
+
+## Screen: Login (1:1)
+
+- Link: https://www.figma.com/design/FILEKEY123/Sample-App?node-id=1-1
+- Size: 393×852
+- Depth: 0
+
+### Interactions
+
+| Layer | Trigger | Action | Destination | Transition | Direction | Easing | Duration |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Title (1:2) | MOUSE_ENTER 0.2s | OVERLAY at 0,400 | Home (1:10) | MOVE_IN | BOTTOM | spring(mass 1, stiffness 300, damping 20, velocity 0) | 800ms |
+| Title (1:2) | MOUSE_LEAVE | CLOSE | — | INSTANT | — | — | — |
+| Title (1:2) | ON_PRESS | URL (new tab) | https://example.com/help | INSTANT | — | — | — |
+| Button (1:3) | ON_CLICK | NAVIGATE | Home (1:10) | PUSH | LEFT | cubic-bezier(0.2, 0, 0, 1) | 300ms |
+| Button (1:3) | ON_KEY_DOWN KEYBOARD 13 | NAVIGATE | Home (1:10) | INSTANT | — | — | — |
+| Button (1:3) | ON_HOVER | SCROLL_TO | Title (1:2) | SMART_ANIMATE | — | GENTLE | 600ms |
+
+### Broken interactions
+
+None.
+
+### Tokens
+
+| Token | Kind | Value | Used for |
+| --- | --- | --- | --- |
+| color/primary | COLOR variable | Light: #3366ff; Dark: #6699ff | fill |
+| radius/md | FLOAT variable | 12 | bottomLeftRadius, bottomRightRadius, topLeftRadius, topRightRadius |
+| space/md | FLOAT variable | 16 | paddingLeft, paddingRight |
+| Heading/Large | TEXT style | Inter Bold 28/34px | text |
+| Text/Primary | PAINT style | #111111 | fill |
+
+### Components
+
+| Layer | Component | Properties |
+| --- | --- | --- |
+| Button (1:3) | Button (2:1) | Disabled=false, Label=Sign in |
+
+## Screen: Home (1:10)
+
+- Link: https://www.figma.com/design/FILEKEY123/Sample-App?node-id=1-10
+- Size: 393×852
+- Depth: 1
+
+### Interactions
+
+| Layer | Trigger | Action | Destination | Transition | Direction | Easing | Duration |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Home (1:10) | AFTER_TIMEOUT 3s | NAVIGATE | Login (1:1) | DISSOLVE | — | EASE_OUT | 200ms |
+| Home (1:10) | ON_DRAG | BACK | — | INSTANT | — | — | — |
+| Home (1:10) | ON_KEY_DOWN PS4 1 | SWAP | Login (1:1) | SLIDE_OUT (match layers) | RIGHT | EASE_IN_AND_OUT_BACK | 400ms |
+| Home (1:10) | MOUSE_DOWN | BACK (conditional) | — | INSTANT | — | — | — |
+| Home (1:10) | MOUSE_DOWN | CLOSE (conditional) | — | INSTANT | — | — | — |
+
+### Broken interactions
+
+None.
+
+### Tokens
+
+None.
+
+### Components
+
+None.
+"
+`;
+
+exports[`export_screen_markdown renders one screen with its outgoing interactions 1`] = `
+"# Screen: Permissions (4:10)
+
+- File: Sample App
+- Page: Onboarding (0:3)
+- Link: https://www.figma.com/design/FILEKEY123/Sample-App?node-id=4-10
+- Size: 393×852
+
+## Interactions
+
+| Layer | Trigger | Action | Destination | Transition | Direction | Easing | Duration |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Permissions (4:10) | ON_DRAG | BACK | — | INSTANT | — | — | — |
+| Allow (4:11) | ON_CLICK | NAVIGATE | Done (4:20) | DISSOLVE | — | EASE_OUT | 200ms |
+| Learn more (4:12) | ON_CLICK | OVERLAY at 0,452 | Info sheet (4:30) | MOVE_IN | BOTTOM | EASE_OUT | 300ms |
+| Privacy policy (4:13) | ON_CLICK | URL | https://example.com/privacy | INSTANT | — | — | — |
+
+## Broken interactions
+
+None.
+
+## Tokens
+
+None.
+
+## Components
+
+None.
+"
+`;

@@ -7,6 +7,7 @@ An MCP server plus a Figma development plugin that lets any MCP client work on t
 - `packages/protocol`: runtime-validated (zod) bridge messages and the shared test fixtures.
 - `packages/mcp-server`: the MCP server (stdio) and the localhost WebSocket bridge the plugin connects to.
 - `packages/figma-plugin`: the Figma plugin (sandbox command handler + UI iframe that owns the connection).
+- `packages/handoff`: pure rendering of the prototype graph, screen layers and design system as handoff Markdown.
 - `packages/visual-diff`: pure image comparison (align, mask, pixel-diff, cluster mismatches), with no Figma or device knowledge. Its PNG fixtures are regenerated with `bun run fixtures` in that package.
 
 ## Development
@@ -79,6 +80,17 @@ Image outputs such as `export_node_image` and `capture_device_screenshot` are wr
 `trace_flow` walks breadth-first from a starting frame over the reactions of every layer in each screen, following NAVIGATE, OVERLAY and SWAP to further screens; screens already seen aren't walked again, so cycles end. It returns `screens` (with `depth`, the number of interactions from the start), `edges` (source screen and layer, trigger, action — NAVIGATE, OVERLAY, SWAP, SCROLL_TO, CHANGE_TO, BACK, CLOSE or URL — destination and transition; actions inside conditionals are marked `conditional`) and `dangling` edges whose destination is unset, deleted, unusable for the navigation (say, NAVIGATE to a nested layer) or on another page. `maxDepth` caps the walk and sets `truncated`. The plugin only returns raw reactions (one request per level of the walk); the server builds the graph.
 
 `export_flow_json` returns the same graph as `{ version, file, graph }` and, given a `path`, also writes it there.
+
+## Handoff Markdown
+
+`export_flow_markdown` traces a flow like `trace_flow` (same `nodeId` and `maxDepth`) and renders it for developers and coding agents: a header (file, page, start, screen count, whether it was truncated), then a `## Screen: Name (id)` section per screen in walk order with its Figma link, size and depth, and four subsections that are always present (`None.` when empty):
+
+- `Interactions`: a table of layer, trigger (with its delay, timeout or keys), action (overlay position, new tab, conditional), destination, transition type, direction, easing (preset, `cubic-bezier(…)` or `spring(…)`) and duration in ms. Instant is `INSTANT`.
+- `Broken interactions`: dangling edges with their `reason`.
+- `Tokens`: the variables (with each mode's value, aliases as `→ name`) and styles the screen's visible layers use, and the fields or slots using them; variables first, then styles, each by name.
+- `Components`: the instances on the screen in layer order, with their component (set name and variant for variants) and property values (`#id` suffixes dropped).
+
+Hidden layers are left out, and instances aren't looked inside (only their own bindings count): that's their component's business. `export_screen_markdown` renders one top-level frame the same way. The same document state produces byte-identical Markdown, so diffs between exports show design changes. Both take an optional `path` to also write the file (folders are created).
 
 ## Design system
 

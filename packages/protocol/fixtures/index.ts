@@ -265,7 +265,57 @@ function tappable(id: string, name: string, y: number): SerializedNode {
  * and URL actions, broken links, and an Orphan screen nothing leads to.
  */
 const onboardingScreens = [
-	onboardingScreen("4:1", "Welcome", 0, [tappable("4:2", "Get started", 700)]),
+	onboardingScreen("4:1", "Welcome", 0, [
+		tappable("4:2", "Get started", 700),
+		{
+			id: "4:3",
+			name: "Headline",
+			type: "TEXT",
+			x: 24,
+			y: 120,
+			width: 345,
+			height: 34,
+			fills: [{ type: "SOLID", color: "#111111" }],
+			text: {
+				characters: "Hello",
+				fontName: { family: "Inter", style: "Bold" },
+				fontSize: 28,
+			},
+			styles: { fill: "S:text-primary,", text: "S:heading," },
+		},
+		{
+			id: "4:4",
+			name: "Step chip",
+			type: "INSTANCE",
+			x: 24,
+			y: 180,
+			width: 120,
+			height: 32,
+			cornerRadius: 16,
+			fills: [{ type: "SOLID", color: "#3366ff", variable: "VariableID:1:1" }],
+			instance: {
+				mainComponent: { id: "3:3", name: "Size=Large" },
+				properties: { Size: "Large" },
+			},
+			variables: { paddingLeft: "VariableID:2:4" },
+		},
+		{
+			id: "4:5",
+			name: "Hidden hint",
+			type: "TEXT",
+			visible: false,
+			x: 24,
+			y: 230,
+			width: 345,
+			height: 20,
+			text: {
+				characters: "Psst",
+				fontName: { family: "Inter", style: "Regular" },
+				fontSize: 16,
+			},
+			styles: { text: "S:body," },
+		},
+	]),
 	onboardingScreen("4:10", "Permissions", 1, [
 		tappable("4:11", "Allow", 640),
 		tappable("4:12", "Learn more", 700),
