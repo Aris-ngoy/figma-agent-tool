@@ -45,19 +45,19 @@ export async function duplicateNode({
 	parentId,
 	index,
 }: CommandParams<"duplicate_node">): Promise<CommandResult<"duplicate_node">> {
-	const node = await findNode(id);
-	check(layerError(node, "duplicate"));
+	const found = await findNode(id);
+	check(layerError(found, "duplicate"));
+	const node = found as SceneNode;
 	const parent = await container(parentId ?? (node.parent?.id as string));
-	const sceneNode = node as SceneNode;
 	check(indexError(index, parent, parent.children.length));
 	let at =
 		index ??
 		(parent === node.parent
-			? parent.children.indexOf(sceneNode) + 1
+			? parent.children.indexOf(node) + 1
 			: parent.children.length);
 	const copies: SceneNode[] = [];
 	for (let i = 0; i < count; i++) {
-		const copy = sceneNode.clone();
+		const copy = node.clone();
 		moveTo(parent, copy, at++);
 		copies.push(copy);
 	}
@@ -78,11 +78,10 @@ export async function reparentNodes({
 	const nodes: NodeOutcome[] = [];
 	for (const id of ids) {
 		try {
-			const node = await findNode(id);
+			const node = (await findNode(id)) as SceneNode;
 			check(moveError(node, parent));
-			const target = at ?? parent.children.length;
-			moveTo(parent, node as SceneNode, target);
-			if (at !== undefined) at = parent.children.indexOf(node as SceneNode) + 1;
+			moveTo(parent, node, at ?? parent.children.length);
+			if (at !== undefined) at = parent.children.indexOf(node) + 1;
 			nodes.push({ id, ok: true });
 		} catch (error) {
 			nodes.push({ id, ok: false, error: toBridgeError(error) });
