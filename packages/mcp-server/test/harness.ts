@@ -35,6 +35,7 @@ import { createMcpServer } from "../src/server";
 import { createYoqaRunner } from "../src/yoqa-runner";
 import { createFakeEditor } from "./fake-edits";
 import { createFakeFlows } from "./fake-flows";
+import { createFakeMotion } from "./fake-motion";
 import { createFakeReactions } from "./fake-reactions";
 import { createFakeRestructure } from "./fake-restructure";
 import { startFakeYoqa } from "./fake-yoqa";
@@ -106,6 +107,7 @@ type FakeDocument = {
 	editor: ReturnType<typeof createFakeEditor>;
 	reactions: ReturnType<typeof createFakeReactions>;
 	flows: ReturnType<typeof createFakeFlows>;
+	motion: ReturnType<typeof createFakeMotion>;
 	restructure: ReturnType<typeof createFakeRestructure>;
 };
 
@@ -119,6 +121,7 @@ function fakeDocument(): FakeDocument {
 		editor: createFakeEditor(copy, nextId),
 		reactions: createFakeReactions(copy),
 		flows: createFakeFlows(copy),
+		motion: createFakeMotion(copy),
 		restructure: createFakeRestructure(copy, nextId),
 	};
 }
@@ -126,7 +129,7 @@ function fakeDocument(): FakeDocument {
 /** Answers server requests from the plugin's document and the fixtures. */
 function answer(
 	message: ServerMessage,
-	{ document, editor, reactions, flows, restructure }: FakeDocument,
+	{ document, editor, reactions, flows, motion, restructure }: FakeDocument,
 	exportPng: FakePluginOptions["exportPng"],
 ): Response | undefined {
 	if (message.type !== "request") return undefined;
@@ -232,6 +235,13 @@ function answer(
 			const { command } = message;
 			const params = commands[command].params.parse(message.params);
 			const handle = flows[command] as (params: unknown) => object;
+			return okOrFailure(handle(params));
+		}
+		case "get_motion":
+		case "set_motion": {
+			const { command } = message;
+			const params = commands[command].params.parse(message.params);
+			const handle = motion[command] as (params: unknown) => object;
 			return okOrFailure(handle(params));
 		}
 		default:

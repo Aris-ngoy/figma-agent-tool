@@ -5,21 +5,29 @@
 // variable aliases).
 import { afterEach } from "bun:test";
 import {
+	type AppliedAnimationStyle,
 	BINDABLE_TEXT_FIELDS,
 	type Effect,
+	type KeyframeField,
+	type KeyframeTrack,
+	keyframeFieldKey,
 	type Paint,
 	type Reaction,
 	type SerializedNode,
 	type VariableValue,
 } from "@figma-agent-tool/protocol";
 import {
+	appliedStyleId,
 	availableFonts,
 	createdNodeId,
 	type DocumentFixture,
 	findNode,
 	framePng,
+	keyframeId,
+	keyframeTrackId,
 	prefixIds,
 	renumber,
+	timelineId,
 } from "@figma-agent-tool/protocol/fixtures";
 
 const mixed = Symbol("figma.mixed");
@@ -50,7 +58,11 @@ function childrenOf(parent: MockNode): MockNode[] {
 /** The serialized node each mock node was built from, for `clone`. */
 const sources = new WeakMap<MockNode, SerializedNode>();
 
-export function installMockFigma(document: DocumentFixture) {
+export function installMockFigma(
+	document: DocumentFixture,
+	/** `motion: false` mocks a Figma version without the Motion API. */
+	{ motion = true }: { motion?: boolean } = {},
+) {
 	const storage = new Map<string, unknown>();
 	const byId = new Map<string, MockNode>();
 	const exports: { nodeId: string; settings: unknown }[] = [];
@@ -123,11 +135,26 @@ export function installMockFigma(document: DocumentFixture) {
 			effects: style.effects.map(toEffect),
 		})),
 	};
+	const customAnimationStyles = document.motion.styles
+		.filter((style) => style.type === "CUSTOM")
+		.map((style) => ({
+			id: style.styleId,
+			name: style.name,
+			description: style.description ?? "",
+			type: "CUSTOM_ANIMATION",
+			animationEntries: [],
+		}));
+	const presets = document.motion.styles
+		.filter((style) => style.type === "FIGMA")
+		.map(({ type: _, ...style }) => style);
+	const timelineDurations = new Map(Object.entries(document.motion.timelines));
 	const stylesById = new Map<string, Record<string, unknown>>(
-		[...styles.paint, ...styles.text, ...styles.effect].map((style) => [
-			style.id,
-			style,
-		]),
+		[
+			...styles.paint,
+			...styles.text,
+			...styles.effect,
+			...(motion ? customAnimationStyles : []),
+		].map((style) => [style.id, style]),
 	);
 
 	/** Binding and style setters, which need the file's variables and styles. */
@@ -190,6 +217,110 @@ export function installMockFigma(document: DocumentFixture) {
 		}
 	}
 
+	/**
+	 * Like Figma's Motion API: applied styles, manual keyframe tracks read as
+	 * a nested record, and the top-level frame's timeline.
+	 */
+	function mockMotion(node: MockNode) {
+		const initial = document.motion.nodes[node.id];
+		let styles: AppliedAnimationStyle[] = structuredClone(
+			initial?.animationStyles ?? [],
+		);
+		let applied = styles.length;
+		const tracks = new Map(
+			(initial?.keyframeTracks ?? []).map((track) => [
+				keyframeFieldKey(track.field),
+				structuredClone(track),
+			]),
+		);
+		const frame = () => {
+			let up = node;
+			while ((up.parent as MockNode | undefined)?.type !== "PAGE") {
+				up = up.parent as MockNode;
+			}
+			return up;
+		};
+		Object.defineProperty(node, "animationStyles", {
+			enumerable: true,
+			get: () => structuredClone(styles),
+		});
+		Object.defineProperty(node, "manualKeyframeTracks", {
+			enumerable: true,
+			get: () => nestTracks([...tracks.values()]),
+		});
+		Object.defineProperty(node, "timelines", {
+			enumerable: true,
+			get: () => {
+				const { id } = frame();
+				const duration = timelineDurations.get(id);
+				return duration ? [{ id: timelineId(id), duration }] : [];
+			},
+		});
+		node.applyAnimationStyle = (
+			styleId: string,
+			config: Record<string, unknown> = {},
+		) => {
+			const id = appliedStyleId(node.id, ++applied);
+			if (config.type === "CUSTOM") {
+				const style = customAnimationStyles.find((s) => s.id === styleId);
+				if (!style) throw new Error(`No custom animation style ${styleId}`);
+				styles.push({
+					...config,
+					type: "CUSTOM",
+					id,
+					styleId,
+					name: style.name,
+				});
+				return id;
+			}
+			const preset = presets.find((s) => s.styleId === styleId);
+			if (!preset) throw new Error(`No animation style ${styleId}`);
+			const { props: _, ...style } = preset;
+			const defined = Object.fromEntries(
+				Object.entries(config).filter(([, value]) => value !== undefined),
+			);
+			styles.push({ ...style, ...defined, type: "FIGMA", id });
+			return id;
+		};
+		node.removeAnimationStyle = (id: string) => {
+			if (!styles.some((style) => style.id === id)) {
+				throw new Error(`No applied animation style ${id}`);
+			}
+			styles = styles.filter((style) => style.id !== id);
+		};
+		node.applyManualKeyframeTrack = (
+			field: KeyframeField,
+			{ id, baseValue, keyframes }: Omit<KeyframeTrack, "field">,
+		) => {
+			if (field.type === "INDEXED_ITEM") {
+				const items = node[field.collection];
+				if (!Array.isArray(items) || field.index >= items.length) {
+					throw new Error(`No ${field.collection}[${field.index}] to animate`);
+				}
+			}
+			const trackId = id ?? keyframeTrackId(node.id, field);
+			tracks.set(keyframeFieldKey(field), {
+				field,
+				id: trackId,
+				...(baseValue && { baseValue }),
+				keyframes: keyframes.map((keyframe, index) => ({
+					id: keyframeId(trackId, index),
+					...keyframe,
+				})),
+			});
+		};
+		node.removeManualKeyframeTrack = (field: KeyframeField) => {
+			tracks.delete(keyframeFieldKey(field));
+		};
+		node.setTimelineDuration = (id: string, duration: number) => {
+			const frameId = frame().id;
+			if (id !== timelineId(frameId) || !timelineDurations.has(frameId)) {
+				throw new Error(`No timeline ${id}`);
+			}
+			timelineDurations.set(frameId, duration);
+		};
+	}
+
 	function register(node: MockNode, parent?: MockNode): MockNode {
 		node.parent = parent;
 		byId.set(node.id, node);
@@ -217,6 +348,7 @@ export function installMockFigma(document: DocumentFixture) {
 			return copy;
 		};
 		mockReactions(node, document.reactions[node.id] ?? []);
+		if (motion) mockMotion(node);
 		if (node.children) canAppend(node);
 		if (node.type === "TEXT") guardText(node, loadedFonts);
 		bindable(node);
@@ -418,6 +550,13 @@ export function installMockFigma(document: DocumentFixture) {
 		getLocalPaintStylesAsync: async () => styles.paint,
 		getLocalTextStylesAsync: async () => styles.text,
 		getLocalEffectStylesAsync: async () => styles.effect,
+		...(motion && {
+			motion: {
+				playheadPosition: undefined,
+				figmaAnimationStyles: () => structuredClone(presets),
+			},
+			getLocalCustomAnimationStylesAsync: async () => customAnimationStyles,
+		}),
 		variables: {
 			getLocalVariableCollectionsAsync: async () => collections,
 			getLocalVariablesAsync: async () => [...variables.values()],
@@ -516,6 +655,34 @@ function mockReactions(node: MockNode, initial: Reaction[]) {
 afterEach(() => {
 	delete (globalThis as { figma?: unknown }).figma;
 });
+
+/** Tracks in the Plugin API's nested `manualKeyframeTracks` shape. */
+function nestTracks(tracks: KeyframeTrack[]) {
+	const nested: Record<string, unknown> = {};
+	// Newest first, so the plugin can't rely on the order Figma reports.
+	for (const { field, ...binding } of [...tracks].reverse()) {
+		const path =
+			field.type === "PROPERTY"
+				? [field.name]
+				: [
+						field.collection,
+						String(field.index),
+						...(field.propertyId
+							? ["properties", field.propertyId]
+							: field.field
+								? [field.field]
+								: []),
+					];
+		const key = path.pop() as string;
+		let at = nested;
+		for (const step of path) {
+			at[step] ??= {};
+			at = at[step] as Record<string, unknown>;
+		}
+		at[key] = binding;
+	}
+	return nested;
+}
 
 /** The box around the nodes, in their parent's coordinates. */
 function bounds(nodes: MockNode[]) {

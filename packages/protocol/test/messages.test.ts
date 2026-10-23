@@ -61,6 +61,16 @@ describe("document fixture", () => {
 		}
 	});
 
+	test("every node's Motion parses unchanged as set_motion input", () => {
+		for (const [nodeId, motion] of Object.entries(document.motion.nodes)) {
+			const params = commands.set_motion.params.parse({ nodeId, ...motion });
+			expect(params.keyframeTracks).toEqual(motion.keyframeTracks);
+			expect(params.animationStyles?.map((style) => style.styleId)).toEqual(
+				motion.animationStyles.map((style) => style.styleId),
+			);
+		}
+	});
+
 	test("every exchange pairs valid params with a valid correlated response", () => {
 		for (const [request, response] of exchanges) {
 			expect(response.id).toBe(request.id);
