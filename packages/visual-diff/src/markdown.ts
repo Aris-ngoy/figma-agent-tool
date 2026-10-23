@@ -14,10 +14,6 @@ export function renderMarkdown(
 	images: ImagePaths = {},
 ): string {
 	const { width, height } = report.dimensions;
-	const scale =
-		report.scale.x === report.scale.y
-			? `×${round(report.scale.x)}`
-			: `×${round(report.scale.x)} wide, ×${round(report.scale.y)} high`;
 	const lines = [
 		`## Visual comparison: ${report.pass ? "PASS" : "FAIL"}`,
 		"",
@@ -25,7 +21,7 @@ export function renderMarkdown(
 		"|---|---|",
 		`| Mismatch | ${report.mismatchPercent}% (budget ${report.mismatchBudget}%) |`,
 		`| Mismatched pixels | ${report.mismatchedPixels} of ${report.comparedPixels} compared |`,
-		`| Aligned size | ${width}×${height} px (design scaled ${scale}) |`,
+		`| Aligned size | ${width}×${height} px (design scaled ${describeScale(report.scale)}) |`,
 		`| Masks | ${describeMasks(report.masks)} |`,
 	];
 	if (report.regions.length > 0) {
@@ -58,6 +54,13 @@ export function describeMasks(masks: readonly AppliedMask[]): string {
 	return masks
 		.map((mask) => `${MASK_LABELS[mask.kind]} (${box(mask)})`)
 		.join(", ");
+}
+
+/** "×3", or "×3 wide, ×2.5 high" when the axes differ. */
+export function describeScale(scale: { x: number; y: number }): string {
+	return scale.x === scale.y
+		? `×${round(scale.x)}`
+		: `×${round(scale.x)} wide, ×${round(scale.y)} high`;
 }
 
 const round = (value: number) => Math.round(value * 1000) / 1000;

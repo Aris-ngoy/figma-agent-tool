@@ -2,6 +2,7 @@
 import {
 	type ComparisonReport,
 	describeMasks,
+	describeScale,
 } from "@figma-agent-tool/visual-diff";
 
 type NodeRef = { id: string; name: string; type: string };
@@ -24,10 +25,6 @@ export const QA_FILES = {
 export function renderQaReport(report: QaReport): string {
 	const { screen, device } = report;
 	const { width, height } = report.dimensions;
-	const ratio =
-		report.scale.x === report.scale.y
-			? `×${round(report.scale.x)}`
-			: `×${round(report.scale.x)} wide, ×${round(report.scale.y)} high`;
 	const lines = [
 		`## Visual QA: ${screen.name} — ${report.pass ? "PASS" : "FAIL"}`,
 		"",
@@ -37,7 +34,7 @@ export function renderQaReport(report: QaReport): string {
 		`| Device | ${device.platform} ${device.deviceId} |`,
 		`| Mismatch | ${report.mismatchPercent}% (budget ${report.mismatchBudget}%) |`,
 		`| Mismatched pixels | ${report.mismatchedPixels} of ${report.comparedPixels} compared |`,
-		`| Aligned size | ${width}×${height} px (${ratio} device pixels per point) |`,
+		`| Aligned size | ${width}×${height} px (${describeScale(report.scale)} device pixels per point) |`,
 		`| Masks | ${describeMasks(report.masks)} |`,
 	];
 	if (report.navigation) {
@@ -74,5 +71,3 @@ export function renderQaReport(report: QaReport): string {
 	);
 	return `${lines.join("\n")}\n`;
 }
-
-const round = (value: number) => Math.round(value * 1000) / 1000;

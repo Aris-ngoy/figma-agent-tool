@@ -9,5 +9,10 @@ export {
 	type Rect,
 } from "./compare";
 export { AspectRatioMismatchError, ComparisonError } from "./errors";
-export { describeMasks, type ImagePaths, renderMarkdown } from "./markdown";
+export {
+	describeMasks,
+	describeScale,
+	type ImagePaths,
+	renderMarkdown,
+} from "./markdown";
 export { MAX_REGIONS, type MismatchRegion } from "./regions";
