@@ -24,6 +24,21 @@ export function pageNotFound(id: string | undefined) {
 	);
 }
 
+/** Whether the server has (nearly) stopped waiting for the current command. */
+export type Deadline = { passed(): boolean };
+
+export const NO_DEADLINE: Deadline = { passed: () => false };
+
+/** Throws `timed_out` once the server has stopped waiting for the command. */
+export function checkDeadline(deadline: Deadline) {
+	if (deadline.passed()) {
+		throw new CommandError(
+			"timed_out",
+			"The server stopped waiting for this command, so it stopped without changing the document.",
+		);
+	}
+}
+
 export function toBridgeError(error: unknown): BridgeError {
 	return {
 		code: error instanceof CommandError ? error.code : "command_failed",

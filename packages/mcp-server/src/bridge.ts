@@ -8,6 +8,7 @@ import {
 	type CommandParams,
 	type CommandResult,
 	commands,
+	DEADLINE_COMMANDS,
 	type FileInfo,
 	type HandshakeAck,
 	parsePluginMessage,
@@ -53,8 +54,14 @@ export class BridgeTimeoutError extends BridgeRequestError {
 	constructor(command: CommandName, timeoutMs: number) {
 		super(
 			`The Figma plugin did not answer \`${command}\` within ${timeoutMs} ms, ` +
-				"so the command timed out. Check that the plugin is still open and " +
-				"Figma isn't busy, then retry.",
+				"so the command timed out. Figma slows plugins down sharply while " +
+				"its window is hidden (minimized, covered, or with the screen " +
+				"locked), so bring the Figma window to the front, check the plugin " +
+				"is still open, then retry." +
+				(DEADLINE_COMMANDS.includes(command)
+					? ` \`${command}\` stops without changing the document once its ` +
+						"time is up, so retrying won't duplicate anything."
+					: ""),
 		);
 		this.name = "BridgeTimeoutError";
 	}
@@ -202,6 +209,7 @@ export function startBridge({
 				id: crypto.randomUUID(),
 				command,
 				params,
+				timeoutMs: requestTimeoutMs,
 			};
 			let timeout: ReturnType<typeof setTimeout> | undefined;
 			const result = await new Promise<unknown>((resolve, reject) => {

@@ -60,8 +60,15 @@ const sources = new WeakMap<MockNode, SerializedNode>();
 
 export function installMockFigma(
 	document: DocumentFixture,
-	/** `motion: false` mocks a Figma version without the Motion API. */
-	{ motion = true }: { motion?: boolean } = {},
+	{
+		motion = true,
+		fontLoadDelayMs = 0,
+	}: {
+		/** `motion: false` mocks a Figma version without the Motion API. */
+		motion?: boolean;
+		/** Delays every font load, as Figma does in a hidden window. */
+		fontLoadDelayMs?: number;
+	} = {},
 ) {
 	const storage = new Map<string, unknown>();
 	const byId = new Map<string, MockNode>();
@@ -583,7 +590,11 @@ export function installMockFigma(
 		base64Encode(data: Uint8Array) {
 			return Buffer.from(data).toString("base64");
 		},
+		/** Every font load, with how many nodes had been created by then. */
+		fontLoads: [] as { font: string; createdBefore: number }[],
 		async loadFontAsync(font: Font) {
+			mock.fontLoads.push({ font: fontKey(font), createdBefore: created });
+			if (fontLoadDelayMs) await Bun.sleep(fontLoadDelayMs);
 			if (!availableFonts.some((f) => fontKey(f) === fontKey(font))) {
 				throw new Error(`The font "${fontKey(font)}" could not be loaded`);
 			}

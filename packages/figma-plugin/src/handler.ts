@@ -14,6 +14,8 @@ import { getDesignSystem } from "./design-system";
 import { createNodes, updateNodes } from "./edit";
 import {
 	CommandError,
+	type Deadline,
+	NO_DEADLINE,
 	nodeNotFound,
 	pageNotFound,
 	toBridgeError,
@@ -33,6 +35,7 @@ import { serializeNode } from "./serialize";
 type CommandImplementations = {
 	[C in CommandName]: (
 		params: CommandParams<C>,
+		deadline: Deadline,
 	) => CommandResult<C> | Promise<CommandResult<C>>;
 };
 
@@ -147,13 +150,15 @@ export function createCommandHandler({
 			if (!params.success) {
 				return failure(id, "invalid_params", params.error.message);
 			}
+			const deadline = deadlineFor(request.data.timeoutMs);
 			try {
 				// `params` was parsed with this command's schema; TypeScript can't
 				// correlate the two through the union, hence the cast.
 				const implementation = implementations[command] as (
 					params: unknown,
+					deadline: Deadline,
 				) => unknown;
-				const result = await implementation(params.data);
+				const result = await implementation(params.data, deadline);
 				return { type: "response", id, ok: true, result };
 			} catch (error) {
 				const { code, message } = toBridgeError(error);
@@ -161,6 +166,16 @@ export function createCommandHandler({
 			}
 		},
 	};
+}
+
+/**
+ * When to stop: a little before the server gives up, so an edit can't land
+ * after the agent was told it timed out.
+ */
+function deadlineFor(timeoutMs: number | undefined): Deadline {
+	if (timeoutMs === undefined) return NO_DEADLINE;
+	const end = Date.now() + timeoutMs * 0.8;
+	return { passed: () => Date.now() > end };
 }
 
 function requestId(message: unknown): string {

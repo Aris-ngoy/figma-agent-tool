@@ -14,16 +14,17 @@ import { installMockFigma } from "./mock-figma";
 const pluginVersion = "0.0.0";
 
 /** A mocked file plus a `send` that runs commands through the real handler. */
-function plugin() {
-	const figma = installMockFigma(document);
+function plugin(options?: Parameters<typeof installMockFigma>[1]) {
+	const figma = installMockFigma(document, options);
 	const handler = createCommandHandler({ pluginVersion });
 	let n = 0;
-	async function send(command: string, params: unknown) {
+	async function send(command: string, params: unknown, timeoutMs?: number) {
 		return handler.handle({
 			type: "request",
 			id: `req-${++n}`,
 			command,
 			params,
+			timeoutMs,
 		});
 	}
 	return {
@@ -210,6 +211,83 @@ describe("create_nodes", () => {
 				],
 			},
 		]);
+	});
+});
+
+// Figma can stall a plugin for a minute at any `await` while its window is
+// hidden, so edits do every async step before touching the document.
+describe("edits in a hidden Figma window", () => {
+	const text = (characters: string, style = "Regular") => ({
+		type: "TEXT",
+		text: { characters, fontName: { family: "Inter", style } },
+	});
+
+	test("create_nodes loads each font once, before creating any node", async () => {
+		const figma = plugin();
+		await figma.result("create_nodes", {
+			parentId: "1:10",
+			nodes: [
+				text("Title", "Bold"),
+				{ type: "FRAME", children: [text("Email"), text("Password")] },
+				text("Footer"),
+			],
+		});
+		expect(figma.figma.fontLoads).toEqual([
+			{ font: "Inter Bold", createdBefore: 0 },
+			{ font: "Inter Regular", createdBefore: 0 },
+		]);
+	});
+
+	test("update_nodes loads each font once, before changing any node", async () => {
+		const figma = plugin();
+		await figma.result("update_nodes", {
+			updates: [
+				{ id: "1:2", text: { characters: "One" } },
+				{ id: "1:4", text: { characters: "Two" } },
+			],
+		});
+		const fonts = figma.figma.fontLoads.map(({ font }) => font);
+		expect(fonts).toEqual([...new Set(fonts)]);
+	});
+
+	test("create_nodes past its deadline creates nothing and says so", async () => {
+		const figma = plugin({ fontLoadDelayMs: 40 });
+		const before = await figma.node("1:10");
+		const response = await figma.send(
+			"create_nodes",
+			{ parentId: "1:10", nodes: [text("Late")] },
+			20,
+		);
+		expect(response).toMatchObject({
+			ok: false,
+			error: { code: "timed_out" },
+		});
+		expect(await figma.node("1:10")).toEqual(before);
+		expect(figma.figma.undoCommits).toBe(0);
+	});
+
+	test("update_nodes past its deadline changes nothing", async () => {
+		const figma = plugin({ fontLoadDelayMs: 40 });
+		const response = await figma.send(
+			"update_nodes",
+			{ updates: [{ id: "1:2", name: "Late", text: { characters: "Late" } }] },
+			20,
+		);
+		expect(response).toMatchObject({
+			ok: false,
+			error: { code: "timed_out" },
+		});
+		expect(await figma.node("1:2")).toEqual(findNode("1:2") as never);
+	});
+
+	test("edits that finish in time are unaffected by the deadline", async () => {
+		const figma = plugin();
+		const response = await figma.send(
+			"create_nodes",
+			{ parentId: "1:10", nodes: [text("On time")] },
+			30_000,
+		);
+		expect(response).toMatchObject({ ok: true });
 	});
 });
 

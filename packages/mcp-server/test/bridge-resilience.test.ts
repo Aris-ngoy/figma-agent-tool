@@ -35,6 +35,27 @@ describe("bridge resilience", () => {
 		expect(result.isError).toBe(true);
 		expect(text(result)).toContain("`ping`");
 		expect(text(result)).toContain("timed out");
+		// Figma throttles plugins in a hidden window: the usual cause.
+		expect(text(result)).toContain("bring the Figma window to the front");
+		expect(text(result)).not.toContain("duplicate");
+	});
+
+	test("tells the agent a timed-out edit made no changes, so retrying is safe", async () => {
+		const harness = await startHarness({ requestTimeoutMs: 50 });
+		await harness.connectFakePlugin({ answers: false });
+		const result = await harness.callTool("create_nodes", {
+			nodes: [{ type: "FRAME" }],
+		});
+		expect(result.isError).toBe(true);
+		expect(text(result)).toContain("`create_nodes`");
+		expect(text(result)).toContain("without changing the document");
+	});
+
+	test("sends each request with the time the server will wait for it", async () => {
+		const harness = await withPingTool({ requestTimeoutMs: 50 });
+		const plugin = await harness.connectFakePlugin({ answers: false });
+		await harness.callTool("ping_plugin");
+		expect(plugin.requests[0]?.timeoutMs).toBe(50);
 	});
 
 	test("a command in flight when the plugin disconnects fails instead of hanging", async () => {

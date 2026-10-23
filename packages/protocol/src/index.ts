@@ -1628,12 +1628,26 @@ export type CommandResult<C extends CommandName> = z.infer<
 
 const commandNames = Object.keys(commands) as [CommandName, ...CommandName[]];
 
-/** Server → plugin. `id` correlates the plugin's response. */
+/**
+ * Commands that check the request's deadline before editing and fail with
+ * `timed_out`, leaving the document unchanged, once it has passed.
+ */
+export const DEADLINE_COMMANDS: readonly CommandName[] = [
+	"create_nodes",
+	"update_nodes",
+];
+
+/**
+ * Server → plugin. `id` correlates the plugin's response. `timeoutMs` is how
+ * long the server waits for it: commands in DEADLINE_COMMANDS stop without
+ * editing once it has (nearly) passed, since the server has given up on them.
+ */
 export const Request = z.object({
 	type: z.literal("request"),
 	id: z.string().min(1),
 	command: z.enum(commandNames),
 	params: z.unknown(),
+	timeoutMs: z.number().positive().optional(),
 });
 export type Request = z.infer<typeof Request>;
 

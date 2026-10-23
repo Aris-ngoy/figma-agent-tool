@@ -1,9 +1,16 @@
 // Write commands: create and update nodes in batches. Each item succeeds or
 // fails on its own, and every batch lands as one undoable step in Figma.
+//
+// While its window is hidden, Figma can stall a plugin for about a minute at
+// any `await`. So each batch first does all its async work (lookups, then
+// every font at once), checks the server is still waiting, and only then
+// edits the document synchronously: a stall can delay a batch but never
+// leave it half done. Applying styles is the one async step after that.
 import {
 	BINDABLE_FIELD_TYPES,
 	BINDABLE_TEXT_FIELDS,
 	type BindableField,
+	type BridgeError,
 	type CommandParams,
 	type CommandResult,
 	type CreatedNode,
@@ -15,17 +22,43 @@ import {
 	type StyleSlot,
 	type UpdatedNode,
 } from "@figma-agent-tool/protocol";
-import { CommandError, nodeNotFound, toBridgeError } from "./errors";
+import {
+	CommandError,
+	checkDeadline,
+	type Deadline,
+	NO_DEADLINE,
+	nodeNotFound,
+	toBridgeError,
+} from "./errors";
 
 /** The font Figma gives new text nodes. */
 const DEFAULT_FONT: FontName = { family: "Inter", style: "Regular" };
 
 type Container = BaseNode & ChildrenMixin;
 
-export async function createNodes({
-	parentId,
-	nodes,
-}: CommandParams<"create_nodes">): Promise<CommandResult<"create_nodes">> {
+/** A node spec with its lookups done, ready to create synchronously. */
+type PreparedNode = {
+	spec: NodeSpec;
+	error?: BridgeError;
+	component?: ComponentNode;
+	bindings: Bindings;
+	fonts: FontName[];
+	children?: PreparedNode[];
+};
+
+/** A style to apply once the batch's synchronous edits are done. */
+type StyleJob = {
+	node: BaseNode;
+	slot: StyleSlot;
+	style: BaseStyle | null;
+	/** Marks the node's item failed if the style can't be applied. */
+	fail(error: BridgeError): void;
+};
+
+export async function createNodes(
+	{ parentId, nodes }: CommandParams<"create_nodes">,
+	deadline: Deadline = NO_DEADLINE,
+): Promise<CommandResult<"create_nodes">> {
 	const parent = parentId
 		? await figma.getNodeByIdAsync(parentId)
 		: figma.currentPage;
@@ -34,17 +67,29 @@ export async function createNodes({
 	if (invalid) throw new CommandError(invalid.code, invalid.message);
 	const container = parent as Container;
 	if (container.type === "PAGE") await container.loadAsync();
-	const results: CreatedNode[] = [];
-	for (const spec of nodes) results.push(await createNode(spec, container));
+	const prepared = await Promise.all(nodes.map(prepareNode));
+	const failedFonts = await loadFonts(prepared.flatMap(allFonts));
+	checkDeadline(deadline);
+
+	const styleJobs: StyleJob[] = [];
+	const created: SceneNode[] = [];
+	const results = prepared.map((item) =>
+		buildNode(item, container, failedFonts, styleJobs, created),
+	);
+	await applyStyles(styleJobs);
+	if (deadline.passed()) {
+		// Styles stalled past the deadline: undo the batch rather than leave
+		// nodes the agent was told weren't made.
+		for (const node of created) if (!node.removed) node.remove();
+		checkDeadline(deadline);
+	}
 	figma.commitUndo();
 	return { nodes: results };
 }
 
-async function createNode(
-	{ type, componentId, children, ...props }: NodeSpec,
-	parent: Container,
-): Promise<CreatedNode> {
-	let node: SceneNode | undefined;
+/** Validates a spec and does its lookups, collecting the fonts it needs. */
+async function prepareNode(spec: NodeSpec): Promise<PreparedNode> {
+	const { type, componentId, children, ...props } = spec;
 	try {
 		if (children && type !== "FRAME") {
 			throw new CommandError(
@@ -52,22 +97,68 @@ async function createNode(
 				`A ${type} can't hold children; nest them in a FRAME instead.`,
 			);
 		}
-		node = await instantiate(type, componentId, props);
-		parent.appendChild(node);
-		await applyProps(node, props);
-		const result: CreatedNode = {
-			ok: true,
-			id: node.id,
-			name: node.name,
-			type: node.type,
+		const [component, bindings, preparedChildren] = await Promise.all([
+			type === "INSTANCE" ? findComponent(componentId) : undefined,
+			resolveBindings(props),
+			children ? Promise.all(children.map(prepareNode)) : undefined,
+		]);
+		const fonts =
+			type === "TEXT"
+				? [props.text?.fontName ?? DEFAULT_FONT, ...styleFonts(bindings)]
+				: [];
+		return {
+			spec,
+			component,
+			bindings,
+			fonts,
+			children: preparedChildren,
 		};
-		if (children) {
-			const container = node as FrameNode;
-			result.children = [];
-			for (const child of children) {
-				result.children.push(await createNode(child, container));
-			}
+	} catch (error) {
+		return {
+			spec,
+			error: toBridgeError(error),
+			bindings: NO_BINDINGS,
+			fonts: [],
+		};
+	}
+}
+
+function allFonts(item: PreparedNode): FontName[] {
+	return [...item.fonts, ...(item.children ?? []).flatMap(allFonts)];
+}
+
+/** Creates a prepared node and its children; synchronous up to styles. */
+function buildNode(
+	item: PreparedNode,
+	parent: Container,
+	failedFonts: Set<string>,
+	styleJobs: StyleJob[],
+	created: SceneNode[],
+): CreatedNode {
+	if (item.error) return { ok: false, error: item.error };
+	const { type, componentId, children, ...props } = item.spec;
+	let node: SceneNode | undefined;
+	// Filled in below; a failed style replaces it with the error.
+	const result = { ok: true } as CreatedNode;
+	try {
+		throwIfFontFailed(item.fonts, failedFonts);
+		const made = instantiate(type, item.component);
+		node = made;
+		parent.appendChild(made);
+		applyProps(made, props, item.bindings, styleJobs, (error) => {
+			made.remove();
+			replaceWithError(result, error);
+		});
+		Object.assign(result, { id: made.id, name: made.name, type: made.type });
+		if (item.children) {
+			const container = made as FrameNode;
+			Object.assign(result, {
+				children: item.children.map((child) =>
+					buildNode(child, container, failedFonts, styleJobs, []),
+				),
+			});
 		}
+		created.push(made);
 		return result;
 	} catch (error) {
 		node?.remove();
@@ -75,74 +166,132 @@ async function createNode(
 	}
 }
 
-/** Makes the bare node, checking fonts and components before it exists. */
-async function instantiate(
+/** Turns an item's result into a failure in place, keeping its position. */
+function replaceWithError(result: CreatedNode, error: BridgeError) {
+	for (const key of Object.keys(result)) {
+		delete (result as Record<string, unknown>)[key];
+	}
+	Object.assign(result, { ok: false, error });
+}
+
+/** Makes the bare node. */
+function instantiate(
 	type: NodeSpec["type"],
-	componentId: string | undefined,
-	props: NodeProps,
-): Promise<SceneNode> {
+	component: ComponentNode | undefined,
+): SceneNode {
 	switch (type) {
 		case "FRAME":
 			return figma.createFrame();
 		case "RECTANGLE":
 			return figma.createRectangle();
 		case "TEXT":
-			await loadFonts([props.text?.fontName ?? DEFAULT_FONT]);
 			return figma.createText();
-		case "INSTANCE": {
-			if (!componentId) {
-				throw new CommandError(
-					"invalid_spec",
-					"An INSTANCE needs the componentId of the COMPONENT to instantiate.",
-				);
-			}
-			const component = await figma.getNodeByIdAsync(componentId);
-			if (component?.type !== "COMPONENT") {
-				throw new CommandError(
-					"component_not_found",
-					`${component ? `Node ${componentId} is a ${component.type}, not` : `No node with ID "${componentId}" exists, so it isn't`} a COMPONENT. Use a component's ID (a variant's, for component sets); list_frames lists the components on each page.`,
-				);
-			}
-			return component.createInstance();
-		}
+		case "INSTANCE":
+			return (component as ComponentNode).createInstance();
 	}
 }
 
-export async function updateNodes({
-	updates,
-}: CommandParams<"update_nodes">): Promise<CommandResult<"update_nodes">> {
-	const results: UpdatedNode[] = [];
-	for (const { id, ...props } of updates) {
-		try {
-			const node = await figma.getNodeByIdAsync(id);
-			if (!node) throw nodeNotFound(id);
-			await applyProps(node, props);
-			results.push({ id, ok: true });
-		} catch (error) {
-			results.push({ id, ok: false, error: toBridgeError(error) });
-		}
+async function findComponent(
+	componentId: string | undefined,
+): Promise<ComponentNode> {
+	if (!componentId) {
+		throw new CommandError(
+			"invalid_spec",
+			"An INSTANCE needs the componentId of the COMPONENT to instantiate.",
+		);
 	}
+	const component = await figma.getNodeByIdAsync(componentId);
+	if (component?.type !== "COMPONENT") {
+		throw new CommandError(
+			"component_not_found",
+			`${component ? `Node ${componentId} is a ${component.type}, not` : `No node with ID "${componentId}" exists, so it isn't`} a COMPONENT. Use a component's ID (a variant's, for component sets); list_frames lists the components on each page.`,
+		);
+	}
+	return component;
+}
+
+/** A node to update with its lookups done. */
+type PreparedUpdate = {
+	id: string;
+	props: NodeProps;
+	error?: BridgeError;
+	node?: BaseNode;
+	bindings: Bindings;
+	fonts: FontName[];
+};
+
+export async function updateNodes(
+	{ updates }: CommandParams<"update_nodes">,
+	deadline: Deadline = NO_DEADLINE,
+): Promise<CommandResult<"update_nodes">> {
+	const prepared = await Promise.all(updates.map(prepareUpdate));
+	const failedFonts = await loadFonts(prepared.flatMap((item) => item.fonts));
+	checkDeadline(deadline);
+
+	const styleJobs: StyleJob[] = [];
+	const results = prepared.map((item): UpdatedNode => {
+		const { id, node, props, bindings } = item;
+		if (item.error) return { id, ok: false, error: item.error };
+		const result: UpdatedNode = { id, ok: true };
+		try {
+			throwIfFontFailed(item.fonts, failedFonts);
+			applyProps(node as BaseNode, props, bindings, styleJobs, (error) =>
+				Object.assign(result, { ok: false, error }),
+			);
+		} catch (error) {
+			return { id, ok: false, error: toBridgeError(error) };
+		}
+		return result;
+	});
+	await applyStyles(styleJobs);
 	figma.commitUndo();
 	return { nodes: results };
 }
 
+async function prepareUpdate({
+	id,
+	...props
+}: CommandParams<"update_nodes">["updates"][number]): Promise<PreparedUpdate> {
+	try {
+		const [node, bindings] = await Promise.all([
+			figma.getNodeByIdAsync(id),
+			resolveBindings(props),
+		]);
+		if (!node) throw nodeNotFound(id);
+		const fonts =
+			node.type === "TEXT" ? fontsNeeded(node, props, bindings) : [];
+		return { id, props, node, bindings, fonts };
+	} catch (error) {
+		return {
+			id,
+			props,
+			error: toBridgeError(error),
+			bindings: NO_BINDINGS,
+			fonts: [],
+		};
+	}
+}
+
 /**
- * Sets the given properties. Unsupported properties, unknown variables and
- * styles, and missing fonts are caught before anything changes. Order
- * matters: auto-layout before sizing, explicit sizes after text, which can
- * resize the node, and styles last, so they win over raw values.
+ * Sets the given properties synchronously; the fonts they need must be
+ * loaded and their variables and styles resolved. Unsupported properties are
+ * caught before anything changes. Order matters: auto-layout before sizing,
+ * explicit sizes after text, which can resize the node, and styles last (as
+ * jobs run after the batch's edits), so they win over raw values.
  */
-async function applyProps(target: BaseNode, props: NodeProps) {
+function applyProps(
+	target: BaseNode,
+	props: NodeProps,
+	bindings: Bindings,
+	styleJobs: StyleJob[],
+	fail: StyleJob["fail"],
+) {
 	const missing = unsupportedProp(target, props);
 	if (missing) {
 		throw new CommandError(
 			"unsupported_property",
 			`Node ${target.id} is a ${target.type}, which has no ${missing}.`,
 		);
-	}
-	const bindings = await resolveBindings(props);
-	if (target.type === "TEXT") {
-		await loadFonts(fontsNeeded(target, props, bindings));
 	}
 	if (props.text) applyText(target as TextNode, props.text);
 
@@ -180,8 +329,31 @@ async function applyProps(target: BaseNode, props: NodeProps) {
 		);
 	}
 	for (const [slot, style] of bindings.styles) {
-		await STYLE_SETTERS[slot](node as unknown as TextNode, style?.id ?? "");
+		styleJobs.push({ node, slot, style, fail });
 	}
+}
+
+/**
+ * Applies the batch's styles all at once (Figma only has async setters).
+ * Each node's styles run in order, after its raw values.
+ */
+async function applyStyles(jobs: StyleJob[]) {
+	const byNode = new Map<BaseNode, StyleJob[]>();
+	for (const job of jobs) {
+		byNode.set(job.node, [...(byNode.get(job.node) ?? []), job]);
+	}
+	await Promise.all(
+		[...byNode.values()].map(async (nodeJobs) => {
+			for (const { node, slot, style, fail } of nodeJobs) {
+				try {
+					await STYLE_SETTERS[slot](node as TextNode, style?.id ?? "");
+				} catch (error) {
+					fail(toBridgeError(error));
+					return;
+				}
+			}
+		}),
+	);
 }
 
 type Bindings = {
@@ -192,6 +364,8 @@ type Bindings = {
 	/** null detaches the style. */
 	styles: [StyleSlot, BaseStyle | null][];
 };
+
+const NO_BINDINGS: Bindings = { variables: new Map(), fields: [], styles: [] };
 
 /** Looks up every variable and style the props name, checking their types. */
 async function resolveBindings(props: NodeProps): Promise<Bindings> {
@@ -296,10 +470,14 @@ function fontsNeeded(
 	else if (props.text || bindsText || stylesText) {
 		fonts.push(...currentFonts(node));
 	}
-	for (const [, style] of bindings.styles) {
-		if (style?.type === "TEXT") fonts.push((style as TextStyle).fontName);
-	}
-	return fonts;
+	return [...fonts, ...styleFonts(bindings)];
+}
+
+/** Fonts the text styles being applied use. */
+function styleFonts(bindings: Bindings): FontName[] {
+	return bindings.styles.flatMap(([, style]) =>
+		style?.type === "TEXT" ? [(style as TextStyle).fontName] : [],
+	);
 }
 
 /** Which Plugin API member each property needs on the node. */
@@ -355,16 +533,31 @@ function currentFonts(node: TextNode): FontName[] {
 		: [node.fontName];
 }
 
-async function loadFonts(fonts: FontName[]) {
-	for (const font of fonts) {
-		try {
-			await figma.loadFontAsync(font);
-		} catch {
-			throw new CommandError(
-				"font_not_found",
-				`Font "${font.family} ${font.style}" isn't available in this file. Use an installed font, such as one an existing text node's fontName shows.`,
-			);
-		}
+const fontKey = (font: FontName) => `${font.family} ${font.style}`;
+
+/** Loads each distinct font once, all at the same time; returns those that failed. */
+async function loadFonts(fonts: FontName[]): Promise<Set<string>> {
+	const unique = new Map(fonts.map((font) => [fontKey(font), font]));
+	const failed = new Set<string>();
+	await Promise.all(
+		[...unique].map(async ([key, font]) => {
+			try {
+				await figma.loadFontAsync(font);
+			} catch {
+				failed.add(key);
+			}
+		}),
+	);
+	return failed;
+}
+
+function throwIfFontFailed(fonts: FontName[], failed: Set<string>) {
+	const font = fonts.find((candidate) => failed.has(fontKey(candidate)));
+	if (font) {
+		throw new CommandError(
+			"font_not_found",
+			`Font "${font.family} ${font.style}" isn't available in this file. Use an installed font, such as one an existing text node's fontName shows.`,
+		);
 	}
 }
 
