@@ -19,6 +19,7 @@
 // Usage:
 //   bun run sandcastle
 
+import { execFileSync } from "node:child_process";
 import * as sandcastle from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { z } from "zod";
@@ -51,6 +52,16 @@ const hooks = {
 // starts. Avoids a full bun install from scratch; the hook above handles
 // platform-specific binaries and any packages added since the last copy.
 const copyToWorktree = ["node_modules"];
+
+// True when the branch has commits the current branch doesn't.
+function hasUnmergedCommits(branch: string): boolean {
+	const count = execFileSync(
+		"git",
+		["rev-list", "--count", `HEAD..refs/heads/${branch}`],
+		{ encoding: "utf8" },
+	);
+	return Number(count.trim()) > 0;
+}
 
 // ---------------------------------------------------------------------------
 // Main loop
@@ -170,13 +181,16 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
 		}
 	}
 
-	// Only pass branches that actually produced commits to the merge phase.
-	// An agent that ran successfully but made no commits has nothing to merge.
+	// Only pass branches with something to merge to the merge phase: commits
+	// from this run, or commits left unmerged by an earlier interrupted run (in
+	// which case the implementer finds the work done and adds nothing). Without
+	// the second check the planner would pick that issue forever.
 	const completedIssues = outcomes
 		.filter(
 			(entry) =>
 				entry.outcome?.status === "fulfilled" &&
-				entry.outcome.value.commits.length > 0,
+				(entry.outcome.value.commits.length > 0 ||
+					hasUnmergedCommits(entry.issue.branch)),
 		)
 		.map((entry) => entry.issue);
 
