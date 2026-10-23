@@ -2,16 +2,24 @@
 // its copy of the document fixture, in serialized form, the way the real
 // plugin's edits read back through get_node. The plugin tests replay the
 // same fixture exchanges against the real handler.
-import type {
-	BridgeError,
-	CommandParams,
-	CommandResult,
-	CreatedNode,
-	NodeProps,
-	NodeSpec,
-	PaintInput,
-	SerializedNode,
-	UpdatedNode,
+import {
+	BINDABLE_FIELD_TYPES,
+	type BindableField,
+	type BridgeError,
+	type CommandParams,
+	type CommandResult,
+	type CreatedNode,
+	type DesignSystem,
+	type NodeProps,
+	type NodeSpec,
+	type Paint,
+	type PaintInput,
+	type SerializedNode,
+	STYLE_SLOTS,
+	type StyleSlot,
+	type UpdatedNode,
+	type VariableInfo,
+	type VariableValue,
 } from "@figma-agent-tool/protocol";
 import {
 	availableFonts,
@@ -22,6 +30,10 @@ import {
 	nodeNotFoundResponse,
 	notAComponentError,
 	prefixIds,
+	styleNotFoundError,
+	styleTypeMismatchError,
+	variableNotFoundError,
+	variableTypeMismatchError,
 } from "@figma-agent-tool/protocol/fixtures";
 
 class FakeCommandError extends Error {
@@ -66,8 +78,112 @@ const NEW_NODES: Record<
 	},
 };
 
+type Style =
+	| ({ type: "PAINT" } & DesignSystem["styles"]["paint"][number])
+	| ({ type: "TEXT" } & DesignSystem["styles"]["text"][number])
+	| ({ type: "EFFECT" } & DesignSystem["styles"]["effect"][number]);
+
+type Bindings = {
+	/** Hex colors of the variables bound to paints, by variable ID. */
+	colors: Map<string, string>;
+	/** Each bound field with its variable ID and resolved value. */
+	fields: [BindableField, { id: string; value: VariableValue } | null][];
+	styles: [StyleSlot, Style | null][];
+};
+
 export function createFakeEditor(doc: DocumentFixture) {
 	let created = 0;
+
+	const variables = new Map(
+		doc.collections.flatMap((collection) =>
+			collection.variables.map((variable) => [
+				variable.id,
+				{ variable, defaultMode: collection.defaultMode },
+			]),
+		),
+	);
+	const styles = new Map<string, Style>([
+		...doc.styles.paint.map((s) => [s.id, { ...s, type: "PAINT" }] as const),
+		...doc.styles.text.map((s) => [s.id, { ...s, type: "TEXT" }] as const),
+		...doc.styles.effect.map((s) => [s.id, { ...s, type: "EFFECT" }] as const),
+	]);
+
+	/** A variable's value in its collection's default mode, aliases followed. */
+	function resolve(id: string): VariableValue {
+		const { variable, defaultMode } = variables.get(id) as {
+			variable: VariableInfo;
+			defaultMode: string;
+		};
+		const value = variable.valuesByMode[defaultMode] as VariableValue;
+		return typeof value === "object" && "alias" in value
+			? resolve(value.alias)
+			: value;
+	}
+
+	function findVariable(id: string, field: string, expected: string) {
+		const variable = variables.get(id)?.variable;
+		if (!variable) throw new FakeCommandError(variableNotFoundError(id));
+		if (variable.type !== expected) {
+			throw new FakeCommandError(
+				variableTypeMismatchError(field, variable, expected),
+			);
+		}
+		return { id, value: resolve(id) };
+	}
+
+	/** Looks up every variable and style the props name, checking types. */
+	function resolveBindings(props: NodeProps): Bindings {
+		const bindings: Bindings = { colors: new Map(), fields: [], styles: [] };
+		for (const key of ["fills", "strokes"] as const) {
+			for (const paint of props[key] ?? []) {
+				if (paint.type !== "SOLID" || !paint.variable) continue;
+				const { value } = findVariable(paint.variable, key, "COLOR");
+				bindings.colors.set(paint.variable, (value as { color: string }).color);
+			}
+		}
+		for (const [name, id] of Object.entries(props.variables ?? {})) {
+			const field = name as BindableField;
+			bindings.fields.push([
+				field,
+				id === null
+					? null
+					: findVariable(id, field, BINDABLE_FIELD_TYPES[field]),
+			]);
+		}
+		for (const [name, id] of Object.entries(props.styles ?? {})) {
+			const slot = name as StyleSlot;
+			if (id === null) {
+				bindings.styles.push([slot, null]);
+				continue;
+			}
+			const style = styles.get(id);
+			if (!style) throw new FakeCommandError(styleNotFoundError(id));
+			const expected = STYLE_SLOTS[slot];
+			if (style.type !== expected) {
+				throw new FakeCommandError(
+					styleTypeMismatchError(slot, style, expected),
+				);
+			}
+			if (style.type === "TEXT") checkFont(style.fontName);
+			bindings.styles.push([slot, style]);
+		}
+		return bindings;
+	}
+
+	/** Raw props first, then bound values, then styles, as Figma applies them. */
+	function applyProps(node: SerializedNode, props: NodeProps) {
+		const bindings = resolveBindings(props);
+		applyRawProps(node, props, bindings.colors);
+		applyRawProps(node, boundValues(node, bindings.fields), bindings.colors);
+		const bound: Record<string, string> = { ...node.variables };
+		for (const [field, binding] of bindings.fields) {
+			if (binding) bound[field] = binding.id;
+			else delete bound[field];
+		}
+		node.variables = bound;
+		if (Object.keys(bound).length === 0) delete node.variables;
+		applyStyles(node, bindings.styles);
+	}
 
 	function find(id: string) {
 		const node = findNode(id, doc);
@@ -181,9 +297,115 @@ function checkFont(font: { family: string; style: string }) {
 	if (!installed) throw new FakeCommandError(fontNotFoundError(font));
 }
 
+/** The raw props that give each bound field its variable's value. */
+function boundValues(
+	node: SerializedNode,
+	fields: Bindings["fields"],
+): NodeProps {
+	const props: NodeProps = {};
+	const radius = node.cornerRadius ?? 0;
+	const corners =
+		typeof radius === "number"
+			? {
+					topLeft: radius,
+					topRight: radius,
+					bottomRight: radius,
+					bottomLeft: radius,
+				}
+			: { ...radius };
+	const padding: Record<string, number> = {};
+	const layout: NonNullable<NodeProps["layout"]> = {};
+	const text: NonNullable<NodeProps["text"]> = {};
+	for (const [field, binding] of fields) {
+		if (!binding) continue;
+		const value = binding.value as never;
+		switch (field) {
+			case "width":
+			case "height":
+			case "opacity":
+			case "visible":
+			case "strokeWeight":
+				props[field] = value;
+				break;
+			case "itemSpacing":
+				layout.itemSpacing = value;
+				break;
+			case "paddingTop":
+			case "paddingRight":
+			case "paddingBottom":
+			case "paddingLeft":
+				padding[field.slice("padding".length).toLowerCase()] = value;
+				break;
+			case "topLeftRadius":
+			case "topRightRadius":
+			case "bottomRightRadius":
+			case "bottomLeftRadius":
+				corners[field.slice(0, -"Radius".length) as keyof typeof corners] =
+					value;
+				props.cornerRadius = corners;
+				break;
+			case "characters":
+			case "fontSize":
+				text[field] = value;
+				break;
+			case "fontFamily":
+			case "fontStyle": {
+				const font = node.text?.fontName;
+				if (font && font !== "mixed") {
+					const key = field === "fontFamily" ? "family" : "style";
+					text.fontName = { ...font, ...text.fontName, [key]: value };
+				}
+				break;
+			}
+			// Other fields have no read-shape counterpart.
+		}
+	}
+	if (Object.keys(padding).length > 0) layout.padding = padding;
+	if (Object.keys(layout).length > 0) props.layout = layout;
+	if (Object.keys(text).length > 0) props.text = text;
+	return props;
+}
+
+function applyStyles(node: SerializedNode, slots: Bindings["styles"]) {
+	const applied: Record<string, string> = { ...node.styles };
+	for (const [slot, style] of slots) {
+		if (!style) {
+			delete applied[slot];
+			continue;
+		}
+		applied[slot] = style.id;
+		if (style.type === "PAINT" && slot === "fill") {
+			node.fills = structuredClone(style.paints);
+		}
+		if (style.type === "PAINT" && slot === "stroke") {
+			node.strokes = structuredClone(style.paints);
+			node.strokeWeight ??= 1;
+		}
+		if (style.type === "TEXT" && node.text) {
+			node.text.fontName = { ...style.fontName };
+			node.text.fontSize = style.fontSize;
+		}
+	}
+	node.styles = applied;
+	if (Object.keys(applied).length === 0) delete node.styles;
+}
+
 /** Writes props the way they read back: defaults omitted, hex lowercase. */
-function applyProps(node: SerializedNode, props: NodeProps) {
-	const { text, layout, cornerRadius, fills, strokes, ...plain } = props;
+function applyRawProps(
+	node: SerializedNode,
+	props: NodeProps,
+	colors: Map<string, string>,
+) {
+	const {
+		text,
+		layout,
+		cornerRadius,
+		fills,
+		strokes,
+		variables: _variables,
+		styles: _styles,
+		...plain
+	} = props;
 	Object.assign(node, plain);
 	if (node.rotation === 0) delete node.rotation;
 	if (node.opacity === 1) delete node.opacity;
@@ -195,10 +417,15 @@ function applyProps(node: SerializedNode, props: NodeProps) {
 			radii.size === 1 ? cornerRadius.topLeft : { ...cornerRadius };
 	}
 	if (node.cornerRadius === 0) delete node.cornerRadius;
-	if (fills) node.fills = fills.map(paint);
+	// Setting paints directly detaches their style.
+	if (fills) {
+		node.fills = fills.map((input) => paint(input, colors));
+		if (node.styles) delete node.styles.fill;
+	}
 	if (strokes) {
-		node.strokes = strokes.map(paint);
+		node.strokes = strokes.map((input) => paint(input, colors));
 		node.strokeWeight ??= 1;
+		if (node.styles) delete node.styles.stroke;
 	}
 	if (node.fills?.length === 0) delete node.fills;
 	if (node.strokes?.length === 0) {
@@ -241,8 +468,11 @@ function applyLayout(
 	};
 }
 
-function paint(input: PaintInput) {
-	const out = { ...input };
+function paint(input: PaintInput, colors: Map<string, string>): Paint {
+	const out = { ...input } as Paint;
 	if (out.opacity === 1) delete out.opacity;
+	if (out.type === "SOLID" && out.variable) {
+		out.color = colors.get(out.variable) as string;
+	}
 	return out;
 }

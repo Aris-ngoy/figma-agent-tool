@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	document,
 	findNode,
+	getDesignSystemResponse,
 	limitDepth,
 } from "@figma-agent-tool/protocol/fixtures";
 import { startHarness } from "./harness";
@@ -58,6 +59,26 @@ describe("get_selection", () => {
 });
 
 describe("get_node", () => {
+	test("reports the variables and styles a node is bound to", async () => {
+		const harness = await connected();
+		const button = await harness.callTool("get_node", { id: "1:3", depth: 0 });
+		expect(button.structuredContent).toMatchObject({
+			node: {
+				fills: [
+					{ type: "SOLID", color: "#3366ff", variable: "VariableID:1:1" },
+				],
+				variables: {
+					paddingLeft: "VariableID:2:1",
+					topLeftRadius: "VariableID:2:2",
+				},
+			},
+		});
+		const title = await harness.callTool("get_node", { id: "1:2" });
+		expect(title.structuredContent).toMatchObject({
+			node: { styles: { fill: "S:text-primary,", text: "S:heading," } },
+		});
+	});
+
 	test("returns a node by ID with its type, geometry, paints, layout and instance info", async () => {
 		const harness = await connected();
 		const result = await harness.callTool("get_node", { id: "1:3" });
@@ -161,6 +182,15 @@ describe("list_frames", () => {
 					width: 120,
 					height: 48,
 				},
+				{
+					id: "3:1",
+					name: "Chip",
+					type: "COMPONENT_SET",
+					x: 200,
+					y: 0,
+					width: 120,
+					height: 80,
+				},
 			],
 		});
 	});
@@ -171,5 +201,22 @@ describe("list_frames", () => {
 		expect(result.isError).toBe(true);
 		expect(text(result)).toContain('"1:1"');
 		expect(text(result)).toContain("list_pages");
+	});
+});
+
+describe("get_design_system", () => {
+	test("lists components with variant properties, styles and variables by collection and mode", async () => {
+		const harness = await connected();
+		const result = await harness.callTool("get_design_system");
+		expect(result.isError).toBeFalsy();
+		expect(result.structuredContent).toEqual(getDesignSystemResponse.result);
+		expect(JSON.parse(text(result))).toEqual(getDesignSystemResponse.result);
+	});
+
+	test("tells the agent to open the plugin when none is connected", async () => {
+		const harness = await startHarness();
+		const result = await harness.callTool("get_design_system");
+		expect(result.isError).toBe(true);
+		expect(text(result)).toContain("No Figma plugin is connected");
 	});
 });

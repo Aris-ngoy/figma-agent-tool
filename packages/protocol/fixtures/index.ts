@@ -1,7 +1,13 @@
 // Shared protocol fixtures. The fake plugin (MCP server tests) and the real
 // plugin's command handler (plugin tests) replay these same messages, so the
 // two can't drift apart.
-import type { Handshake, Request, Response, SerializedNode } from "../src";
+import type {
+	DesignSystem,
+	Handshake,
+	Request,
+	Response,
+	SerializedNode,
+} from "../src";
 import { PROTOCOL_VERSION } from "../src";
 
 const loginScreen = {
@@ -38,6 +44,7 @@ const loginScreen = {
 				fontSize: 28,
 				textAlignHorizontal: "CENTER",
 			},
+			styles: { fill: "S:text-primary,", text: "S:heading," },
 		},
 		{
 			id: "1:3",
@@ -48,7 +55,7 @@ const loginScreen = {
 			width: 345,
 			height: 48,
 			cornerRadius: 12,
-			fills: [{ type: "SOLID", color: "#3366ff" }],
+			fills: [{ type: "SOLID", color: "#3366ff", variable: "VariableID:1:1" }],
 			layout: {
 				mode: "HORIZONTAL",
 				itemSpacing: 8,
@@ -61,6 +68,14 @@ const loginScreen = {
 			instance: {
 				mainComponent: { id: "2:1", name: "Button" },
 				properties: { "Label#2:0": "Sign in", "Disabled#2:1": false },
+			},
+			variables: {
+				paddingLeft: "VariableID:2:1",
+				paddingRight: "VariableID:2:1",
+				topLeftRadius: "VariableID:2:2",
+				topRightRadius: "VariableID:2:2",
+				bottomRightRadius: "VariableID:2:2",
+				bottomLeftRadius: "VariableID:2:2",
 			},
 			children: [
 				{
@@ -144,7 +159,14 @@ const buttonComponent = {
 	height: 48,
 	cornerRadius: 12,
 	fills: [{ type: "SOLID", color: "#3366ff" }],
-	component: { key: "c0ffee", description: "Primary call to action" },
+	component: {
+		key: "c0ffee",
+		description: "Primary call to action",
+		properties: {
+			"Label#2:0": { type: "TEXT", defaultValue: "Button" },
+			"Disabled#2:1": { type: "BOOLEAN", defaultValue: false },
+		},
+	},
 	children: [
 		{
 			id: "2:2",
@@ -163,6 +185,177 @@ const buttonComponent = {
 		},
 	],
 } satisfies SerializedNode;
+
+function chipVariant(id: string, size: string, width: number) {
+	return {
+		id,
+		name: `Size=${size}`,
+		type: "COMPONENT",
+		x: 0,
+		y: size === "Small" ? 0 : 48,
+		width,
+		height: 32,
+		cornerRadius: 16,
+		fills: [{ type: "SOLID", color: "#eeeeee" }],
+		component: { key: `ch1p-${size}`, variantProperties: { Size: size } },
+	} satisfies SerializedNode;
+}
+
+const chipSet = {
+	id: "3:1",
+	name: "Chip",
+	type: "COMPONENT_SET",
+	x: 200,
+	y: 0,
+	width: 120,
+	height: 80,
+	component: {
+		key: "ch1p",
+		properties: {
+			Size: {
+				type: "VARIANT",
+				defaultValue: "Small",
+				variantOptions: ["Small", "Large"],
+			},
+		},
+	},
+	children: [chipVariant("3:2", "Small", 80), chipVariant("3:3", "Large", 120)],
+} satisfies SerializedNode;
+
+/** The file's local styles, as get_design_system returns them. */
+const styles = {
+	paint: [
+		{
+			id: "S:brand-primary,",
+			name: "Brand/Primary",
+			description: "Main brand color",
+			paints: [{ type: "SOLID", color: "#3366ff" }],
+		},
+		{
+			id: "S:text-primary,",
+			name: "Text/Primary",
+			paints: [{ type: "SOLID", color: "#111111" }],
+		},
+	],
+	text: [
+		{
+			id: "S:heading,",
+			name: "Heading/Large",
+			fontName: { family: "Inter", style: "Bold" },
+			fontSize: 28,
+			lineHeight: { value: 34, unit: "PIXELS" },
+		},
+		{
+			id: "S:body,",
+			name: "Body",
+			fontName: { family: "Inter", style: "Regular" },
+			fontSize: 16,
+			letterSpacing: { value: -1, unit: "PERCENT" },
+		},
+	],
+	effect: [
+		{
+			id: "S:shadow-card,",
+			name: "Shadow/Card",
+			effects: [
+				{
+					type: "DROP_SHADOW",
+					color: "#000000",
+					opacity: 0.1,
+					offset: { x: 0, y: 4 },
+					radius: 12,
+				},
+				{ type: "BACKGROUND_BLUR", radius: 8 },
+			],
+		},
+	],
+} satisfies DesignSystem["styles"];
+
+/** The file's local variables, as get_design_system returns them. */
+const collections = [
+	{
+		id: "VariableCollectionId:1:0",
+		name: "Theme",
+		modes: [
+			{ id: "1:0", name: "Light" },
+			{ id: "1:1", name: "Dark" },
+		],
+		defaultMode: "Light",
+		variables: [
+			{
+				id: "VariableID:1:1",
+				name: "color/primary",
+				type: "COLOR",
+				scopes: ["ALL_FILLS", "STROKE_COLOR"],
+				valuesByMode: {
+					Light: { color: "#3366ff" },
+					Dark: { color: "#6699ff" },
+				},
+			},
+			{
+				id: "VariableID:1:2",
+				name: "color/surface",
+				type: "COLOR",
+				valuesByMode: {
+					Light: { color: "#ffffff" },
+					Dark: { color: "#111111" },
+				},
+			},
+			{
+				id: "VariableID:1:3",
+				name: "color/scrim",
+				type: "COLOR",
+				description: "Behind modals",
+				valuesByMode: {
+					Light: { color: "#000000", opacity: 0.5 },
+					Dark: { alias: "VariableID:1:2" },
+				},
+			},
+		],
+	},
+	{
+		id: "VariableCollectionId:2:0",
+		name: "Tokens",
+		modes: [{ id: "2:0", name: "Value" }],
+		defaultMode: "Value",
+		variables: [
+			{
+				id: "VariableID:2:1",
+				name: "space/md",
+				type: "FLOAT",
+				scopes: ["GAP"],
+				valuesByMode: { Value: 16 },
+			},
+			{
+				id: "VariableID:2:2",
+				name: "radius/md",
+				type: "FLOAT",
+				scopes: ["CORNER_RADIUS"],
+				valuesByMode: { Value: 12 },
+			},
+			{
+				id: "VariableID:2:3",
+				name: "space/lg",
+				type: "FLOAT",
+				scopes: ["GAP"],
+				valuesByMode: { Value: 24 },
+			},
+			{
+				id: "VariableID:2:4",
+				name: "space/page",
+				type: "FLOAT",
+				description: "Screen edge padding",
+				valuesByMode: { Value: { alias: "VariableID:2:3" } },
+			},
+			{
+				id: "VariableID:2:5",
+				name: "font/body",
+				type: "STRING",
+				valuesByMode: { Value: "Inter" },
+			},
+		],
+	},
+] satisfies DesignSystem["collections"];
 
 /**
  * In-memory Figma document both test seams are built from. Nodes are written
@@ -183,9 +376,11 @@ export const document = {
 		{
 			id: "0:2",
 			name: "Components",
-			children: [buttonComponent] as SerializedNode[],
+			children: [buttonComponent, chipSet] as SerializedNode[],
 		},
 	],
+	styles: styles as DesignSystem["styles"],
+	collections: collections as DesignSystem["collections"],
 };
 export type DocumentFixture = typeof document;
 
@@ -540,6 +735,153 @@ export const updateNodesResponse = {
 	},
 } satisfies Response;
 
+/** Per-node error when a variable ID doesn't exist. */
+export function variableNotFoundError(id: string) {
+	return {
+		code: "variable_not_found",
+		message: `No variable with ID "${id}" exists in this file. Get variable IDs from get_design_system.`,
+	};
+}
+
+/** Per-node error when a variable's type doesn't fit the field. */
+export function variableTypeMismatchError(
+	field: string,
+	variable: { id: string; name: string; type: string },
+	expected: string,
+) {
+	return {
+		code: "variable_type_mismatch",
+		message: `Variable "${variable.name}" (${variable.id}) is a ${variable.type} variable; ${field} needs a ${expected} one.`,
+	};
+}
+
+/** Per-node error when a style ID doesn't exist. */
+export function styleNotFoundError(id: string) {
+	return {
+		code: "style_not_found",
+		message: `No style with ID "${id}" exists in this file. Get style IDs from get_design_system.`,
+	};
+}
+
+/** Per-node error when a style's type doesn't fit the slot. */
+export function styleTypeMismatchError(
+	slot: string,
+	style: { id: string; name: string; type: string },
+	expected: string,
+) {
+	return {
+		code: "style_type_mismatch",
+		message: `Style "${style.name}" (${style.id}) is a ${style.type} style; styles.${slot} needs a ${expected} one.`,
+	};
+}
+
+export const getDesignSystemRequest = {
+	type: "request",
+	id: "req-11",
+	command: "get_design_system",
+	params: {},
+} satisfies Request;
+
+export const getDesignSystemResponse = {
+	type: "response",
+	id: "req-11",
+	ok: true,
+	result: {
+		components: [
+			{
+				id: "2:1",
+				name: "Button",
+				type: "COMPONENT",
+				key: "c0ffee",
+				description: "Primary call to action",
+				page: { id: "0:2", name: "Components" },
+				properties: buttonComponent.component.properties,
+			},
+			{
+				id: "3:1",
+				name: "Chip",
+				type: "COMPONENT_SET",
+				key: "ch1p",
+				page: { id: "0:2", name: "Components" },
+				properties: chipSet.component.properties,
+				variants: [
+					{ id: "3:2", name: "Size=Small", properties: { Size: "Small" } },
+					{ id: "3:3", name: "Size=Large", properties: { Size: "Large" } },
+				],
+			},
+		],
+		styles: document.styles,
+		collections: document.collections,
+	},
+} satisfies Response;
+
+/**
+ * Binds variables and applies styles; bad IDs and types fail per node:
+ * auto-layout spacing (one through an alias), a fill color, an effect style,
+ * a text style and a stroke style.
+ */
+export const bindNodesRequest = {
+	type: "request",
+	id: "req-12",
+	command: "update_nodes",
+	params: {
+		updates: [
+			{
+				id: "1:1",
+				variables: {
+					itemSpacing: "VariableID:2:1",
+					paddingTop: "VariableID:2:4",
+				},
+			},
+			{
+				id: "1:10",
+				fills: [{ type: "SOLID", variable: "VariableID:1:2" }],
+				styles: { effect: "S:shadow-card," },
+			},
+			{ id: "1:4", styles: { text: "S:body," } },
+			{ id: "1:5", styles: { stroke: "S:text-primary," } },
+			{ id: "1:20", variables: { fontSize: "VariableID:1:1" } },
+			{ id: "1:3", variables: { opacity: "VariableID:9:9" } },
+			{ id: "1:2", styles: { fill: "S:nope," } },
+			{ id: "1:2", styles: { text: "S:brand-primary," } },
+		],
+	},
+} satisfies Request;
+
+export const bindNodesResponse = {
+	type: "response",
+	id: "req-12",
+	ok: true,
+	result: {
+		nodes: [
+			{ id: "1:1", ok: true },
+			{ id: "1:10", ok: true },
+			{ id: "1:4", ok: true },
+			{ id: "1:5", ok: true },
+			{
+				id: "1:20",
+				ok: false,
+				error: variableTypeMismatchError(
+					"fontSize",
+					{ id: "VariableID:1:1", name: "color/primary", type: "COLOR" },
+					"FLOAT",
+				),
+			},
+			{ id: "1:3", ok: false, error: variableNotFoundError("VariableID:9:9") },
+			{ id: "1:2", ok: false, error: styleNotFoundError("S:nope,") },
+			{
+				id: "1:2",
+				ok: false,
+				error: styleTypeMismatchError(
+					"text",
+					{ id: "S:brand-primary,", name: "Brand/Primary", type: "PAINT" },
+					"TEXT",
+				),
+			},
+		],
+	},
+} satisfies Response;
+
 /**
  * Every request the fakes know how to answer, paired with the plugin's
  * response. The fake plugin matches on command + params; the plugin tests
@@ -556,4 +898,6 @@ export const exchanges: [Request, Response][] = [
 	[createNodesRequest, createNodesResponse],
 	[createNodesPartlyRequest, createNodesPartlyResponse],
 	[updateNodesRequest, updateNodesResponse],
+	[getDesignSystemRequest, getDesignSystemResponse],
+	[bindNodesRequest, bindNodesResponse],
 ];

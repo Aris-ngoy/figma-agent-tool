@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+	bindNodesRequest,
 	createdNodeId,
 	createNodesRequest,
 	document,
@@ -353,5 +354,171 @@ describe("update_nodes", () => {
 		const figma = plugin();
 		await figma.result("update_nodes", updateNodesRequest.params);
 		expect(figma.figma.undoCommits).toBe(1);
+	});
+});
+
+describe("binding variables and styles", () => {
+	test("binds fields and paints to variables and applies styles, visible through get_node", async () => {
+		const figma = plugin();
+		await figma.result("update_nodes", bindNodesRequest.params);
+		expect(await figma.node("1:1", 0)).toMatchObject({
+			layout: {
+				itemSpacing: 16,
+				// space/page is an alias of space/lg.
+				padding: { top: 24, right: 24, bottom: 34, left: 24 },
+			},
+			variables: {
+				itemSpacing: "VariableID:2:1",
+				paddingTop: "VariableID:2:4",
+			},
+		});
+		expect(await figma.node("1:10", 0)).toMatchObject({
+			fills: [{ type: "SOLID", color: "#ffffff", variable: "VariableID:1:2" }],
+			styles: { effect: "S:shadow-card," },
+		});
+		expect(await figma.node("1:4")).toMatchObject({
+			text: {
+				fontName: { family: "Inter", style: "Regular" },
+				fontSize: 16,
+			},
+			styles: { text: "S:body," },
+		});
+		expect(await figma.node("1:5")).toMatchObject({
+			strokes: [{ type: "SOLID", color: "#111111" }],
+			styles: { stroke: "S:text-primary," },
+		});
+	});
+
+	test("binds text fields after loading the node's fonts", async () => {
+		const figma = plugin();
+		const { nodes } = await figma.result("update_nodes", {
+			updates: [
+				{
+					id: "1:2",
+					variables: {
+						fontFamily: "VariableID:2:5",
+						fontSize: "VariableID:2:3",
+					},
+				},
+			],
+		});
+		expect(nodes).toEqual([{ id: "1:2", ok: true }]);
+		expect(await figma.node("1:2")).toMatchObject({
+			text: { fontName: { family: "Inter", style: "Bold" }, fontSize: 24 },
+			variables: {
+				fontFamily: "VariableID:2:5",
+				fontSize: "VariableID:2:3",
+			},
+		});
+	});
+
+	test("unbinds variables and detaches styles with null, keeping the values", async () => {
+		const figma = plugin();
+		await figma.result("update_nodes", {
+			updates: [
+				{
+					id: "1:3",
+					variables: { paddingLeft: null, topLeftRadius: null },
+					fills: [{ type: "SOLID", color: "#3366ff" }],
+				},
+				{ id: "1:2", styles: { text: null, fill: null } },
+			],
+		});
+		const button = (await figma.node("1:3", 0)) as { variables?: unknown };
+		expect(button).toMatchObject({
+			cornerRadius: 12,
+			fills: [{ type: "SOLID", color: "#3366ff" }],
+			layout: { padding: { left: 16 } },
+		});
+		expect(button.variables).toEqual({
+			paddingRight: "VariableID:2:1",
+			topRightRadius: "VariableID:2:2",
+			bottomRightRadius: "VariableID:2:2",
+			bottomLeftRadius: "VariableID:2:2",
+		});
+		expect(await figma.node("1:2")).not.toHaveProperty("styles");
+	});
+
+	test("setting paints directly detaches their style", async () => {
+		const figma = plugin();
+		await figma.result("update_nodes", {
+			updates: [{ id: "1:2", fills: [{ type: "SOLID", color: "#000000" }] }],
+		});
+		expect(await figma.node("1:2")).toMatchObject({
+			styles: { text: "S:heading," },
+		});
+		expect(await figma.node("1:2")).not.toHaveProperty("styles.fill");
+	});
+
+	test("leaves the node untouched when a binding fails", async () => {
+		const figma = plugin();
+		const { nodes } = await figma.result("update_nodes", {
+			updates: [
+				{
+					id: "1:1",
+					name: "Renamed",
+					fills: [{ type: "SOLID", variable: "VariableID:2:1" }],
+				},
+				{ id: "1:5", variables: { paddingTop: "VariableID:2:1" } },
+				{ id: "1:1", styles: { text: "S:heading," } },
+			],
+		});
+		expect(nodes).toEqual([
+			{
+				id: "1:1",
+				ok: false,
+				error: {
+					code: "variable_type_mismatch",
+					message: expect.stringContaining("fills needs a COLOR one"),
+				},
+			},
+			{
+				id: "1:5",
+				ok: false,
+				error: {
+					code: "unsupported_property",
+					message:
+						"Node 1:5 is a RECTANGLE, which has no variables.paddingTop.",
+				},
+			},
+			{
+				id: "1:1",
+				ok: false,
+				error: {
+					code: "unsupported_property",
+					message: "Node 1:1 is a FRAME, which has no styles.text.",
+				},
+			},
+		]);
+		expect(await figma.node("1:1")).toEqual(findNode("1:1") as never);
+	});
+
+	test("creates nodes bound to variables and styles", async () => {
+		const figma = plugin();
+		const { nodes } = await figma.result("create_nodes", {
+			parentId: "1:10",
+			nodes: [
+				{
+					type: "TEXT",
+					text: { characters: "Hi" },
+					styles: { text: "S:heading," },
+				},
+				{
+					type: "RECTANGLE",
+					fills: [{ type: "SOLID", variable: "VariableID:1:1" }],
+					variables: { topLeftRadius: "VariableID:2:2" },
+				},
+			],
+		});
+		expect(nodes).toMatchObject([{ ok: true }, { ok: true }]);
+		expect(await figma.node(createdNodeId(1))).toMatchObject({
+			text: { fontName: { family: "Inter", style: "Bold" }, fontSize: 28 },
+			styles: { text: "S:heading," },
+		});
+		expect(await figma.node(createdNodeId(2))).toMatchObject({
+			cornerRadius: { topLeft: 12, topRight: 0 },
+			fills: [{ type: "SOLID", color: "#3366ff", variable: "VariableID:1:1" }],
+			variables: { topLeftRadius: "VariableID:2:2" },
+		});
 	});
 });

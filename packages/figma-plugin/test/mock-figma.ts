@@ -1,9 +1,16 @@
 // Seam 2 harness: installs a mocked `figma` global built from the shared
 // document fixture, so the real command handler runs as it would in Figma's
 // sandbox. Fixture nodes are in serialized form; this turns them back into
-// Plugin API shapes (0–1 RGB, `figma.mixed`, flattened auto-layout props).
+// Plugin API shapes (0–1 RGB, `figma.mixed`, flattened auto-layout props,
+// variable aliases).
 import { afterEach } from "bun:test";
-import type { Paint, SerializedNode } from "@figma-agent-tool/protocol";
+import {
+	BINDABLE_TEXT_FIELDS,
+	type Effect,
+	type Paint,
+	type SerializedNode,
+	type VariableValue,
+} from "@figma-agent-tool/protocol";
 import {
 	availableFonts,
 	createdNodeId,
@@ -40,6 +47,137 @@ export function installMockFigma(document: DocumentFixture) {
 	const loadedFonts = new Set<string>();
 	let created = 0;
 
+	const collections = document.collections.map((collection) => ({
+		id: collection.id,
+		name: collection.name,
+		modes: collection.modes.map(({ id, name }) => ({ modeId: id, name })),
+		defaultModeId: modeId(collection, collection.defaultMode),
+		variableIds: collection.variables.map((variable) => variable.id),
+	}));
+	const variables = new Map(
+		document.collections.flatMap((collection) =>
+			collection.variables.map((variable) => [
+				variable.id,
+				{
+					id: variable.id,
+					name: variable.name,
+					resolvedType: variable.type,
+					description: variable.description ?? "",
+					scopes: variable.scopes ?? ["ALL_SCOPES"],
+					variableCollectionId: collection.id,
+					valuesByMode: Object.fromEntries(
+						Object.entries(variable.valuesByMode).map(([mode, value]) => [
+							modeId(collection, mode),
+							toVariableValue(value as VariableValue),
+						]),
+					),
+				},
+			]),
+		),
+	);
+	type MockVariable = NonNullable<ReturnType<typeof variables.get>>;
+
+	/** A variable's value in its collection's default mode, aliases followed. */
+	function resolve(variable: MockVariable): unknown {
+		const collection = collections.find(
+			(c) => c.id === variable.variableCollectionId,
+		);
+		const value = variable.valuesByMode[collection?.defaultModeId as string];
+		const alias = value as { type?: string; id: string };
+		if (alias.type === "VARIABLE_ALIAS") {
+			return resolve(variables.get(alias.id) as MockVariable);
+		}
+		return value;
+	}
+
+	const { styles: fixtureStyles } = document;
+	const styles = {
+		paint: fixtureStyles.paint.map((style) => ({
+			...styleBase(style),
+			type: "PAINT",
+			paints: style.paints.map(toPaint),
+		})),
+		text: fixtureStyles.text.map((style) => ({
+			...styleBase(style),
+			type: "TEXT",
+			fontName: style.fontName,
+			fontSize: style.fontSize,
+			lineHeight: style.lineHeight ?? { unit: "AUTO" },
+			letterSpacing: style.letterSpacing ?? { value: 0, unit: "PERCENT" },
+		})),
+		effect: fixtureStyles.effect.map((style) => ({
+			...styleBase(style),
+			type: "EFFECT",
+			effects: style.effects.map(toEffect),
+		})),
+	};
+	const stylesById = new Map<string, Record<string, unknown>>(
+		[...styles.paint, ...styles.text, ...styles.effect].map((style) => [
+			style.id,
+			style,
+		]),
+	);
+
+	/** Binding and style setters, which need the file's variables and styles. */
+	function bindable(node: MockNode) {
+		node.setBoundVariable = (field: string, variable: MockVariable | null) => {
+			const bound = node.boundVariables as Record<string, unknown>;
+			const textField = field in BINDABLE_TEXT_FIELDS;
+			if (!textField && !(field in node)) {
+				throw new Error(`node has no bindable field ${field}`);
+			}
+			if (!variable) {
+				delete bound[field];
+				return;
+			}
+			const value = resolve(variable);
+			if (field === "fontFamily" || field === "fontStyle") {
+				const key = field === "fontFamily" ? "family" : "style";
+				node.fontName = { ...(node.fontName as Font), [key]: value };
+			} else if (!textField || field === "fontSize") {
+				node[field] = value;
+			}
+			const alias = { type: "VARIABLE_ALIAS", id: variable.id };
+			bound[field] = textField ? [alias] : alias;
+		};
+		const styleSetter =
+			(type: string, apply: (style: Record<string, unknown>) => void) =>
+			async (id: string) => {
+				const style = stylesById.get(id);
+				if (id && style?.type !== type) {
+					throw new Error(`"${id}" is not a ${type} style`);
+				}
+				if (style) apply(style);
+			};
+		node.setFillStyleIdAsync = styleSetter("PAINT", (style) => {
+			node.fills = style.paints;
+		});
+		node.setStrokeStyleIdAsync = styleSetter("PAINT", (style) => {
+			node.strokes = style.paints;
+		});
+		node.setEffectStyleIdAsync = styleSetter("EFFECT", (style) => {
+			node.effects = style.effects;
+		});
+		node.setTextStyleIdAsync = styleSetter("TEXT", (style) => {
+			node.fontName = style.fontName;
+			node.fontSize = style.fontSize;
+		});
+		// Setting the property directly detaches its style; applying a style
+		// records it after the paints are in.
+		for (const [setter, styleKey] of [
+			["setFillStyleIdAsync", "fillStyleId"],
+			["setStrokeStyleIdAsync", "strokeStyleId"],
+			["setEffectStyleIdAsync", "effectStyleId"],
+			["setTextStyleIdAsync", "textStyleId"],
+		] as const) {
+			const apply = node[setter] as (id: string) => Promise<void>;
+			node[setter] = async (id: string) => {
+				await apply(id);
+				node[styleKey] = id;
+			};
+		}
+	}
+
 	function register(node: MockNode, parent?: MockNode): MockNode {
 		node.parent = parent;
 		byId.set(node.id, node);
@@ -55,6 +193,7 @@ export function installMockFigma(document: DocumentFixture) {
 		};
 		if (node.children && node.type !== "INSTANCE") canAppend(node);
 		if (node.type === "TEXT") guardText(node, loadedFonts);
+		bindable(node);
 		if (node.type === "COMPONENT") {
 			node.createInstance = () => {
 				const source = findNode(node.id, document) as SerializedNode;
@@ -129,6 +268,17 @@ export function installMockFigma(document: DocumentFixture) {
 				return children;
 			},
 		});
+		mockPage.findAllWithCriteria = ({ types }: { types: string[] }) => {
+			const found: MockNode[] = [];
+			const walk = (parent: { children?: MockNode[] }) => {
+				for (const child of parent.children ?? []) {
+					if (types.includes(child.type)) found.push(child);
+					walk(child);
+				}
+			};
+			walk(mockPage);
+			return found;
+		};
 		canAppend(mockPage);
 		for (const child of children) register(child, mockPage);
 		byId.set(page.id, mockPage);
@@ -153,6 +303,38 @@ export function installMockFigma(document: DocumentFixture) {
 		currentPage,
 		async getNodeByIdAsync(id: string) {
 			return byId.get(id) ?? null;
+		},
+		async loadAllPagesAsync() {
+			for (const page of pages) loadedPages.add(page.id);
+		},
+		async getStyleByIdAsync(id: string) {
+			return stylesById.get(id) ?? null;
+		},
+		getLocalPaintStylesAsync: async () => styles.paint,
+		getLocalTextStylesAsync: async () => styles.text,
+		getLocalEffectStylesAsync: async () => styles.effect,
+		variables: {
+			getLocalVariableCollectionsAsync: async () => collections,
+			getLocalVariablesAsync: async () => [...variables.values()],
+			async getVariableByIdAsync(id: string) {
+				return variables.get(id) ?? null;
+			},
+			setBoundVariableForPaint(
+				paint: Record<string, unknown>,
+				_field: "color",
+				variable: MockVariable | null,
+			) {
+				const { boundVariables: _, ...rest } = paint;
+				if (!variable) return rest;
+				const { a: _a, ...color } = resolve(variable) as RGBA;
+				return {
+					...rest,
+					color,
+					boundVariables: {
+						color: { type: "VARIABLE_ALIAS", id: variable.id },
+					},
+				};
+			},
 		},
 		base64Encode(data: Uint8Array) {
 			return Buffer.from(data).toString("base64");
@@ -231,7 +413,17 @@ function toFigmaNode(node: SerializedNode): MockNode {
 			mock.width = width;
 			mock.height = height;
 		},
+		effects: [],
+		effectStyleId: node.styles?.effect ?? "",
+		boundVariables: Object.fromEntries(
+			Object.entries(node.variables ?? {}).map(([field, id]) => {
+				const alias = { type: "VARIABLE_ALIAS", id };
+				return [field, field in BINDABLE_TEXT_FIELDS ? [alias] : alias];
+			}),
+		),
 	};
+	detachableStyle(mock, "fills", "fillStyleId", node.styles?.fill);
+	detachableStyle(mock, "strokes", "strokeStyleId", node.styles?.stroke);
 	if (node.type !== "TEXT") cornerRadius(mock, node);
 	if (node.text) {
 		const { fontName, fontSize } = node.text;
@@ -240,6 +432,7 @@ function toFigmaNode(node: SerializedNode): MockNode {
 			fontName: fontName === "mixed" ? mixed : fontName,
 			fontSize: fontSize === "mixed" ? mixed : fontSize,
 			textAlignHorizontal: node.text.textAlignHorizontal ?? "LEFT",
+			textStyleId: node.styles?.text ?? "",
 		});
 	}
 	if (node.children) {
@@ -260,8 +453,21 @@ function toFigmaNode(node: SerializedNode): MockNode {
 		mock.children = node.children.map(toFigmaNode);
 	}
 	if (node.component) {
-		mock.key = node.component.key;
-		mock.description = node.component.description ?? "";
+		const { key, description, properties, variantProperties } = node.component;
+		mock.key = key;
+		mock.description = description ?? "";
+		if (node.type === "COMPONENT") {
+			mock.variantProperties = variantProperties ?? null;
+		}
+		// Like Figma, a variant's definitions live on its component set.
+		Object.defineProperty(mock, "componentPropertyDefinitions", {
+			get: () => {
+				if (variantProperties) {
+					throw new Error("read definitions from the component set");
+				}
+				return properties ?? {};
+			},
+		});
 	}
 	if (node.instance) {
 		const { mainComponent, properties } = node.instance;
@@ -281,6 +487,25 @@ function toFigmaNode(node: SerializedNode): MockNode {
 		});
 	}
 	return mock;
+}
+
+/** Like Figma, setting paints directly detaches the paint style. */
+function detachableStyle(
+	mock: MockNode,
+	key: "fills" | "strokes",
+	styleKey: string,
+	styleId = "",
+) {
+	let paints = mock[key];
+	mock[styleKey] = styleId;
+	Object.defineProperty(mock, key, {
+		enumerable: true,
+		get: () => paints,
+		set: (value) => {
+			paints = value;
+			mock[styleKey] = "";
+		},
+	});
 }
 
 const CORNERS = [
@@ -360,7 +585,15 @@ function toPaint(paint: Paint) {
 	};
 	switch (paint.type) {
 		case "SOLID":
-			return { ...base, color: rgb(paint.color) };
+			return {
+				...base,
+				color: rgb(paint.color),
+				...(paint.variable && {
+					boundVariables: {
+						color: { type: "VARIABLE_ALIAS", id: paint.variable },
+					},
+				}),
+			};
 		case "IMAGE":
 			return {
 				...base,
@@ -390,4 +623,43 @@ function rgb(hex: string) {
 	const channel = (offset: number) =>
 		Number.parseInt(hex.slice(offset, offset + 2), 16) / 255;
 	return { r: channel(1), g: channel(3), b: channel(5) };
+}
+
+function toEffect(effect: Effect) {
+	const base = { type: effect.type, visible: effect.visible ?? true };
+	if ("offset" in effect) {
+		return {
+			...base,
+			color: { ...rgb(effect.color), a: effect.opacity ?? 1 },
+			offset: effect.offset,
+			radius: effect.radius,
+			spread: effect.spread ?? 0,
+			blendMode: "NORMAL",
+		};
+	}
+	if ("radius" in effect) {
+		return { ...base, radius: effect.radius, blurType: "NORMAL" };
+	}
+	return base;
+}
+
+function toVariableValue(value: VariableValue) {
+	if (typeof value !== "object") return value;
+	if ("alias" in value) return { type: "VARIABLE_ALIAS", id: value.alias };
+	return { ...rgb(value.color), a: value.opacity ?? 1 };
+}
+
+function modeId(
+	collection: { modes: { id: string; name: string }[] },
+	name: string,
+) {
+	return collection.modes.find((mode) => mode.name === name)?.id as string;
+}
+
+function styleBase(style: { id: string; name: string; description?: string }) {
+	return {
+		id: style.id,
+		name: style.name,
+		description: style.description ?? "",
+	};
 }

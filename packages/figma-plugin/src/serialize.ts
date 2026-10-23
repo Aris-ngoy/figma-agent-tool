@@ -1,10 +1,13 @@
 // Turns Plugin API nodes into the compact agent-facing `SerializedNode`.
 // Defaults are left out, colors become hex and `figma.mixed` becomes "mixed".
-import type {
-	AutoLayout,
-	Paint as PaintInfo,
-	SerializedNode,
-	TextInfo,
+import {
+	type AutoLayout,
+	BindableField,
+	type ComponentInfo,
+	type Effect as EffectInfo,
+	type Paint as PaintInfo,
+	type SerializedNode,
+	type TextInfo,
 } from "@figma-agent-tool/protocol";
 
 export async function serializeNode(
@@ -43,8 +46,7 @@ export async function serializeNode(
 		out.layout = autoLayout(node);
 	}
 	if (node.type === "COMPONENT" || node.type === "COMPONENT_SET") {
-		out.component = { key: node.key };
-		if (node.description) out.component.description = node.description;
+		out.component = componentInfo(node);
 	}
 	if (node.type === "INSTANCE") {
 		const main = await node.getMainComponentAsync();
@@ -58,6 +60,10 @@ export async function serializeNode(
 			),
 		};
 	}
+	const variables = boundVariables(node);
+	if (variables) out.variables = variables;
+	const styles = styleIds(node);
+	if (styles) out.styles = styles;
 	if ("children" in node) {
 		// With dynamic page access, a page's children exist once it's loaded.
 		if (node.type === "PAGE") await node.loadAsync();
@@ -71,6 +77,66 @@ export async function serializeNode(
 		}
 	}
 	return out;
+}
+
+export function componentInfo(
+	node: ComponentNode | ComponentSetNode,
+): ComponentInfo {
+	const info: ComponentInfo = { key: node.key };
+	if (node.description) info.description = node.description;
+	// A variant's property definitions live on its component set.
+	if (node.type === "COMPONENT" && node.variantProperties) {
+		info.variantProperties = { ...node.variantProperties };
+		return info;
+	}
+	const definitions = Object.entries(node.componentPropertyDefinitions);
+	if (definitions.length > 0) {
+		info.properties = Object.fromEntries(
+			definitions.map(([name, { type, defaultValue, variantOptions }]) => [
+				name,
+				variantOptions
+					? { type, defaultValue, variantOptions: [...variantOptions] }
+					: { type, defaultValue },
+			]),
+		);
+	}
+	return info;
+}
+
+const bindableFields = new Set<string>(BindableField.options);
+
+/** Field → bound variable ID. Paint bindings are reported on the paints. */
+function boundVariables(node: BaseNode): SerializedNode["variables"] {
+	if (!("boundVariables" in node) || !node.boundVariables) return undefined;
+	const out: Record<string, string> = {};
+	for (const [field, binding] of Object.entries(node.boundVariables)) {
+		if (!bindableFields.has(field) || !binding) continue;
+		// Text fields carry one alias per styled range.
+		const aliases = (Array.isArray(binding) ? binding : [binding]) as {
+			id: string;
+		}[];
+		const [id, ...others] = new Set(aliases.map((alias) => alias.id));
+		if (id) out[field] = others.length > 0 ? "mixed" : id;
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+const STYLE_ID_PROPS = {
+	fill: "fillStyleId",
+	stroke: "strokeStyleId",
+	text: "textStyleId",
+	effect: "effectStyleId",
+} as const;
+
+function styleIds(node: BaseNode): SerializedNode["styles"] {
+	const out: NonNullable<SerializedNode["styles"]> = {};
+	for (const [slot, prop] of Object.entries(STYLE_ID_PROPS)) {
+		if (!(prop in node)) continue;
+		const id = (node as unknown as Record<string, string | symbol>)[prop];
+		if (id === figma.mixed) out[slot as keyof typeof out] = "mixed";
+		else if (id) out[slot as keyof typeof out] = id as string;
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function cornerRadius(
@@ -87,15 +153,22 @@ function cornerRadius(
 	};
 }
 
-function paint(p: Paint): PaintInfo {
+export function paint(p: Paint): PaintInfo {
 	const extras: { opacity?: number; visible?: false } = {};
 	if (p.opacity !== undefined && p.opacity !== 1) {
 		extras.opacity = round(p.opacity);
 	}
 	if (p.visible === false) extras.visible = false;
 	switch (p.type) {
-		case "SOLID":
-			return { type: p.type, color: hex(p.color), ...extras };
+		case "SOLID": {
+			const variable = p.boundVariables?.color?.id;
+			return {
+				type: p.type,
+				color: hex(p.color),
+				...(variable && { variable }),
+				...extras,
+			};
+		}
 		case "IMAGE":
 			return {
 				type: p.type,
@@ -117,6 +190,30 @@ function paint(p: Paint): PaintInfo {
 				})),
 				...extras,
 			};
+	}
+}
+
+export function effect(e: Effect): EffectInfo {
+	const extras: { visible?: false } = e.visible ? {} : { visible: false };
+	switch (e.type) {
+		case "DROP_SHADOW":
+		case "INNER_SHADOW": {
+			const shadow: EffectInfo = {
+				type: e.type,
+				color: hex(e.color),
+				offset: { x: round(e.offset.x), y: round(e.offset.y) },
+				radius: round(e.radius),
+				...extras,
+			};
+			if (e.color.a !== 1) shadow.opacity = round(e.color.a);
+			if (e.spread) shadow.spread = round(e.spread);
+			return shadow;
+		}
+		case "LAYER_BLUR":
+		case "BACKGROUND_BLUR":
+			return { type: e.type, radius: round(e.radius), ...extras };
+		default:
+			return { type: e.type, ...extras };
 	}
 }
 
@@ -154,7 +251,7 @@ function autoLayout(
 	};
 }
 
-function hex({ r, g, b }: RGB): string {
+export function hex({ r, g, b }: RGB): string {
 	const channel = (value: number) =>
 		Math.round(value * 255)
 			.toString(16)
@@ -163,6 +260,6 @@ function hex({ r, g, b }: RGB): string {
 }
 
 /** Figma geometry carries float noise like 12.000000001. */
-function round(value: number): number {
+export function round(value: number): number {
 	return Math.round(value * 100) / 100;
 }

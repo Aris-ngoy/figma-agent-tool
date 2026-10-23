@@ -10,6 +10,7 @@ import {
 	Request,
 	type Response,
 } from "@figma-agent-tool/protocol";
+import { getDesignSystem } from "./design-system";
 import { createNodes, updateNodes } from "./edit";
 import { CommandError, nodeNotFound, toBridgeError } from "./errors";
 import { serializeNode } from "./serialize";
@@ -89,6 +90,7 @@ const implementations: CommandImplementations = {
 
 	create_nodes: createNodes,
 	update_nodes: updateNodes,
+	get_design_system: getDesignSystem,
 };
 
 function pageRef(page: PageNode) {
