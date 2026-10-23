@@ -13,6 +13,7 @@ import { registerFigmaTool } from "./figma-tool";
 import { registerFlowTools } from "./flow-tools";
 import { registerReactionTools } from "./reaction-tools";
 import { registerReadTools } from "./read-tools";
+import { registerRestructureTools } from "./restructure-tools";
 import { registerVisualQaTools } from "./visual-qa-tools";
 
 export function createMcpServer({
@@ -64,6 +65,7 @@ export function createMcpServer({
 
 	registerReadTools(server, bridge);
 	registerEditTools(server, bridge);
+	registerRestructureTools(server, bridge);
 	registerReactionTools(server, bridge);
 	registerFlowTools(server, bridge);
 	registerVisualQaTools(server, { artifactsDir, bridge, deviceRunner });

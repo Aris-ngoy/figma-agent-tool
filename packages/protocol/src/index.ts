@@ -542,6 +542,34 @@ export const UpdatedNode = z.discriminatedUnion("ok", [
 ]);
 export type UpdatedNode = z.infer<typeof UpdatedNode>;
 
+/** Per-node outcome of `delete_nodes` and `reparent_nodes`, in input order. */
+export const NodeOutcome = UpdatedNode;
+export type NodeOutcome = UpdatedNode;
+
+/** Per-group outcome of `ungroup_nodes`: the former children, now in the group's parent. */
+export const UngroupedNode = z.discriminatedUnion("ok", [
+	z.object({
+		id: z.string(),
+		ok: z.literal(true),
+		children: z.array(z.string()),
+	}),
+	z.object({ id: z.string(), ok: z.literal(false), error: BridgeError }),
+]);
+export type UngroupedNode = z.infer<typeof UngroupedNode>;
+
+const NodeRef = z.object({
+	id: z.string(),
+	name: z.string(),
+	type: z.string(),
+});
+
+/**
+ * Where moved or duplicated nodes go among the parent's children: 0 is the
+ * bottom of the layer list (first in auto-layout), the child count the top.
+ * It's the first node's position once placed; the others follow it in order.
+ */
+export const ChildIndex = z.number().int().min(0);
+
 const Vector = z.object({ x: z.number(), y: z.number() });
 
 export const TRIGGER_TYPES = [
@@ -971,6 +999,109 @@ export const PrototypeGraph = z.object({
 });
 export type PrototypeGraph = z.infer<typeof PrototypeGraph>;
 
+/** A node and its ancestors, as the restructuring checks need them. */
+export type TreeNode = {
+	id: string;
+	type: string;
+	readonly parent: TreeNode | null;
+};
+
+function insideInstance(node: TreeNode): boolean {
+	for (let up = node.parent; up; up = up.parent) {
+		if (up.type === "INSTANCE") return true;
+	}
+	return false;
+}
+
+const RESTRUCTURE_ACTIONS = {
+	delete: { code: "cannot_delete", done: "deleted" },
+	duplicate: { code: "cannot_duplicate", done: "duplicated" },
+	move: { code: "cannot_move", done: "moved" },
+	group: { code: "cannot_group", done: "grouped" },
+} as const;
+
+/** Why `node` can't be deleted, duplicated, moved or grouped, if it can't. */
+export function layerError(
+	node: TreeNode,
+	action: keyof typeof RESTRUCTURE_ACTIONS,
+): BridgeError | undefined {
+	const { code, done } = RESTRUCTURE_ACTIONS[action];
+	if (node.type === "PAGE" || node.type === "DOCUMENT") {
+		return {
+			code,
+			message: `Node ${node.id} is a ${node.type}; only layers on a page can be ${done}. Use a frame, group or other layer.`,
+		};
+	}
+	if (insideInstance(node)) {
+		return {
+			code,
+			message: `Node ${node.id} is inside an instance, whose layers can't be ${done}. Change the main component instead.`,
+		};
+	}
+	return undefined;
+}
+
+/** Why `parent` can't take new children (undefined when it can). */
+export function parentError(
+	parent: TreeNode,
+	holdsChildren: boolean,
+): BridgeError | undefined {
+	if (!holdsChildren || parent.type === "DOCUMENT") {
+		return {
+			code: "invalid_parent",
+			message: `Node ${parent.id} is a ${parent.type}, which can't hold children. Use a page, frame, group, section or component.`,
+		};
+	}
+	if (parent.type === "INSTANCE" || insideInstance(parent)) {
+		return {
+			code: "invalid_parent",
+			message: `Node ${parent.id} is ${parent.type === "INSTANCE" ? "an instance" : "inside an instance"}, whose layers can't change. Use a frame, or the main component.`,
+		};
+	}
+	return undefined;
+}
+
+/** Why `node` can't move into `parent`, checked with `parentError` first. */
+export function moveError(
+	node: TreeNode,
+	parent: TreeNode,
+): BridgeError | undefined {
+	const error = layerError(node, "move");
+	if (error) return error;
+	for (let up: TreeNode | null = parent; up; up = up.parent) {
+		if (up.id === node.id) {
+			return {
+				code: "cannot_move",
+				message:
+					up === parent
+						? `Node ${node.id} can't move into itself.`
+						: `Node ${node.id} contains ${parent.id}, so it can't move into it.`,
+			};
+		}
+	}
+	return undefined;
+}
+
+/** Why `index` doesn't fit a parent with `count` children. */
+export function indexError(
+	index: number | undefined,
+	parent: TreeNode,
+	count: number,
+): BridgeError | undefined {
+	if (index === undefined || index <= count) return undefined;
+	return {
+		code: "invalid_index",
+		message: `Index ${index} is out of range: ${parent.id} has ${count} children, so use 0 to ${count}.`,
+	};
+}
+
+export function notAGroupError(node: TreeNode): BridgeError {
+	return {
+		code: "not_a_group",
+		message: `Node ${node.id} is a ${node.type}, not a GROUP; only groups can be ungrouped.`,
+	};
+}
+
 /** How many levels of children to include below each returned node. */
 export const Depth = z.number().int().min(0).max(100);
 export const DEFAULT_DEPTH = 2;
@@ -1022,6 +1153,40 @@ export const commands = {
 	update_nodes: {
 		params: z.object({ updates: z.array(NodeUpdate).min(1) }),
 		result: z.object({ nodes: z.array(UpdatedNode) }),
+	},
+	delete_nodes: {
+		params: z.object({ ids: z.array(z.string().min(1)).min(1) }),
+		result: z.object({ nodes: z.array(NodeOutcome) }),
+	},
+	duplicate_node: {
+		params: z.object({
+			id: z.string().min(1),
+			count: z.number().int().min(1).max(100).default(1),
+			// Defaults to the original's parent, right after the original.
+			parentId: z.string().min(1).optional(),
+			index: ChildIndex.optional(),
+		}),
+		result: z.object({ nodes: z.array(NodeRef) }),
+	},
+	reparent_nodes: {
+		params: z.object({
+			parentId: z.string().min(1),
+			ids: z.array(z.string().min(1)).min(1),
+			// Defaults to the top (the end, in auto-layout).
+			index: ChildIndex.optional(),
+		}),
+		result: z.object({ nodes: z.array(NodeOutcome) }),
+	},
+	group_nodes: {
+		params: z.object({
+			ids: z.array(z.string().min(1)).min(1),
+			name: z.string().optional(),
+		}),
+		result: z.object({ node: NodeRef }),
+	},
+	ungroup_nodes: {
+		params: z.object({ ids: z.array(z.string().min(1)).min(1) }),
+		result: z.object({ nodes: z.array(UngroupedNode) }),
 	},
 	get_reactions: {
 		params: z.object({ nodeId: z.string().min(1) }),

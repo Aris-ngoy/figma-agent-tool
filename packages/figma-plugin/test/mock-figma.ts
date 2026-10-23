@@ -19,6 +19,7 @@ import {
 	findNode,
 	framePng,
 	prefixIds,
+	renumber,
 } from "@figma-agent-tool/protocol/fixtures";
 
 const mixed = Symbol("figma.mixed");
@@ -38,6 +39,16 @@ type MockNode = Record<string, unknown> & {
 	type: string;
 	children?: MockNode[];
 };
+
+/** A page's children, readable whether or not the page is loaded. */
+const RAW_CHILDREN = Symbol("children");
+
+function childrenOf(parent: MockNode): MockNode[] {
+	return (parent[RAW_CHILDREN as never] ?? parent.children) as MockNode[];
+}
+
+/** The serialized node each mock node was built from, for `clone`. */
+const sources = new WeakMap<MockNode, SerializedNode>();
 
 export function installMockFigma(document: DocumentFixture) {
 	const storage = new Map<string, unknown>();
@@ -187,13 +198,26 @@ export function installMockFigma(document: DocumentFixture) {
 			exports.push({ nodeId: node.id, settings });
 			return new Uint8Array(Buffer.from(framePng, "base64"));
 		};
+		node.removed = false;
 		node.remove = () => {
-			const siblings = (node.parent as MockNode).children as MockNode[];
-			siblings.splice(siblings.indexOf(node), 1);
+			detach(node);
 			unregister(node);
 		};
+		// Copies the node as built (later edits aren't copied), with fresh IDs,
+		// right after the original.
+		node.clone = () => {
+			const source = sources.get(node) as SerializedNode;
+			const copy = toFigmaNode(
+				renumber(source, () => createdNodeId(++created)),
+			);
+			const parent = node.parent as MockNode;
+			register(copy, parent);
+			const siblings = childrenOf(parent);
+			siblings.splice(siblings.indexOf(node) + 1, 0, copy);
+			return copy;
+		};
 		mockReactions(node, document.reactions[node.id] ?? []);
-		if (node.children && node.type !== "INSTANCE") canAppend(node);
+		if (node.children) canAppend(node);
 		if (node.type === "TEXT") guardText(node, loadedFonts);
 		bindable(node);
 		if (node.type === "COMPONENT") {
@@ -225,17 +249,93 @@ export function installMockFigma(document: DocumentFixture) {
 	}
 
 	function canAppend(container: MockNode) {
+		const guard = () => {
+			for (
+				let up: MockNode | undefined = container;
+				up;
+				up = up.parent as never
+			) {
+				if (up.type === "INSTANCE") {
+					throw new Error(
+						"Cannot move node. New parent is an instance or is inside of an instance",
+					);
+				}
+			}
+		};
+		// Counts the index once the child is taken out of its old place.
+		container.insertChild = (index: number, child: MockNode) => {
+			guard();
+			detach(child);
+			const children = childrenOf(container);
+			if (index > children.length) {
+				throw new Error(
+					"Cannot insert node at index greater than the number of existing siblings",
+				);
+			}
+			children.splice(index, 0, child);
+			child.parent = container;
+		};
 		container.appendChild = (child: MockNode) => {
-			const siblings = (child.parent as MockNode | undefined)?.children;
-			siblings?.splice(siblings.indexOf(child), 1);
-			container.children?.push(child);
+			guard();
+			detach(child);
+			childrenOf(container).push(child);
 			child.parent = container;
 		};
 	}
 
+	function detach(node: MockNode) {
+		const parent = node.parent as MockNode | undefined;
+		if (!parent) return;
+		const siblings = childrenOf(parent);
+		siblings.splice(siblings.indexOf(node), 1);
+	}
+
 	function unregister(node: MockNode) {
 		byId.delete(node.id);
+		node.removed = true;
 		for (const child of node.children ?? []) unregister(child);
+	}
+
+	/**
+	 * Like Figma, a group sits where the topmost grouped node was, spans its
+	 * children, and keeps their layer order and coordinates.
+	 */
+	function group(nodes: MockNode[], parent: MockNode): MockNode {
+		const siblings = childrenOf(parent);
+		const ordered = nodes.every((node) => node.parent === parent)
+			? [...nodes].sort((a, b) => siblings.indexOf(a) - siblings.indexOf(b))
+			: nodes;
+		const inParent = ordered.filter((node) => node.parent === parent);
+		const top = Math.max(...inParent.map((node) => siblings.indexOf(node)));
+		const at =
+			inParent.length > 0 ? top - inParent.length + 1 : siblings.length;
+		const box = bounds(ordered);
+		const groupNode = toFigmaNode({
+			id: createdNodeId(++created),
+			name: "Group",
+			type: "GROUP",
+			...box,
+			children: [],
+		});
+		for (const node of ordered) detach(node);
+		register(groupNode, parent);
+		siblings.splice(at, 0, groupNode);
+		for (const node of ordered) {
+			(groupNode.children as MockNode[]).push(node);
+			node.parent = groupNode;
+		}
+		return groupNode;
+	}
+
+	function ungroup(node: MockNode): MockNode[] {
+		const parent = node.parent as MockNode;
+		const siblings = childrenOf(parent);
+		const children = [...(node.children as MockNode[])];
+		siblings.splice(siblings.indexOf(node), 1, ...children);
+		for (const child of children) child.parent = parent;
+		node.children = [];
+		unregister(node);
+		return children;
 	}
 
 	/** Like Figma, new nodes start out on the current page. */
@@ -283,6 +383,7 @@ export function installMockFigma(document: DocumentFixture) {
 			walk(mockPage);
 			return found;
 		};
+		Object.defineProperty(mockPage, RAW_CHILDREN, { value: children });
 		canAppend(mockPage);
 		for (const child of children) register(child, mockPage);
 		byId.set(page.id, mockPage);
@@ -378,6 +479,8 @@ export function installMockFigma(document: DocumentFixture) {
 					fontSize: 12,
 				},
 			}),
+		group,
+		ungroup,
 		undoCommits: 0,
 		commitUndo() {
 			mock.undoCommits++;
@@ -413,6 +516,20 @@ function mockReactions(node: MockNode, initial: Reaction[]) {
 afterEach(() => {
 	delete (globalThis as { figma?: unknown }).figma;
 });
+
+/** The box around the nodes, in their parent's coordinates. */
+function bounds(nodes: MockNode[]) {
+	const edges = (start: "x" | "y", size: "width" | "height") => {
+		const from = Math.min(...nodes.map((node) => node[start] as number));
+		const to = Math.max(
+			...nodes.map((node) => (node[start] as number) + (node[size] as number)),
+		);
+		return [from, to - from];
+	};
+	const [x, width] = edges("x", "width");
+	const [y, height] = edges("y", "height");
+	return { x, y, width, height };
+}
 
 function toFigmaNode(node: SerializedNode): MockNode {
 	const mock: MockNode = {
@@ -475,6 +592,7 @@ function toFigmaNode(node: SerializedNode): MockNode {
 		});
 		mock.children = node.children.map(toFigmaNode);
 	}
+	sources.set(mock, node);
 	if (node.component) {
 		const { key, description, properties, variantProperties } = node.component;
 		mock.key = key;
