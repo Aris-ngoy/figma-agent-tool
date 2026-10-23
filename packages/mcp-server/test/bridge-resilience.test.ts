@@ -28,6 +28,15 @@ function text(result: { [key: string]: unknown }): string {
 }
 
 describe("bridge resilience", () => {
+	// The plugin dials ws://localhost, which macOS resolves to ::1 first.
+	test("accepts the plugin on the IPv6 loopback too", async () => {
+		const harness = await withPingTool();
+		await harness.connectFakePlugin({ host: "[::1]" });
+		expect(harness.bridge.status().connected).toBe(true);
+		const result = await harness.callTool("ping_plugin");
+		expect(result.isError).toBeFalsy();
+	});
+
 	test("a command the plugin never answers times out with an error naming it", async () => {
 		const harness = await withPingTool({ requestTimeoutMs: 50 });
 		await harness.connectFakePlugin({ answers: false });

@@ -17,7 +17,10 @@ import {
 import type { ServerWebSocket } from "bun";
 import packageJson from "../package.json" with { type: "json" };
 
+// The plugin dials ws://localhost, which may resolve to either loopback
+// (macOS tries ::1 first), so the bridge listens on both.
 export const BRIDGE_HOSTNAME = "127.0.0.1";
+export const BRIDGE_HOSTNAME_IPV6 = "::1";
 
 /** How long a command may run before the agent gets a timeout error. */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -122,67 +125,76 @@ export function startBridge({
 		pending.clear();
 	}
 
-	const server = Bun.serve({
-		hostname: BRIDGE_HOSTNAME,
-		port,
-		fetch(request, server) {
-			if (server.upgrade(request, { data: undefined })) return;
-			return new Response("Figma Agent Tool bridge: WebSocket only", {
-				status: 426,
-			});
-		},
-		websocket: {
-			message(socket, data) {
-				let message: ReturnType<typeof parsePluginMessage>;
-				try {
-					message = parsePluginMessage(JSON.parse(String(data)));
-				} catch (error) {
-					log(`[bridge] dropped invalid plugin message: ${error}`);
-					return;
-				}
-				if (message.type === "handshake") {
-					const replaced = session?.socket !== socket ? session : undefined;
-					session = {
-						socket,
-						file: message.file,
-						pluginVersion: message.pluginVersion,
-						capabilities: message.capabilities,
-					};
-					const ack: HandshakeAck = {
-						type: "handshake_ack",
-						serverVersion: packageJson.version,
-					};
-					socket.send(JSON.stringify(ack));
-					if (replaced) {
-						// One bridged file at a time: the newest plugin instance wins.
-						log(
-							`[bridge] warning: a newer plugin connection (“${message.file.name}”) ` +
-								`replaced the one for “${replaced.file.name}”`,
-						);
-						rejectPending("was replaced by a newer one");
-						replaced.socket.close(
-							CLOSE_CODE_REPLACED,
-							"Replaced by a newer plugin connection",
-						);
+	const serve = (hostname: string, port: number) =>
+		Bun.serve({
+			hostname,
+			port,
+			fetch(request, server) {
+				if (server.upgrade(request, { data: undefined })) return;
+				return new Response("Figma Agent Tool bridge: WebSocket only", {
+					status: 426,
+				});
+			},
+			websocket: {
+				message(socket, data) {
+					let message: ReturnType<typeof parsePluginMessage>;
+					try {
+						message = parsePluginMessage(JSON.parse(String(data)));
+					} catch (error) {
+						log(`[bridge] dropped invalid plugin message: ${error}`);
+						return;
 					}
-					log(`[bridge] plugin connected: ${message.file.name}`);
-					return;
-				}
-				const request = pending.get(message.id);
-				if (!request) return;
-				pending.delete(message.id);
-				if (message.ok) request.resolve(message.result);
-				else request.reject(new PluginCommandError(message.error));
+					if (message.type === "handshake") {
+						const replaced = session?.socket !== socket ? session : undefined;
+						session = {
+							socket,
+							file: message.file,
+							pluginVersion: message.pluginVersion,
+							capabilities: message.capabilities,
+						};
+						const ack: HandshakeAck = {
+							type: "handshake_ack",
+							serverVersion: packageJson.version,
+						};
+						socket.send(JSON.stringify(ack));
+						if (replaced) {
+							// One bridged file at a time: the newest plugin instance wins.
+							log(
+								`[bridge] warning: a newer plugin connection (“${message.file.name}”) ` +
+									`replaced the one for “${replaced.file.name}”`,
+							);
+							rejectPending("was replaced by a newer one");
+							replaced.socket.close(
+								CLOSE_CODE_REPLACED,
+								"Replaced by a newer plugin connection",
+							);
+						}
+						log(`[bridge] plugin connected: ${message.file.name}`);
+						return;
+					}
+					const request = pending.get(message.id);
+					if (!request) return;
+					pending.delete(message.id);
+					if (message.ok) request.resolve(message.result);
+					else request.reject(new PluginCommandError(message.error));
+				},
+				close(socket) {
+					if (session?.socket !== socket) return;
+					session = undefined;
+					rejectPending("closed");
+					log("[bridge] plugin disconnected");
+				},
 			},
-			close(socket) {
-				if (session?.socket !== socket) return;
-				session = undefined;
-				rejectPending("closed");
-				log("[bridge] plugin disconnected");
-			},
-		},
-	});
+		});
+	const server = serve(BRIDGE_HOSTNAME, port);
 	const boundPort = server.port ?? port;
+	let serverIpv6: typeof server | undefined;
+	try {
+		serverIpv6 = serve(BRIDGE_HOSTNAME_IPV6, boundPort);
+	} catch (error) {
+		// No IPv6 loopback on this machine: localhost resolves to 127.0.0.1.
+		log(`[bridge] not listening on [${BRIDGE_HOSTNAME_IPV6}]: ${error}`);
+	}
 
 	return {
 		port: boundPort,
@@ -229,6 +241,7 @@ export function startBridge({
 			// server has closed a socket itself (connection replacement), although
 			// the server does stop.
 			void server.stop(true);
+			void serverIpv6?.stop(true);
 		},
 	};
 }
