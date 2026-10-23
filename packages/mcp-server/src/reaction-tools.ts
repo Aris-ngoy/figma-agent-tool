@@ -42,7 +42,7 @@ export function registerReactionTools(server: McpServer, bridge: Bridge) {
 				"top-level frame as destination, CHANGE_TO a component variant; " +
 				"invalid destinations fail and nothing is written. Returns the " +
 				`node's reactions afterwards; one undo step. ${shapeNotes}`,
-			inputSchema: commands.set_reactions.params.shape,
+			inputSchema: { ...commands.set_reactions.params.shape, nodeId },
 		},
 		async (args) => jsonResult(await bridge.request("set_reactions", args)),
 	);

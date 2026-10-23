@@ -439,6 +439,18 @@ export const NAVIGATIONS = [
 	"CHANGE_TO",
 ] as const;
 
+const MEDIA_ACTIONS = [
+	"PLAY",
+	"PAUSE",
+	"TOGGLE_PLAY_PAUSE",
+	"MUTE",
+	"UNMUTE",
+	"TOGGLE_MUTE_UNMUTE",
+	"SKIP_FORWARD",
+	"SKIP_BACKWARD",
+	"SKIP_TO",
+] as const;
+
 /** A variable value or expression, passed through as Figma reports it. */
 const VariableData = z.object({
 	type: z.string().optional(),
@@ -446,6 +458,8 @@ const VariableData = z.object({
 	value: z.unknown().optional(),
 });
 
+// Written out because Action is recursive (CONDITIONAL blocks hold actions),
+// so zod can't infer it.
 export type Action =
 	| { type: "BACK" | "CLOSE" }
 	| { type: "URL"; url: string; openInNewTab?: boolean }
@@ -484,18 +498,6 @@ export type Action =
 			resetScrollPosition?: boolean;
 			resetInteractiveComponents?: boolean;
 	  };
-
-const MEDIA_ACTIONS = [
-	"PLAY",
-	"PAUSE",
-	"TOGGLE_PLAY_PAUSE",
-	"MUTE",
-	"UNMUTE",
-	"TOGGLE_MUTE_UNMUTE",
-	"SKIP_FORWARD",
-	"SKIP_BACKWARD",
-	"SKIP_TO",
-] as const;
 
 /**
  * What a reaction does, as in the Plugin API. NODE actions go to
