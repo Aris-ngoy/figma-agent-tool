@@ -47,6 +47,41 @@ export const yoqaDevices = {
 export const devicePng =
 	"iVBORw0KGgoAAAANSUhEUgAAAAMAAAAGCAIAAACJh7NbAAAAEElEQVR4nGMwTpsJQQwkswB+phWFBHinVAAAAABJRU5ErkJggg==";
 
+/** The screen element tree the fake serves; x/y/size are 0–1000 like Yoqa's. */
+export const yoqaScreen = {
+	full: false,
+	window: { width: 393, height: 852 },
+	elements: [
+		{
+			type: "Button",
+			label: "Settings",
+			id: "settings-tab",
+			x: 750,
+			y: 920,
+			width: 200,
+			height: 60,
+			enabled: true,
+			visible: true,
+		},
+		{
+			type: "TextField",
+			label: "Search",
+			x: 50,
+			y: 120,
+			width: 900,
+			height: 50,
+		},
+	],
+};
+
+type FakeAction = {
+	kind: string;
+	label?: string;
+	id?: string;
+	description?: string;
+	url?: string;
+};
+
 export type FakeActiveDevice = {
 	deviceId: string;
 	platform: string;
@@ -57,7 +92,45 @@ export type FakeYoqaRequest = { method: string; path: string; body?: unknown };
 
 export function startFakeYoqa() {
 	const requests: FakeYoqaRequest[] = [];
-	const state: { active: FakeActiveDevice | null } = { active: null };
+	const state: {
+		active: FakeActiveDevice | null;
+		/** Steps the device performed, in order. */
+		performed: FakeAction[];
+	} = { active: null, performed: [] };
+
+	// Locator taps fail when no element matches, description taps when no
+	// element's label appears in the description, open-url when no app handles
+	// the scheme.
+	function perform(step: FakeAction): string | undefined {
+		const elements = yoqaScreen.elements;
+		if (step.id && !elements.some((e) => e.id === step.id)) {
+			return `No element matching id: ${step.id}`;
+		}
+		if (step.label && !elements.some((e) => e.label === step.label)) {
+			return `No element matching label: ${step.label}`;
+		}
+		const description = step.description?.toLowerCase();
+		if (
+			description &&
+			!elements.some((e) => description.includes(e.label.toLowerCase()))
+		) {
+			return `Could not ground description: ${step.description}`;
+		}
+		if (step.url?.startsWith("unregistered://")) {
+			return `No app can open ${step.url}`;
+		}
+		state.performed.push(step);
+	}
+
+	const noSession = (error: string) =>
+		Response.json(
+			{
+				error,
+				detail:
+					"No active device session. Run: yoqa devices connect <device_id>",
+			},
+			{ status: 500 },
+		);
 
 	const server = Bun.serve({
 		hostname: "127.0.0.1",
@@ -129,6 +202,61 @@ export function startFakeYoqa() {
 					return new Response(Buffer.from(devicePng, "base64"), {
 						headers: { "Content-Type": "image/png" },
 					});
+				case "POST /action": {
+					if (!state.active) return noSession("Action failed");
+					const error = perform(body as FakeAction);
+					if (error?.startsWith("No element")) {
+						return Response.json({ error }, { status: 404 });
+					}
+					if (error) {
+						return Response.json(
+							{ error: "Action failed", detail: error },
+							{ status: 500 },
+						);
+					}
+					return Response.json({ ok: true, kind: (body as FakeAction).kind });
+				}
+				case "POST /action/batch": {
+					if (!state.active) return noSession("Action batch failed");
+					const { steps } = body as { steps: FakeAction[] };
+					const grounded = steps.findIndex((step) => step.description);
+					if (grounded >= 0) {
+						return Response.json(
+							{
+								error: `Batch step ${grounded} uses a description; Grounding needs a fresh screen. Use a single Action instead.`,
+							},
+							{ status: 400 },
+						);
+					}
+					const results: { ok: true; kind: string }[] = [];
+					for (const [index, step] of steps.entries()) {
+						const error = perform(step);
+						if (error) {
+							return Response.json(
+								{
+									ok: false,
+									completed: results.length,
+									total: steps.length,
+									failedIndex: index,
+									error,
+									steps: results,
+								},
+								{ status: 422 },
+							);
+						}
+						results.push({ ok: true, kind: step.kind });
+					}
+					return Response.json({
+						ok: true,
+						completed: results.length,
+						total: steps.length,
+						steps: results,
+					});
+				}
+				case "GET /screen":
+					return state.active
+						? Response.json(yoqaScreen)
+						: noSession("Failed to read screen");
 				default:
 					return Response.json({ error: "Not found" }, { status: 404 });
 			}

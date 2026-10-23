@@ -1,4 +1,5 @@
-// Device tools: list, connect and capture devices through the DeviceRunner.
+// Device tools: list, connect, navigate and capture devices through the
+// DeviceRunner.
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
@@ -9,8 +10,10 @@ import {
 	DevicePlatform,
 	type DeviceRunner,
 	DeviceRunnerError,
+	NavigationAction,
+	Screen,
 } from "./device-runner";
-import { jsonResult, registerGuardedTool } from "./figma-tool";
+import { jsonResult, registerGuardedTool, toolError } from "./figma-tool";
 
 export function registerDeviceTools(
 	server: McpServer,
@@ -126,6 +129,77 @@ export function registerDeviceTools(
 				});
 			}
 			return result;
+		},
+		DeviceRunnerError,
+	);
+	registerGuardedTool(
+		server,
+		"navigate_device",
+		{
+			description:
+				"Bring the app on the active device to the screen under test before " +
+				"capturing: open a `deepLink`, run Yoqa `actions` (tap, swipe, type " +
+				"by coordinates, element id/label or description), or both, deep " +
+				"link first. Stops at the first failing step and names it. Set " +
+				"`includeScreen` to get the element tree afterwards to verify where you are.",
+			inputSchema: {
+				deepLink: z
+					.string()
+					.min(1)
+					.optional()
+					.describe("URL to open first, e.g. myapp://settings."),
+				actions: z
+					.array(NavigationAction)
+					.min(1)
+					.optional()
+					.describe("Steps to run in order, after the deep link if any."),
+				settleMs: z
+					.number()
+					.int()
+					.min(0)
+					.max(10_000)
+					.optional()
+					.describe("How long to let the screen settle after the last step."),
+				includeScreen: z
+					.boolean()
+					.default(false)
+					.describe("Also return the screen element tree after navigating."),
+			},
+			outputSchema: {
+				device: ActiveDevice,
+				completed: z.number(),
+				total: z.number(),
+				screen: Screen.optional(),
+			},
+		},
+		async ({ deepLink, actions = [], settleMs, includeScreen }) => {
+			const steps: NavigationAction[] = [
+				...(deepLink ? [{ kind: "open-url" as const, url: deepLink }] : []),
+				...actions,
+			];
+			if (steps.length === 0) {
+				return toolError("Pass a deepLink, actions, or both.");
+			}
+			const { device, completed, failure } = await runner.perform(steps, {
+				settleMs,
+			});
+			if (failure) {
+				const actionIndex = failure.index - (deepLink ? 1 : 0);
+				const step =
+					actionIndex < 0
+						? `deepLink (${JSON.stringify(deepLink)})`
+						: `actions[${actionIndex}] (${JSON.stringify(actions[actionIndex])})`;
+				return toolError(
+					`Navigation failed at ${step}: ${failure.error}. ` +
+						`${completed} of ${steps.length} steps completed; later ones were not run.`,
+				);
+			}
+			return jsonResult({
+				device,
+				completed,
+				total: steps.length,
+				...(includeScreen && { screen: await runner.screen() }),
+			});
 		},
 		DeviceRunnerError,
 	);

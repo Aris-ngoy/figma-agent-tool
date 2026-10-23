@@ -48,10 +48,11 @@ bun run check      # Biome lint + format
 
 ## Devices (Yoqa)
 
-`list_devices`, `connect_device` and `capture_device_screenshot` reach iOS simulators, Android emulators and physical iOS and Android devices through the [Yoqa](https://yoqa.mintlify.app/docs/cli) local runner's HTTP API. **Yoqa is installed separately** (`@yoqa/runner`, not bundled with or imported by this MIT package). Start it with `yoqa serve` (or the `yoqa-runner` bin) before using the device tools. Device setup such as the Appium runtime, iOS signing and trusting the runner on a physical iPhone is Yoqa's job; its errors are passed through to the agent.
+`list_devices`, `connect_device`, `navigate_device` and `capture_device_screenshot` reach iOS simulators, Android emulators and physical iOS and Android devices through the [Yoqa](https://yoqa.mintlify.app/docs/cli) local runner's HTTP API. **Yoqa is installed separately** (`@yoqa/runner`, not bundled with or imported by this MIT package). Start it with `yoqa serve` (or the `yoqa-runner` bin) before using the device tools. Device setup such as the Appium runtime, iOS signing and trusting the runner on a physical iPhone is Yoqa's job; its errors are passed through to the agent.
 
 - `list_devices`: devices on both platforms (or one, with `platform`), with kind (`simulator` / `emulator` / `physical`) and the runner's status string.
 - `connect_device`: reuses the active session when it is already that device. Yoqa holds one session at a time, so connecting a different device moves the session to it; the result names the device it replaced.
+- `navigate_device`: brings the app to the screen under test before capture. Pass a `deepLink`, Yoqa `actions` (`tap`, `swipe`, `input`, `key`, `alert`, `open-url`, `activate-app`, `restart-app`; coordinates are 0–1000 of the screen, or target an element `id` / `label` from the screen tree, or a `description` Yoqa grounds on the current screen), or both. Steps run in order and stop at the first failure, which the error names (`deepLink` or `actions[i]`) with Yoqa's reason. `includeScreen` returns the element tree afterwards so the agent can check where it landed.
 - `capture_device_screenshot`: writes the active device's screen to the artifacts folder and returns its path and pixel size.
 - `get_status` reports whether the runner is reachable and which device is active.
 

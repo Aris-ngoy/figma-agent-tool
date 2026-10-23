@@ -8,9 +8,12 @@ import {
 	DevicePlatform,
 	type DeviceRunner,
 	DeviceRunnerError,
+	type NavigationAction,
 	NoActiveDeviceError,
 	type RunnerStatus,
 	RunnerUnreachableError,
+	Screen,
+	type StepsOutcome,
 } from "./device-runner";
 
 export const DEFAULT_YOQA_URL = "http://127.0.0.1:7420";
@@ -32,6 +35,14 @@ const YoqaDevice = z.object({
 });
 const YoqaDeviceList = z.object({ devices: z.array(YoqaDevice) });
 const YoqaHealth = z.object({ version: z.string() });
+const YoqaBatchResult = z.object({
+	ok: z.boolean(),
+	completed: z.number(),
+	failedIndex: z.number().optional(),
+	error: z.string().optional(),
+});
+/** Statuses Yoqa uses for a step that failed, rather than for a lost session. */
+const STEP_FAILURE_STATUSES = [400, 404, 422, 500];
 const YoqaError = z.object({
 	error: z.string(),
 	detail: z.string().optional(),
@@ -64,6 +75,63 @@ export function createYoqaRunner({
 
 	async function json(path: string, init?: RequestInit): Promise<unknown> {
 		return (await expectOk(await send(path, init))).json();
+	}
+
+	function post(path: string, body: unknown): Promise<Response> {
+		return send(path, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+		});
+	}
+
+	async function requireActiveDevice() {
+		const device = await activeDevice();
+		if (!device) throw new NoActiveDeviceError();
+		return device;
+	}
+
+	/** Runs consecutive locator/coordinate steps in one request. */
+	async function performBatch(
+		steps: NavigationAction[],
+		settleMs: number | undefined,
+	): Promise<StepsOutcome> {
+		const response = await post("/action/batch", { steps, settleMs });
+		// Yoqa answers a batch that stopped at a step with 422 and the result.
+		if (!response.ok && response.status !== 422) {
+			throw await runnerError(response);
+		}
+		const result = YoqaBatchResult.parse(await response.json());
+		if (result.ok) return { completed: result.completed };
+		return {
+			completed: result.completed,
+			failure: {
+				index: result.failedIndex ?? result.completed,
+				error: result.error ?? "Step failed",
+			},
+		};
+	}
+
+	/**
+	 * Runs one step on its own. Yoqa only settles the screen after an action
+	 * when asked for a screenshot, so the last step asks for one.
+	 */
+	async function performSingle(
+		step: NavigationAction,
+		settle: { settleMs?: number } | undefined,
+	): Promise<StepsOutcome> {
+		const response = await post(
+			"/action",
+			settle ? { ...step, screenshot: true, ...settle } : step,
+		);
+		if (response.ok) return { completed: 1 };
+		if (!STEP_FAILURE_STATUSES.includes(response.status)) {
+			throw await runnerError(response);
+		}
+		return {
+			completed: 0,
+			failure: { index: 0, error: await yoqaReason(response) },
+		};
 	}
 
 	async function activeDevice(signal?: AbortSignal) {
@@ -114,28 +182,66 @@ export function createYoqaRunner({
 			);
 		},
 
+		// Yoqa answers a missing session with a generic 500, so the session
+		// methods check for one first.
 		async screenshot() {
-			// Yoqa answers a missing session with a generic 500, so check first.
-			const device = await activeDevice();
-			if (!device) throw new NoActiveDeviceError();
+			const device = await requireActiveDevice();
 			const response = await expectOk(await send("/screenshot/image"));
 			const png = new Uint8Array(await response.arrayBuffer());
 			return { device, png };
 		},
+
+		async perform(steps, { settleMs } = {}) {
+			const device = await requireActiveDevice();
+			// Yoqa grounds a description on a fresh screen, so it refuses those
+			// steps in a batch; they go one at a time between batches.
+			let completed = 0;
+			while (completed < steps.length) {
+				const start = completed;
+				const step = steps[start] as NavigationAction;
+				let end = start + 1;
+				if (!step.description) {
+					while (end < steps.length && !steps[end]?.description) end++;
+				}
+				const isLast = end === steps.length;
+				const outcome = step.description
+					? await performSingle(step, isLast ? { settleMs } : undefined)
+					: await performBatch(
+							steps.slice(start, end),
+							isLast ? settleMs : undefined,
+						);
+				completed += outcome.completed;
+				if (outcome.failure) {
+					const index = start + outcome.failure.index;
+					return { device, completed, failure: { ...outcome.failure, index } };
+				}
+			}
+			return { device, completed };
+		},
+
+		async screen() {
+			await requireActiveDevice();
+			const { window, elements = [] } = Screen.extend({
+				elements: Screen.shape.elements.optional(),
+			}).parse(await json("/screen"));
+			return { window, elements };
+		},
 	};
 }
 
-async function runnerError(response: Response): Promise<DeviceRunnerError> {
+async function yoqaReason(response: Response): Promise<string> {
 	const text = await response.text();
 	let body: z.infer<typeof YoqaError> | undefined;
 	try {
 		body = YoqaError.parse(JSON.parse(text));
 	} catch {}
-	let reason: string;
-	if (!body) reason = `HTTP ${response.status}${text ? ` ${text}` : ""}`;
-	else if (body.detail) reason = `${body.error}: ${body.detail}`;
-	else reason = body.error;
+	if (!body) return `HTTP ${response.status}${text ? ` ${text}` : ""}`;
+	if (body.detail) return `${body.error}: ${body.detail}`;
+	return body.error;
+}
+
+async function runnerError(response: Response): Promise<DeviceRunnerError> {
 	return new DeviceRunnerError(
-		`Yoqa runner error: ${reason}. See ${YOQA_DOCS_URL} for device setup.`,
+		`Yoqa runner error: ${await yoqaReason(response)}. See ${YOQA_DOCS_URL} for device setup.`,
 	);
 }
