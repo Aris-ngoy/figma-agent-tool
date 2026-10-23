@@ -1,0 +1,8 @@
+{
+	"mcpServers": {
+		"figma-agent-tool": {
+			"command": "bun",
+			"args": ["packages/mcp-server/src/main.ts"]
+		}
+	}
+}
