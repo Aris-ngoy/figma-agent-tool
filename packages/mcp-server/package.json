@@ -15,7 +15,12 @@
 	},
 	"dependencies": {
 		"@figma-agent-tool/protocol": "workspace:*",
+		"@figma-agent-tool/visual-diff": "workspace:*",
 		"@modelcontextprotocol/sdk": "^1.32.1",
 		"zod": "4.6.7"
+	},
+	"devDependencies": {
+		"@types/pngjs": "^6.0.5",
+		"pngjs": "^7.0.0"
 	}
 }

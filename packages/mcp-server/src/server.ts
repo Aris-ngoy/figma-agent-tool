@@ -9,6 +9,7 @@ import type { Bridge } from "./bridge";
 import { registerEditTools } from "./edit-tools";
 import { registerFigmaTool } from "./figma-tool";
 import { registerReadTools } from "./read-tools";
+import { registerVisualQaTools } from "./visual-qa-tools";
 
 export function createMcpServer({
 	bridge,
@@ -51,6 +52,7 @@ export function createMcpServer({
 
 	registerReadTools(server, bridge);
 	registerEditTools(server, bridge);
+	registerVisualQaTools(server, { artifactsDir });
 
 	registerFigmaTool(
 		server,

@@ -41,7 +41,8 @@ export function registerFigmaTool<
 	server.registerTool(name, config, callback);
 }
 
-function toolError(message: string): CallToolResult {
+/** A tool error the agent sees as text. */
+export function toolError(message: string): CallToolResult {
 	return { content: [{ type: "text", text: message }], isError: true };
 }
 

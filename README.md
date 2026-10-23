@@ -7,6 +7,7 @@ An MCP server plus a Figma development plugin that lets any MCP client work on t
 - `packages/protocol`: runtime-validated (zod) bridge messages and the shared test fixtures.
 - `packages/mcp-server`: the MCP server (stdio) and the localhost WebSocket bridge the plugin connects to.
 - `packages/figma-plugin`: the Figma plugin (sandbox command handler + UI iframe that owns the connection).
+- `packages/visual-diff`: pure image comparison (align, mask, pixel-diff, cluster mismatches), with no Figma or device knowledge. Its PNG fixtures are regenerated with `bun run fixtures` in that package.
 
 ## Development
 
@@ -51,3 +52,11 @@ Image outputs such as `export_node_image` are written to `.figma-agent/` in the 
 ## Editing
 
 `create_nodes` and `update_nodes` take batches: a whole screen (frames with nested `children`, text, rectangles, component instances) can be built in one call. Properties use the same shape `get_node` returns. Each item succeeds or fails on its own, and the result lists every item in input order with its new ID or an error code (`font_not_found`, `component_not_found`, `unsupported_property`, …). Each batch is committed as one undo step, so Cmd+Z in Figma reverts the agent's last call.
+
+## Comparing images
+
+`compare_images` diffs two local PNGs, so it needs neither Figma nor a device and also works in CI against stored baselines. Pass a `designPath` (for example a frame exported at 1x) and an `actualPath` (for example a device screenshot). The design is scaled to the actual image's pixel size (`scale: "auto"` derives the ratio from the widths, so a 393pt frame lines up with a 1179px capture; or pass the device pixel ratio). If the aspect ratios differ by more than `aspectTolerance` (default 1%), the tool returns an error instead of a score.
+
+- `platform`: `ios` masks the top 59pt and bottom 34pt, and `android` masks the top 48dp and bottom 48dp (status bar and home indicator / navigation bar). The default is `none`. Masks and `ignoreRegions` are given in design image pixels, so platform masks assume a 1x design.
+- `threshold` (default `0.1`), `detectAntiAliasing` (default on) and `mismatchBudget` (percent of unmasked pixels, default `0.5`) control how strict the comparison is.
+- The result reports mismatch %, pass/fail, mismatched regions as bounding boxes (in actual-image pixels), the masks applied, and the path of a diff image in the artifacts folder (red: mismatch, yellow: anti-aliasing, blue: masked). Set `markdown: true` for a summary you can paste into a PR, and `inline: true` to get the diff image in the result.
