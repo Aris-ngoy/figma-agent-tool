@@ -93,7 +93,7 @@ export type StepsOutcome = {
 	failure?: { index: number; error: string };
 };
 
-export const ScreenElement = z.object({
+const ScreenElement = z.object({
 	type: z.string(),
 	label: z.string(),
 	id: z.string().optional(),

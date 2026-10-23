@@ -41,6 +41,10 @@ const YoqaBatchResult = z.object({
 	failedIndex: z.number().optional(),
 	error: z.string().optional(),
 });
+/** Yoqa omits `elements` when the screen has none. */
+const YoqaScreen = Screen.extend({
+	elements: Screen.shape.elements.default([]),
+});
 /** Statuses Yoqa uses for a step that failed, rather than for a lost session. */
 const STEP_FAILURE_STATUSES = [400, 404, 422, 500];
 const YoqaError = z.object({
@@ -199,17 +203,22 @@ export function createYoqaRunner({
 			while (completed < steps.length) {
 				const start = completed;
 				const step = steps[start] as NavigationAction;
-				let end = start + 1;
-				if (!step.description) {
+				let outcome: StepsOutcome;
+				if (step.description) {
+					const isLast = start + 1 === steps.length;
+					outcome = await performSingle(
+						step,
+						isLast ? { settleMs } : undefined,
+					);
+				} else {
+					let end = start + 1;
 					while (end < steps.length && !steps[end]?.description) end++;
+					const isLast = end === steps.length;
+					outcome = await performBatch(
+						steps.slice(start, end),
+						isLast ? settleMs : undefined,
+					);
 				}
-				const isLast = end === steps.length;
-				const outcome = step.description
-					? await performSingle(step, isLast ? { settleMs } : undefined)
-					: await performBatch(
-							steps.slice(start, end),
-							isLast ? settleMs : undefined,
-						);
 				completed += outcome.completed;
 				if (outcome.failure) {
 					const index = start + outcome.failure.index;
@@ -221,10 +230,7 @@ export function createYoqaRunner({
 
 		async screen() {
 			await requireActiveDevice();
-			const { window, elements = [] } = Screen.extend({
-				elements: Screen.shape.elements.optional(),
-			}).parse(await json("/screen"));
-			return { window, elements };
+			return YoqaScreen.parse(await json("/screen"));
 		},
 	};
 }
