@@ -64,7 +64,7 @@ export function createMcpServer({
 	registerReadTools(server, bridge);
 	registerEditTools(server, bridge);
 	registerReactionTools(server, bridge);
-	registerVisualQaTools(server, { artifactsDir });
+	registerVisualQaTools(server, { artifactsDir, bridge, deviceRunner });
 	registerDeviceTools(server, deviceRunner, artifactsDir);
 
 	registerFigmaTool(

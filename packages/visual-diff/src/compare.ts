@@ -30,9 +30,14 @@ export type CompareOptions = {
 	 * (a 393px design and a 1179px capture give 3).
 	 */
 	scale?: "auto" | number;
+	/**
+	 * Design image pixels per design point: 3 for a frame exported at 3x.
+	 * `scale`, platform insets and ignore regions are in design points.
+	 */
+	designScale?: number;
 	/** Masks the platform's status bar and home indicator. */
 	platform?: Platform;
-	/** Extra rectangles to ignore, in design image coordinates. */
+	/** Extra rectangles to ignore, in design points. */
 	ignoreRegions?: Rect[];
 	/** Per-pixel color distance (0–1) below which pixels count as equal. */
 	threshold?: number;
@@ -46,6 +51,7 @@ export type CompareOptions = {
 
 export const DEFAULT_COMPARE_OPTIONS = {
 	scale: "auto",
+	designScale: 1,
 	platform: "none",
 	ignoreRegions: [],
 	threshold: 0.1,
@@ -68,7 +74,7 @@ export type ComparisonReport = {
 	comparedPixels: number;
 	/** The size both images were compared at: the actual image's size. */
 	dimensions: { width: number; height: number };
-	/** How the design was scaled to line up with the actual image. */
+	/** Actual pixels per design point, i.e. the device pixel ratio. */
 	scale: { x: number; y: number };
 	/** Clustered mismatches, largest first, in aligned (actual) pixels. */
 	regions: MismatchRegion[];
@@ -89,13 +95,23 @@ export function compare(
 	const settings = { ...DEFAULT_COMPARE_OPTIONS, ...options };
 	const design = decodePng(designPng, "design");
 	const actual = decodePng(actualPng, "actual");
-	checkAlignment(design, actual, settings.scale, settings.aspectTolerance);
+	const points = {
+		width: design.width / settings.designScale,
+		height: design.height / settings.designScale,
+	};
+	checkAlignment(
+		design,
+		points,
+		actual,
+		settings.scale,
+		settings.aspectTolerance,
+	);
 
 	const { width, height } = actual;
 	const aligned = resize(design, width, height);
-	const scale = { x: width / design.width, y: height / design.height };
+	const scale = { x: width / points.width, y: height / points.height };
 
-	const masks = collectMasks(design, settings, scale);
+	const masks = collectMasks(points, settings, scale);
 	const ignoreMask = rasterizeMasks(masks, width, height);
 	const maskedPixels = ignoreMask.reduce((sum, value) => sum + value, 0);
 
@@ -181,6 +197,7 @@ function tintMasked(diff: Uint8Array, ignoreMask: Uint8Array) {
 
 function checkAlignment(
 	design: Image,
+	points: { width: number; height: number },
 	actual: Image,
 	scale: "auto" | number,
 	tolerance: number,
@@ -200,8 +217,8 @@ function checkAlignment(
 	}
 	if (scale === "auto") return;
 	const expected = {
-		width: design.width * scale,
-		height: design.height * scale,
+		width: points.width * scale,
+		height: points.height * scale,
 	};
 	const off = (expectedSize: number, actualSize: number) =>
 		Math.abs(expectedSize - actualSize) / actualSize > tolerance;
@@ -218,8 +235,9 @@ function checkAlignment(
 	}
 }
 
+/** Masks in aligned pixels, from insets and regions in design points. */
 function collectMasks(
-	design: Image,
+	design: { width: number; height: number },
 	{
 		platform,
 		ignoreRegions,

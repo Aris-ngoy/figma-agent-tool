@@ -118,6 +118,7 @@ function fakeDocument(): FakeDocument {
 function answer(
 	message: ServerMessage,
 	{ document, editor, reactions }: FakeDocument,
+	exportPng: FakePluginOptions["exportPng"],
 ): Response | undefined {
 	if (message.type !== "request") return undefined;
 	const { id } = message;
@@ -199,6 +200,13 @@ function answer(
 			const handle = reactions[command] as (params: unknown) => object;
 			return okOrFailure(handle(params));
 		}
+		case "export_node_image": {
+			const { nodeId, scale } = commands.export_node_image.params.parse(
+				message.params,
+			);
+			const png = exportPng?.(nodeId, scale);
+			return png ? ok({ png }) : replayExchange(message);
+		}
 		default:
 			return replayExchange(message);
 	}
@@ -229,11 +237,17 @@ type FakePluginOptions = {
 	handshake?: Handshake;
 	/** When false, the plugin receives requests but never answers them. */
 	answers?: boolean;
+	/** Base64 PNG to export for a node and scale; fixtures otherwise. */
+	exportPng?: (nodeId: string, scale: number) => string | undefined;
 };
 
 async function connectFakePlugin(
 	port: number,
-	{ handshake = handshakeFixture, answers = true }: FakePluginOptions,
+	{
+		handshake = handshakeFixture,
+		answers = true,
+		exportPng,
+	}: FakePluginOptions,
 ) {
 	const socket = new WebSocket(`ws://127.0.0.1:${port}`);
 	const requests: Request[] = [];
@@ -247,7 +261,7 @@ async function connectFakePlugin(
 			const message = parseServerMessage(JSON.parse(String(event.data)));
 			if (message.type === "handshake_ack") resolve();
 			if (message.type === "request") requests.push(message);
-			const response = answers ? answer(message, fake) : undefined;
+			const response = answers ? answer(message, fake, exportPng) : undefined;
 			if (response) socket.send(JSON.stringify(response));
 		});
 	});

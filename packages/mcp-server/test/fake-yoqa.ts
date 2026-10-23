@@ -96,6 +96,8 @@ export function startFakeYoqa() {
 		active: FakeActiveDevice | null;
 		/** Steps the device performed, in order. */
 		performed: FakeAction[];
+		/** PNG bytes the device's screen shows; `devicePng` by default. */
+		screen?: Uint8Array;
 	} = { active: null, performed: [] };
 
 	// Locator taps fail when no element matches, description taps when no
@@ -199,9 +201,12 @@ export function startFakeYoqa() {
 							{ status: 500 },
 						);
 					}
-					return new Response(Buffer.from(devicePng, "base64"), {
-						headers: { "Content-Type": "image/png" },
-					});
+					return new Response(
+						state.screen ?? Buffer.from(devicePng, "base64"),
+						{
+							headers: { "Content-Type": "image/png" },
+						},
+					);
 				case "POST /action": {
 					if (!state.active) return noSession("Action failed");
 					const error = perform(body as FakeAction);

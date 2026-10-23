@@ -15,6 +15,65 @@ import {
 } from "./device-runner";
 import { jsonResult, registerGuardedTool, toolError } from "./figma-tool";
 
+/** Where to take the app before capturing, as navigate_device takes it. */
+export const navigationShape = {
+	deepLink: z
+		.string()
+		.min(1)
+		.optional()
+		.describe("URL to open first, e.g. myapp://settings."),
+	actions: z
+		.array(NavigationAction)
+		.min(1)
+		.optional()
+		.describe("Steps to run in order, after the deep link if any."),
+	settleMs: z
+		.number()
+		.int()
+		.min(0)
+		.max(10_000)
+		.optional()
+		.describe("How long to let the screen settle after the last step."),
+};
+
+/**
+ * Opens the deep link, then runs the actions, on the active device. A failed
+ * step comes back as an error message naming it.
+ */
+export async function navigate(
+	runner: DeviceRunner,
+	{
+		deepLink,
+		actions = [],
+		settleMs,
+	}: { deepLink?: string; actions?: NavigationAction[]; settleMs?: number },
+): Promise<
+	{ device: ActiveDevice; completed: number; total: number } | { error: string }
+> {
+	const steps: NavigationAction[] = [
+		...(deepLink ? [{ kind: "open-url" as const, url: deepLink }] : []),
+		...actions,
+	];
+	if (steps.length === 0)
+		return { error: "Pass a deepLink, actions, or both." };
+	const { device, completed, failure } = await runner.perform(steps, {
+		settleMs,
+	});
+	if (failure) {
+		const actionIndex = failure.index - (deepLink ? 1 : 0);
+		const step =
+			actionIndex < 0
+				? `deepLink (${JSON.stringify(deepLink)})`
+				: `actions[${actionIndex}] (${JSON.stringify(actions[actionIndex])})`;
+		return {
+			error:
+				`Navigation failed at ${step}: ${failure.error}. ` +
+				`${completed} of ${steps.length} steps completed; later ones were not run.`,
+		};
+	}
+	return { device, completed, total: steps.length };
+}
+
 export function registerDeviceTools(
 	server: McpServer,
 	runner: DeviceRunner,
@@ -143,23 +202,7 @@ export function registerDeviceTools(
 				"link first. Stops at the first failing step and names it. Set " +
 				"`includeScreen` to get the element tree afterwards to verify where you are.",
 			inputSchema: {
-				deepLink: z
-					.string()
-					.min(1)
-					.optional()
-					.describe("URL to open first, e.g. myapp://settings."),
-				actions: z
-					.array(NavigationAction)
-					.min(1)
-					.optional()
-					.describe("Steps to run in order, after the deep link if any."),
-				settleMs: z
-					.number()
-					.int()
-					.min(0)
-					.max(10_000)
-					.optional()
-					.describe("How long to let the screen settle after the last step."),
+				...navigationShape,
 				includeScreen: z
 					.boolean()
 					.default(false)
@@ -172,32 +215,11 @@ export function registerDeviceTools(
 				screen: Screen.optional(),
 			},
 		},
-		async ({ deepLink, actions = [], settleMs, includeScreen }) => {
-			const steps: NavigationAction[] = [
-				...(deepLink ? [{ kind: "open-url" as const, url: deepLink }] : []),
-				...actions,
-			];
-			if (steps.length === 0) {
-				return toolError("Pass a deepLink, actions, or both.");
-			}
-			const { device, completed, failure } = await runner.perform(steps, {
-				settleMs,
-			});
-			if (failure) {
-				const actionIndex = failure.index - (deepLink ? 1 : 0);
-				const step =
-					actionIndex < 0
-						? `deepLink (${JSON.stringify(deepLink)})`
-						: `actions[${actionIndex}] (${JSON.stringify(actions[actionIndex])})`;
-				return toolError(
-					`Navigation failed at ${step}: ${failure.error}. ` +
-						`${completed} of ${steps.length} steps completed; later ones were not run.`,
-				);
-			}
+		async ({ includeScreen, ...navigation }) => {
+			const outcome = await navigate(runner, navigation);
+			if ("error" in outcome) return toolError(outcome.error);
 			return jsonResult({
-				device,
-				completed,
-				total: steps.length,
+				...outcome,
 				...(includeScreen && { screen: await runner.screen() }),
 			});
 		},

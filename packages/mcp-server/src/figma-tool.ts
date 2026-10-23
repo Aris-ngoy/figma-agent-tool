@@ -18,6 +18,8 @@ type ToolConfig<
 	outputSchema?: OutputShape;
 };
 
+type ErrorClass = abstract new (...args: never[]) => Error;
+
 /** Registers a tool that needs the plugin; bridge failures become tool errors. */
 export function registerFigmaTool<
 	Shape extends z.ZodRawShape,
@@ -43,15 +45,18 @@ export function registerGuardedTool<
 	name: string,
 	config: ToolConfig<Shape, OutputShape>,
 	handler: ToolCallback<Shape>,
-	expected: abstract new (...args: never[]) => Error,
+	expected: ErrorClass | ErrorClass[],
 ) {
+	const expectedClasses = [expected].flat();
 	const callback = (async (...args: Parameters<typeof handler>) => {
 		try {
 			return await (handler as (...a: typeof args) => Promise<CallToolResult>)(
 				...args,
 			);
 		} catch (error) {
-			if (error instanceof expected) return toolError(error.message);
+			if (expectedClasses.some((type) => error instanceof type)) {
+				return toolError((error as Error).message);
+			}
 			throw error;
 		}
 	}) as ToolCallback<Shape>;

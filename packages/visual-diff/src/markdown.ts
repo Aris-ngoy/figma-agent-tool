@@ -1,5 +1,5 @@
 // A compact, deterministic Markdown summary of a comparison, for PRs and agents.
-import type { ComparisonReport, Rect } from "./compare";
+import type { AppliedMask, ComparisonReport, Rect } from "./compare";
 
 export type ImagePaths = { design?: string; actual?: string; diff?: string };
 
@@ -18,12 +18,6 @@ export function renderMarkdown(
 		report.scale.x === report.scale.y
 			? `×${round(report.scale.x)}`
 			: `×${round(report.scale.x)} wide, ×${round(report.scale.y)} high`;
-	const masks =
-		report.masks.length === 0
-			? "none"
-			: report.masks
-					.map((mask) => `${MASK_LABELS[mask.kind]} (${box(mask)})`)
-					.join(", ");
 	const lines = [
 		`## Visual comparison: ${report.pass ? "PASS" : "FAIL"}`,
 		"",
@@ -32,7 +26,7 @@ export function renderMarkdown(
 		`| Mismatch | ${report.mismatchPercent}% (budget ${report.mismatchBudget}%) |`,
 		`| Mismatched pixels | ${report.mismatchedPixels} of ${report.comparedPixels} compared |`,
 		`| Aligned size | ${width}×${height} px (design scaled ${scale}) |`,
-		`| Masks | ${masks} |`,
+		`| Masks | ${describeMasks(report.masks)} |`,
 	];
 	if (report.regions.length > 0) {
 		lines.push(
@@ -56,6 +50,14 @@ export function renderMarkdown(
 	).flatMap(([label, path]) => (path ? [`- ${label}: \`${path}\``] : []));
 	if (imageLines.length > 0) lines.push("", "### Images", "", ...imageLines);
 	return `${lines.join("\n")}\n`;
+}
+
+/** "status bar (1179×177 at 0,0), ignore region (…)", or "none". */
+export function describeMasks(masks: readonly AppliedMask[]): string {
+	if (masks.length === 0) return "none";
+	return masks
+		.map((mask) => `${MASK_LABELS[mask.kind]} (${box(mask)})`)
+		.join(", ");
 }
 
 const round = (value: number) => Math.round(value * 1000) / 1000;

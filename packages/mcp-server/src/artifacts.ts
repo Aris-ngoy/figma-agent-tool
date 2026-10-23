@@ -15,12 +15,27 @@ export async function writeArtifact(
 ): Promise<string> {
 	const dir = resolve(artifactsDir);
 	await mkdir(dir, { recursive: true });
+	const path = join(dir, `${uniqueName(name)}.${extension}`);
+	await writeFile(path, bytes);
+	return path;
+}
+
+/** Creates a unique, timestamped folder for one run's artifacts. */
+export async function createArtifactFolder(
+	artifactsDir: string,
+	name: string,
+): Promise<string> {
+	const dir = join(resolve(artifactsDir), uniqueName(name));
+	await mkdir(dir, { recursive: true });
+	return dir;
+}
+
+/** `name-2026-10-23T12-00-00-000Z-1a2b3c4d`, safe as a file name. */
+function uniqueName(name: string): string {
 	const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 	const suffix = crypto.randomUUID().slice(0, 8);
 	const safeName = name.replace(/[^\w@.-]/g, "-");
-	const path = join(dir, `${safeName}-${timestamp}-${suffix}.${extension}`);
-	await writeFile(path, bytes);
-	return path;
+	return `${safeName}-${timestamp}-${suffix}`;
 }
 
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];

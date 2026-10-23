@@ -87,3 +87,13 @@ To build on-system, pass those IDs to `create_nodes` and `update_nodes`:
 - `platform`: `ios` masks the top 59pt and bottom 34pt, and `android` masks the top 48dp and bottom 48dp (status bar and home indicator / navigation bar). The default is `none`. Masks and `ignoreRegions` are given in design image pixels, so platform masks assume a 1x design.
 - `threshold` (default `0.1`), `detectAntiAliasing` (default on) and `mismatchBudget` (percent of unmasked pixels, default `0.5`) control how strict the comparison is.
 - The result reports mismatch %, pass/fail, mismatched regions as bounding boxes (in actual-image pixels), the masks applied, and the path of a diff image in the artifacts folder (red: mismatch, yellow: anti-aliasing, blue: masked). Set `markdown: true` for a summary you can paste into a PR, and `inline: true` to get the diff image in the result.
+
+## Visual QA
+
+`run_visual_qa` is the fix loop in one call. Give it the Figma frame of the screen (`nodeId`) and, optionally, a `deepLink` and/or `actions` to reach that screen first (run exactly as `navigate_device` runs them; a failing step stops the run before capture). It captures the active device, exports the frame at the device's pixel ratio (`scale: "auto"` derives it from the widths, up to 4x) and compares the two with the same options as `compare_images`. `ignoreRegions` are in frame points, `platform` defaults to the device's platform, and `ignoreNodes` leaves the boxes of the given layers (timestamps, avatars) out of the score.
+
+Each mismatched region lists the visible Figma layers drawn there. A region over a layer points at something that differs between design and app; a region with no layers means the app shows something the design doesn't. Boxes ignore rotation.
+
+Each run writes `figma.png`, `device.png`, `diff.png` and `report.md` to its own timestamped folder (`.figma-agent/qa-<timestamp>-<id>/`) and returns their paths. `report.md` covers screen, device, mismatch %, pass/fail, the regions with their layers and the three images, ready to paste into a PR. If the frame and the capture don't share an aspect ratio, the error says so and gives the paths of both images.
+
+Before a release, run the manual [visual QA smoke test](docs/visual-qa-smoke-test.md) against real Figma and devices.
