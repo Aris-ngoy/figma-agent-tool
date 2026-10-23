@@ -62,6 +62,8 @@ const paintExtras = {
 const SolidPaint = z.object({
 	type: z.literal("SOLID"),
 	color: HexColor,
+	// ID of the COLOR variable the color is bound to.
+	variable: z.string().optional(),
 	...paintExtras,
 });
 const GradientPaint = z.object({
@@ -93,9 +95,15 @@ export const Paint = z.discriminatedUnion("type", [
 ]);
 export type Paint = z.infer<typeof Paint>;
 
-/** The paints agents can write: the read shape, minus video/pattern/shader. */
+/**
+ * The paints agents can write: the read shape, minus video/pattern/shader.
+ * A solid bound to a `variable` takes its color from it, so needs no `color`.
+ */
 export const PaintInput = z.discriminatedUnion("type", [
-	SolidPaint,
+	SolidPaint.extend({ color: HexColor.optional() }).refine(
+		(paint) => paint.color !== undefined || paint.variable !== undefined,
+		"A SOLID paint needs a `color` or a COLOR `variable`.",
+	),
 	GradientPaint,
 	ImagePaint,
 ]);
@@ -141,15 +149,83 @@ export const CornerRadius = z.union([
 	}),
 ]);
 
+export const ComponentPropertyDefinition = z.object({
+	type: z.enum(["BOOLEAN", "TEXT", "INSTANCE_SWAP", "VARIANT", "SLOT"]),
+	defaultValue: z.union([z.string(), z.boolean()]),
+	variantOptions: z.array(z.string()).optional(),
+});
+
 export const ComponentInfo = z.object({
 	key: z.string(),
 	description: z.string().optional(),
+	// Property definitions of a component set or a standalone component.
+	properties: z.record(z.string(), ComponentPropertyDefinition).optional(),
+	// A variant's values, for a component inside a component set.
+	variantProperties: z.record(z.string(), z.string()).optional(),
 });
+export type ComponentInfo = z.infer<typeof ComponentInfo>;
 
 export const InstanceInfo = z.object({
 	mainComponent: z.object({ id: z.string(), name: z.string() }).nullable(),
 	properties: z.record(z.string(), z.union([z.string(), z.boolean()])),
 });
+
+/**
+ * Node fields that can be bound to a variable, named as in the Plugin API.
+ * Paint colors are bound per paint instead, through a SOLID paint's
+ * `variable`.
+ */
+export const BINDABLE_FIELDS = {
+	width: "FLOAT",
+	height: "FLOAT",
+	itemSpacing: "FLOAT",
+	counterAxisSpacing: "FLOAT",
+	paddingTop: "FLOAT",
+	paddingRight: "FLOAT",
+	paddingBottom: "FLOAT",
+	paddingLeft: "FLOAT",
+	topLeftRadius: "FLOAT",
+	topRightRadius: "FLOAT",
+	bottomRightRadius: "FLOAT",
+	bottomLeftRadius: "FLOAT",
+	strokeWeight: "FLOAT",
+	opacity: "FLOAT",
+	visible: "BOOLEAN",
+	characters: "STRING",
+} as const;
+
+/** Text fields that can be bound to a variable, on TEXT nodes only. */
+export const BINDABLE_TEXT_FIELDS = {
+	fontFamily: "STRING",
+	fontStyle: "STRING",
+	fontWeight: "FLOAT",
+	fontSize: "FLOAT",
+	lineHeight: "FLOAT",
+	letterSpacing: "FLOAT",
+	paragraphSpacing: "FLOAT",
+	paragraphIndent: "FLOAT",
+} as const;
+
+/** The variable type each bindable field takes. */
+export const BINDABLE_FIELD_TYPES = {
+	...BINDABLE_FIELDS,
+	...BINDABLE_TEXT_FIELDS,
+};
+
+export type BindableField = keyof typeof BINDABLE_FIELD_TYPES;
+
+export const BindableField = z.enum(
+	Object.keys(BINDABLE_FIELD_TYPES) as [BindableField, ...BindableField[]],
+);
+
+/** The style slots a node can use, and the style type each takes. */
+export const STYLE_SLOTS = {
+	fill: "PAINT",
+	stroke: "PAINT",
+	text: "TEXT",
+	effect: "EFFECT",
+} as const;
+export type StyleSlot = keyof typeof STYLE_SLOTS;
 
 /**
  * A document node as agents see it. Defaults (visible, opacity 1, no
@@ -176,6 +252,18 @@ export const SerializedNode = z.object({
 	layout: AutoLayout.optional(),
 	component: ComponentInfo.optional(),
 	instance: InstanceInfo.optional(),
+	// Field → ID of the variable bound to it ("mixed" across text ranges).
+	variables: z.partialRecord(BindableField, z.string()).optional(),
+	// Slot → ID of the style applied ("mixed" across text ranges).
+	styles: z
+		.object({
+			fill: z.string(),
+			stroke: z.string(),
+			text: z.string(),
+			effect: z.string(),
+		})
+		.partial()
+		.optional(),
 	childCount: z.number().int().optional(),
 	get children() {
 		return z.array(SerializedNode).optional();
@@ -208,6 +296,122 @@ export const FRAME_TYPES = [
 export function isFrameType(type: string): boolean {
 	return (FRAME_TYPES as readonly string[]).includes(type);
 }
+
+/** A variable value: aliases point at another variable by ID. */
+export const VariableValue = z.union([
+	z.boolean(),
+	z.number(),
+	z.string(),
+	z.object({ color: HexColor, opacity: z.number().optional() }),
+	z.object({ alias: z.string() }),
+]);
+export type VariableValue = z.infer<typeof VariableValue>;
+
+export const VariableInfo = z.object({
+	id: z.string(),
+	name: z.string(),
+	type: z.enum(["BOOLEAN", "COLOR", "FLOAT", "STRING", "EASING", "TIMING"]),
+	description: z.string().optional(),
+	// Where Figma offers the variable; left out when it's ALL_SCOPES.
+	scopes: z.array(z.string()).optional(),
+	// Mode name → value; null for values this protocol can't represent.
+	valuesByMode: z.record(z.string(), VariableValue.nullable()),
+});
+export type VariableInfo = z.infer<typeof VariableInfo>;
+
+export const VariableCollectionInfo = z.object({
+	id: z.string(),
+	name: z.string(),
+	modes: z.array(z.object({ id: z.string(), name: z.string() })),
+	defaultMode: z.string(),
+	variables: z.array(VariableInfo),
+});
+export type VariableCollectionInfo = z.infer<typeof VariableCollectionInfo>;
+
+const styleBase = {
+	id: z.string(),
+	name: z.string(),
+	description: z.string().optional(),
+};
+
+export const PaintStyleInfo = z.object({
+	...styleBase,
+	paints: z.array(Paint),
+});
+export type PaintStyleInfo = z.infer<typeof PaintStyleInfo>;
+
+const TypeUnit = z.enum(["PIXELS", "PERCENT"]);
+
+export const TextStyleInfo = z.object({
+	...styleBase,
+	fontName: FontName,
+	fontSize: z.number(),
+	// Left out when AUTO.
+	lineHeight: z.object({ value: z.number(), unit: TypeUnit }).optional(),
+	// Left out when 0.
+	letterSpacing: z.object({ value: z.number(), unit: TypeUnit }).optional(),
+});
+export type TextStyleInfo = z.infer<typeof TextStyleInfo>;
+
+const effectExtras = { visible: z.literal(false).optional() };
+
+/** A compact Figma Effect: shadows with hex colors, blurs by radius. */
+export const Effect = z.union([
+	z.object({
+		type: z.enum(["DROP_SHADOW", "INNER_SHADOW"]),
+		color: HexColor,
+		opacity: z.number().optional(),
+		offset: z.object({ x: z.number(), y: z.number() }),
+		radius: z.number(),
+		spread: z.number().optional(),
+		...effectExtras,
+	}),
+	z.object({
+		type: z.enum(["LAYER_BLUR", "BACKGROUND_BLUR"]),
+		radius: z.number(),
+		...effectExtras,
+	}),
+	z.object({ type: z.string(), ...effectExtras }),
+]);
+export type Effect = z.infer<typeof Effect>;
+
+export const EffectStyleInfo = z.object({
+	...styleBase,
+	effects: z.array(Effect),
+});
+export type EffectStyleInfo = z.infer<typeof EffectStyleInfo>;
+
+/** A local component or component set, with its variants. */
+export const DesignComponent = z.object({
+	id: z.string(),
+	name: z.string(),
+	type: z.enum(["COMPONENT", "COMPONENT_SET"]),
+	key: z.string(),
+	description: z.string().optional(),
+	page: PageRef,
+	properties: z.record(z.string(), ComponentPropertyDefinition).optional(),
+	variants: z
+		.array(
+			z.object({
+				id: z.string(),
+				name: z.string(),
+				properties: z.record(z.string(), z.string()),
+			}),
+		)
+		.optional(),
+});
+export type DesignComponent = z.infer<typeof DesignComponent>;
+
+export const DesignSystem = z.object({
+	components: z.array(DesignComponent),
+	styles: z.object({
+		paint: z.array(PaintStyleInfo),
+		text: z.array(TextStyleInfo),
+		effect: z.array(EffectStyleInfo),
+	}),
+	collections: z.array(VariableCollectionInfo),
+});
+export type DesignSystem = z.infer<typeof DesignSystem>;
 
 /** A failure the plugin reports, with a machine-readable code. */
 export const BridgeError = z.object({
@@ -263,6 +467,18 @@ export const NodeProps = z.object({
 			// Applies to the node itself: HUG its content, FILL its auto-layout
 			// parent, or keep a FIXED size.
 			sizing: z.object({ horizontal: Sizing, vertical: Sizing }).partial(),
+		})
+		.partial()
+		.optional(),
+	// Binds fields to variables by ID; null unbinds, keeping the value.
+	variables: z.partialRecord(BindableField, z.string().nullable()).optional(),
+	// Applies styles by ID; null detaches, keeping the look.
+	styles: z
+		.object({
+			fill: z.string().nullable(),
+			stroke: z.string().nullable(),
+			text: z.string().nullable(),
+			effect: z.string().nullable(),
 		})
 		.partial()
 		.optional(),
@@ -716,6 +932,10 @@ export const commands = {
 			removed: z.number().int(),
 			reactions: z.array(Reaction),
 		}),
+	},
+	get_design_system: {
+		params: z.object({}),
+		result: DesignSystem,
 	},
 } as const;
 

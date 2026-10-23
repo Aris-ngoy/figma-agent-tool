@@ -192,6 +192,15 @@ describe("reading the document", () => {
 					width: 120,
 					height: 48,
 				},
+				{
+					id: "3:1",
+					name: "Chip",
+					type: "COMPONENT_SET",
+					x: 200,
+					y: 0,
+					width: 120,
+					height: 80,
+				},
 			],
 		});
 	});

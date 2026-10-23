@@ -68,6 +68,18 @@ Image outputs such as `export_node_image` and `capture_device_screenshot` are wr
 
 `get_reactions`, `set_reactions` and `remove_reactions` read and wire a node's prototype interactions. Reactions use the Figma Plugin API's shape: a `trigger` (on click, hover, press, drag, after delay, mouse enter/leave/up/down, key or gamepad) and an `actions` array whose NODE actions carry a `destinationId`, a `navigation` and a `transition` (null for instant, or dissolve, smart animate, move in/out, push, slide in/out with a direction) with an easing preset, custom cubic bezier or spring and a duration in seconds. Every trigger and action type round-trips: reactions read with `get_reactions` can be written back unchanged. `set_reactions` replaces (default) or appends; `remove_reactions` clears all reactions or those matching a trigger type and/or destination. NAVIGATE, OVERLAY and SWAP must go to a top-level frame and CHANGE_TO to a component variant; otherwise the call fails with `invalid_destination` and nothing is written. Each write is one undo step.
 
+## Design system
+
+`get_design_system` lists the file's local components and component sets (property definitions, variants and their values), paint, text and effect styles, and variables grouped by collection, with one value per mode (colors as hex, aliases as `{ "alias": "<variableId>" }`).
+
+To build on-system, pass those IDs to `create_nodes` and `update_nodes`:
+
+- `variables` binds node fields to variables by ID, using the Plugin API's field names: `width`, `height`, `itemSpacing`, `counterAxisSpacing`, `paddingTop`/`Right`/`Bottom`/`Left`, `topLeftRadius` and the other corners, `strokeWeight`, `opacity`, `visible`, `characters`, plus `fontFamily`, `fontStyle`, `fontWeight`, `fontSize`, `lineHeight`, `letterSpacing`, `paragraphSpacing` and `paragraphIndent` on text.
+- A SOLID paint's `variable` binds its color to a COLOR variable, for example `fills: [{ "type": "SOLID", "variable": "VariableID:1:2" }]`.
+- `styles` applies `fill`, `stroke`, `text` and `effect` styles by ID.
+
+`null` unbinds a variable or detaches a style and keeps the current value. Setting `fills` or `strokes` directly detaches their style. Read tools report the bindings in the same shape: `variables`, `styles` and paint `variable`. Wrong IDs or types fail only that item, with `variable_not_found`, `variable_type_mismatch`, `style_not_found` or `style_type_mismatch`.
+
 ## Comparing images
 
 `compare_images` diffs two local PNGs, so it needs neither Figma nor a device and also works in CI against stored baselines. Pass a `designPath` (for example a frame exported at 1x) and an `actualPath` (for example a device screenshot). The design is scaled to the actual image's pixel size (`scale: "auto"` derives the ratio from the widths, so a 393pt frame lines up with a 1179px capture; or pass the device pixel ratio). If the aspect ratios differ by more than `aspectTolerance` (default 1%), the tool returns an error instead of a score.

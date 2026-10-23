@@ -1,13 +1,18 @@
 // Write commands: create and update nodes in batches. Each item succeeds or
 // fails on its own, and every batch lands as one undoable step in Figma.
-import type {
-	CommandParams,
-	CommandResult,
-	CreatedNode,
-	NodeProps,
-	NodeSpec,
-	PaintInput,
-	UpdatedNode,
+import {
+	BINDABLE_FIELD_TYPES,
+	BINDABLE_TEXT_FIELDS,
+	type BindableField,
+	type CommandParams,
+	type CommandResult,
+	type CreatedNode,
+	type NodeProps,
+	type NodeSpec,
+	type PaintInput,
+	STYLE_SLOTS,
+	type StyleSlot,
+	type UpdatedNode,
 } from "@figma-agent-tool/protocol";
 import { CommandError, nodeNotFound, toBridgeError } from "./errors";
 
@@ -124,9 +129,10 @@ export async function updateNodes({
 }
 
 /**
- * Sets the given properties. Unsupported properties and missing fonts are
- * caught before anything changes. Order matters: auto-layout before sizing,
- * and explicit sizes after text, which can resize the node.
+ * Sets the given properties. Unsupported properties, unknown variables and
+ * styles, and missing fonts are caught before anything changes. Order
+ * matters: auto-layout before sizing, explicit sizes after text, which can
+ * resize the node, and styles last, so they win over raw values.
  */
 async function applyProps(target: BaseNode, props: NodeProps) {
 	const missing = unsupportedProp(target, props);
@@ -136,7 +142,11 @@ async function applyProps(target: BaseNode, props: NodeProps) {
 			`Node ${target.id} is a ${target.type}, which has no ${missing}.`,
 		);
 	}
-	if (props.text) await applyText(target as TextNode, props.text);
+	const bindings = await resolveBindings(props);
+	if (target.type === "TEXT") {
+		await loadFonts(fontsNeeded(target, props, bindings));
+	}
+	if (props.text) applyText(target as TextNode, props.text);
 
 	// Every property below was checked to exist on the node.
 	const node = target as FrameNode;
@@ -159,11 +169,139 @@ async function applyProps(target: BaseNode, props: NodeProps) {
 		node.bottomRightRadius = radius.bottomRight;
 		node.bottomLeftRadius = radius.bottomLeft;
 	}
-	if (props.fills) node.fills = props.fills.map(figmaPaint);
-	if (props.strokes) node.strokes = props.strokes.map(figmaPaint);
+	const toPaint = (paint: PaintInput) => figmaPaint(paint, bindings.variables);
+	if (props.fills) node.fills = props.fills.map(toPaint);
+	if (props.strokes) node.strokes = props.strokes.map(toPaint);
 	if (props.strokeWeight !== undefined) node.strokeWeight = props.strokeWeight;
 	if (sizing?.horizontal) node.layoutSizingHorizontal = sizing.horizontal;
 	if (sizing?.vertical) node.layoutSizingVertical = sizing.vertical;
+	for (const [field, variable] of bindings.fields) {
+		(node as unknown as TextNode).setBoundVariable(
+			field as VariableBindableTextField,
+			variable,
+		);
+	}
+	for (const [slot, style] of bindings.styles) {
+		await STYLE_SETTERS[slot](node as unknown as TextNode, style?.id ?? "");
+	}
+}
+
+type Bindings = {
+	/** Variables bound to paints, by ID. */
+	variables: Map<string, Variable>;
+	/** null unbinds the field. */
+	fields: [BindableField, Variable | null][];
+	/** null detaches the style. */
+	styles: [StyleSlot, BaseStyle | null][];
+};
+
+/** Looks up every variable and style the props name, checking their types. */
+async function resolveBindings(props: NodeProps): Promise<Bindings> {
+	const bindings: Bindings = { variables: new Map(), fields: [], styles: [] };
+	for (const key of ["fills", "strokes"] as const) {
+		for (const paint of props[key] ?? []) {
+			if (paint.type !== "SOLID" || !paint.variable) continue;
+			const variable = await findVariable(paint.variable, key, "COLOR");
+			bindings.variables.set(variable.id, variable);
+		}
+	}
+	for (const [name, id] of Object.entries(props.variables ?? {})) {
+		const field = name as BindableField;
+		bindings.fields.push([
+			field,
+			id === null
+				? null
+				: await findVariable(id, field, BINDABLE_FIELD_TYPES[field]),
+		]);
+	}
+	for (const [name, id] of Object.entries(props.styles ?? {})) {
+		const slot = name as StyleSlot;
+		bindings.styles.push([
+			slot,
+			id === null ? null : await findStyle(id, slot),
+		]);
+	}
+	return bindings;
+}
+
+async function findVariable(
+	id: string,
+	field: string,
+	expected: VariableResolvedDataType,
+): Promise<Variable> {
+	const variable = await figma.variables.getVariableByIdAsync(id);
+	if (!variable) {
+		throw new CommandError(
+			"variable_not_found",
+			`No variable with ID "${id}" exists in this file. Get variable IDs from get_design_system.`,
+		);
+	}
+	if (variable.resolvedType !== expected) {
+		throw new CommandError(
+			"variable_type_mismatch",
+			`Variable "${variable.name}" (${id}) is a ${variable.resolvedType} variable; ${field} needs a ${expected} one.`,
+		);
+	}
+	return variable;
+}
+
+async function findStyle(id: string, slot: StyleSlot): Promise<BaseStyle> {
+	const style = await figma.getStyleByIdAsync(id);
+	if (!style) {
+		throw new CommandError(
+			"style_not_found",
+			`No style with ID "${id}" exists in this file. Get style IDs from get_design_system.`,
+		);
+	}
+	const expected = STYLE_SLOTS[slot];
+	if (style.type !== expected) {
+		throw new CommandError(
+			"style_type_mismatch",
+			`Style "${style.name}" (${id}) is a ${style.type} style; styles.${slot} needs a ${expected} one.`,
+		);
+	}
+	return style;
+}
+
+const STYLE_SETTERS: Record<
+	StyleSlot,
+	(node: TextNode, id: string) => Promise<void>
+> = {
+	fill: (node, id) => node.setFillStyleIdAsync(id),
+	stroke: (node, id) => node.setStrokeStyleIdAsync(id),
+	text: (node, id) => node.setTextStyleIdAsync(id),
+	effect: (node, id) => node.setEffectStyleIdAsync(id),
+};
+
+/** The node property each style slot needs. */
+const STYLE_MEMBERS: Record<Exclude<StyleSlot, "text">, string> = {
+	fill: "fills",
+	stroke: "strokes",
+	effect: "effects",
+};
+
+/**
+ * Text edits need the node's fonts loaded; switching font needs only the new
+ * one, and a text style needs its own font too.
+ */
+function fontsNeeded(
+	node: TextNode,
+	props: NodeProps,
+	bindings: Bindings,
+): FontName[] {
+	const fonts: FontName[] = [];
+	const bindsText = bindings.fields.some(
+		([field]) => field in BINDABLE_TEXT_FIELDS || field === "characters",
+	);
+	const stylesText = bindings.styles.some(([slot]) => slot === "text");
+	if (props.text?.fontName) fonts.push(props.text.fontName);
+	else if (props.text || bindsText || stylesText) {
+		fonts.push(...currentFonts(node));
+	}
+	for (const [, style] of bindings.styles) {
+		if (style?.type === "TEXT") fonts.push((style as TextStyle).fontName);
+	}
+	return fonts;
 }
 
 /** Which Plugin API member each property needs on the node. */
@@ -191,12 +329,20 @@ function unsupportedProp(node: BaseNode, props: NodeProps): string | undefined {
 		return "layout";
 	}
 	if (sizing && !("layoutSizingHorizontal" in node)) return "layout.sizing";
+	for (const field of Object.keys(props.variables ?? {})) {
+		const has =
+			field in BINDABLE_TEXT_FIELDS ? node.type === "TEXT" : field in node;
+		if (!has) return `variables.${field}`;
+	}
+	for (const slot of Object.keys(props.styles ?? {}) as StyleSlot[]) {
+		const has =
+			slot === "text" ? node.type === "TEXT" : STYLE_MEMBERS[slot] in node;
+		if (!has) return `styles.${slot}`;
+	}
 	return undefined;
 }
 
-async function applyText(node: TextNode, text: NonNullable<NodeProps["text"]>) {
-	// Switching font needs only the new one; other edits need the current ones.
-	await loadFonts(text.fontName ? [text.fontName] : currentFonts(node));
+function applyText(node: TextNode, text: NonNullable<NodeProps["text"]>) {
 	if (text.fontName) node.fontName = text.fontName;
 	if (text.fontSize !== undefined) node.fontSize = text.fontSize;
 	if (text.characters !== undefined) node.characters = text.characters;
@@ -247,14 +393,27 @@ function applyAutoLayout(
 	}
 }
 
-function figmaPaint(paint: PaintInput): Paint {
+function figmaPaint(
+	paint: PaintInput,
+	variables: Map<string, Variable>,
+): Paint {
 	const extras = {
 		opacity: paint.opacity ?? 1,
 		visible: paint.visible ?? true,
 	};
 	switch (paint.type) {
-		case "SOLID":
-			return { type: paint.type, color: rgb(paint.color), ...extras };
+		case "SOLID": {
+			const solid: SolidPaint = {
+				type: paint.type,
+				// A bound variable supplies the color.
+				color: rgb(paint.color ?? "#000000"),
+				...extras,
+			};
+			const variable = paint.variable && variables.get(paint.variable);
+			return variable
+				? figma.variables.setBoundVariableForPaint(solid, "color", variable)
+				: solid;
+		}
 		case "IMAGE":
 			return {
 				type: paint.type,

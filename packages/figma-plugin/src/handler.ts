@@ -10,6 +10,7 @@ import {
 	Request,
 	type Response,
 } from "@figma-agent-tool/protocol";
+import { getDesignSystem } from "./design-system";
 import { createNodes, updateNodes } from "./edit";
 import { CommandError, nodeNotFound, toBridgeError } from "./errors";
 import { getReactions, removeReactions, setReactions } from "./reactions";
@@ -93,6 +94,7 @@ const implementations: CommandImplementations = {
 	get_reactions: getReactions,
 	set_reactions: setReactions,
 	remove_reactions: removeReactions,
+	get_design_system: getDesignSystem,
 };
 
 function pageRef(page: PageNode) {

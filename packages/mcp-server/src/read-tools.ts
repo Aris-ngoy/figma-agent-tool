@@ -1,4 +1,5 @@
-// Read tools: the selection, nodes by ID, pages and top-level frames.
+// Read tools: the selection, nodes by ID, pages, top-level frames and the
+// design system.
 import { DEFAULT_DEPTH, Depth } from "@figma-agent-tool/protocol";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -80,5 +81,21 @@ export function registerReadTools(server: McpServer, bridge: Bridge) {
 					args.pageId ? { pageId: args.pageId } : {},
 				),
 			),
+	);
+
+	registerFigmaTool(
+		server,
+		"get_design_system",
+		{
+			description:
+				"List the file's local design system: components and component " +
+				"sets (with property definitions and variants), paint, text and " +
+				"effect styles, and variables grouped by collection with a value " +
+				"per mode (colors as hex, aliases as `{ alias: variableId }`). Use " +
+				"the IDs with create_nodes/update_nodes: component IDs for " +
+				"INSTANCE `componentId`, variable IDs in `variables` or a SOLID " +
+				"paint's `variable`, style IDs in `styles`.",
+		},
+		async () => jsonResult(await bridge.request("get_design_system", {})),
 	);
 }
