@@ -11,9 +11,9 @@ const batchNotes =
 	"with IDs from get_design_system: `variables` binds fields (itemSpacing, " +
 	"paddingTop, topLeftRadius, fontSize, …) to variables, a SOLID paint's " +
 	"`variable` binds its color, and `styles` applies fill/stroke/text/effect " +
-	"styles; null unbinds or detaches. Each item succeeds " +
-	"or fails on its own: results come back in input order with `ok` and, on " +
-	"failure, an error code and message. The batch is one undo step in Figma.";
+	"styles; null unbinds or detaches. Each item succeeds or fails on its " +
+	"own: results come back in input order with `ok` and, on failure, an " +
+	"error code and message. The batch is one undo step in Figma.";
 
 export function registerEditTools(server: McpServer, bridge: Bridge) {
 	registerFigmaTool(
@@ -51,8 +51,8 @@ export function registerEditTools(server: McpServer, bridge: Bridge) {
 			description:
 				"Change size, position, rotation, opacity, visibility, fills, " +
 				"strokes, corner radius, text (characters, font, size, alignment), " +
-				"auto-layout, variable bindings and styles of many nodes in one call. Only the given " +
-				`properties change. ${batchNotes}`,
+				"auto-layout, variable bindings and styles of many nodes in one " +
+				`call. Only the given properties change. ${batchNotes}`,
 			inputSchema: {
 				updates: z
 					.array(NodeUpdate)

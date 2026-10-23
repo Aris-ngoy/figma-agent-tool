@@ -137,7 +137,7 @@ function variableInfo(
 	return info;
 }
 
-function variableValue(value: VariableValue | unknown): VariableValue | null {
+function variableValue(value: unknown): VariableValue | null {
 	if (typeof value !== "object" || value === null) {
 		return value as VariableValue;
 	}

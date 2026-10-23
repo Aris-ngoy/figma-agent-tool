@@ -7,6 +7,7 @@ import {
 	type Effect as EffectInfo,
 	type Paint as PaintInfo,
 	type SerializedNode,
+	type StyleSlot,
 	type TextInfo,
 } from "@figma-agent-tool/protocol";
 
@@ -121,20 +122,23 @@ function boundVariables(node: BaseNode): SerializedNode["variables"] {
 	return Object.keys(out).length > 0 ? out : undefined;
 }
 
-const STYLE_ID_PROPS = {
+const STYLE_ID_PROPS: Record<StyleSlot, string> = {
 	fill: "fillStyleId",
 	stroke: "strokeStyleId",
 	text: "textStyleId",
 	effect: "effectStyleId",
-} as const;
+};
 
 function styleIds(node: BaseNode): SerializedNode["styles"] {
 	const out: NonNullable<SerializedNode["styles"]> = {};
-	for (const [slot, prop] of Object.entries(STYLE_ID_PROPS)) {
+	for (const [slot, prop] of Object.entries(STYLE_ID_PROPS) as [
+		StyleSlot,
+		string,
+	][]) {
 		if (!(prop in node)) continue;
 		const id = (node as unknown as Record<string, string | symbol>)[prop];
-		if (id === figma.mixed) out[slot as keyof typeof out] = "mixed";
-		else if (id) out[slot as keyof typeof out] = id as string;
+		if (id === figma.mixed) out[slot] = "mixed";
+		else if (id) out[slot] = id as string;
 	}
 	return Object.keys(out).length > 0 ? out : undefined;
 }
