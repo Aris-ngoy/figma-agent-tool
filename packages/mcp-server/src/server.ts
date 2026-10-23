@@ -10,6 +10,7 @@ import { type DeviceRunner, RunnerStatus } from "./device-runner";
 import { registerDeviceTools } from "./device-tools";
 import { registerEditTools } from "./edit-tools";
 import { registerFigmaTool } from "./figma-tool";
+import { registerReactionTools } from "./reaction-tools";
 import { registerReadTools } from "./read-tools";
 import { registerVisualQaTools } from "./visual-qa-tools";
 
@@ -62,6 +63,7 @@ export function createMcpServer({
 
 	registerReadTools(server, bridge);
 	registerEditTools(server, bridge);
+	registerReactionTools(server, bridge);
 	registerVisualQaTools(server, { artifactsDir });
 	registerDeviceTools(server, deviceRunner, artifactsDir);
 

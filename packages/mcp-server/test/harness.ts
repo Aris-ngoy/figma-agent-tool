@@ -33,6 +33,7 @@ import { type Bridge, startBridge } from "../src/bridge";
 import { createMcpServer } from "../src/server";
 import { createYoqaRunner } from "../src/yoqa-runner";
 import { createFakeEditor } from "./fake-edits";
+import { createFakeReactions } from "./fake-reactions";
 import { startFakeYoqa } from "./fake-yoqa";
 
 const cleanups: (() => unknown)[] = [];
@@ -100,18 +101,23 @@ export async function startHarness({
 type FakeDocument = {
 	document: DocumentFixture;
 	editor: ReturnType<typeof createFakeEditor>;
+	reactions: ReturnType<typeof createFakeReactions>;
 };
 
 /** A copy of the document fixture that this fake plugin's edits change. */
 function fakeDocument(): FakeDocument {
 	const copy = structuredClone(document);
-	return { document: copy, editor: createFakeEditor(copy) };
+	return {
+		document: copy,
+		editor: createFakeEditor(copy),
+		reactions: createFakeReactions(copy),
+	};
 }
 
 /** Answers server requests from the plugin's document and the fixtures. */
 function answer(
 	message: ServerMessage,
-	{ document, editor }: FakeDocument,
+	{ document, editor, reactions }: FakeDocument,
 ): Response | undefined {
 	if (message.type !== "request") return undefined;
 	const { id } = message;
@@ -185,6 +191,14 @@ function answer(
 			return ok(
 				editor.update_nodes(commands.update_nodes.params.parse(message.params)),
 			);
+		case "get_reactions":
+		case "set_reactions":
+		case "remove_reactions": {
+			const { command } = message;
+			const params = commands[command].params.parse(message.params);
+			const handle = reactions[command] as (params: unknown) => object;
+			return okOrFailure(handle(params));
+		}
 		default:
 			return replayExchange(message);
 	}
