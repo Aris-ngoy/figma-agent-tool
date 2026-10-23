@@ -16,6 +16,7 @@ import {
 	type ServerMessage,
 } from "@figma-agent-tool/protocol";
 import {
+	createdNodeId,
 	type DocumentFixture,
 	document,
 	exchanges,
@@ -34,6 +35,7 @@ import { createMcpServer } from "../src/server";
 import { createYoqaRunner } from "../src/yoqa-runner";
 import { createFakeEditor } from "./fake-edits";
 import { createFakeReactions } from "./fake-reactions";
+import { createFakeRestructure } from "./fake-restructure";
 import { startFakeYoqa } from "./fake-yoqa";
 
 const cleanups: (() => unknown)[] = [];
@@ -102,22 +104,26 @@ type FakeDocument = {
 	document: DocumentFixture;
 	editor: ReturnType<typeof createFakeEditor>;
 	reactions: ReturnType<typeof createFakeReactions>;
+	restructure: ReturnType<typeof createFakeRestructure>;
 };
 
 /** A copy of the document fixture that this fake plugin's edits change. */
 function fakeDocument(): FakeDocument {
 	const copy = structuredClone(document);
+	let created = 0;
+	const nextId = () => createdNodeId(++created);
 	return {
 		document: copy,
-		editor: createFakeEditor(copy),
+		editor: createFakeEditor(copy, nextId),
 		reactions: createFakeReactions(copy),
+		restructure: createFakeRestructure(copy, nextId),
 	};
 }
 
 /** Answers server requests from the plugin's document and the fixtures. */
 function answer(
 	message: ServerMessage,
-	{ document, editor, reactions }: FakeDocument,
+	{ document, editor, reactions, restructure }: FakeDocument,
 ): Response | undefined {
 	if (message.type !== "request") return undefined;
 	const { id } = message;
@@ -191,6 +197,16 @@ function answer(
 			return ok(
 				editor.update_nodes(commands.update_nodes.params.parse(message.params)),
 			);
+		case "delete_nodes":
+		case "duplicate_node":
+		case "reparent_nodes":
+		case "group_nodes":
+		case "ungroup_nodes": {
+			const { command } = message;
+			const params = commands[command].params.parse(message.params);
+			const handle = restructure[command] as (params: unknown) => object;
+			return okOrFailure(handle(params));
+		}
 		case "get_reactions":
 		case "set_reactions":
 		case "remove_reactions": {

@@ -14,6 +14,7 @@ import {
 	type NodeSpec,
 	type Paint,
 	type PaintInput,
+	parentError,
 	type SerializedNode,
 	STYLE_SLOTS,
 	type StyleSlot,
@@ -23,7 +24,6 @@ import {
 } from "@figma-agent-tool/protocol";
 import {
 	availableFonts,
-	createdNodeId,
 	type DocumentFixture,
 	findNode,
 	fontNotFoundError,
@@ -91,9 +91,8 @@ type Bindings = {
 	styles: [StyleSlot, Style | null][];
 };
 
-export function createFakeEditor(doc: DocumentFixture) {
-	let created = 0;
-
+/** `nextId` gives each new node its ID, shared with the other fakes. */
+export function createFakeEditor(doc: DocumentFixture, nextId: () => string) {
 	const variables = new Map(
 		doc.collections.flatMap((collection) =>
 			collection.variables.map((variable) => [
@@ -201,7 +200,7 @@ export function createFakeEditor(doc: DocumentFixture) {
 				type === "INSTANCE"
 					? instantiate(componentId as string)
 					: structuredClone({
-							id: createdNodeId(++created),
+							id: nextId(),
 							...NEW_NODES[type],
 						});
 			applyProps(node, props);
@@ -230,7 +229,7 @@ export function createFakeEditor(doc: DocumentFixture) {
 				notAComponentError(componentId, component?.type),
 			);
 		}
-		const id = createdNodeId(++created);
+		const id = nextId();
 		const { component: _, children, ...rest } = structuredClone(component);
 		return {
 			...rest,
@@ -257,12 +256,11 @@ export function createFakeEditor(doc: DocumentFixture) {
 			try {
 				const parent = find(parentId ?? doc.currentPageId);
 				const siblings = parent.children;
-				if (!siblings || parent.type === "INSTANCE") {
-					return {
-						code: "invalid_parent",
-						message: `Node ${parent.id} is a ${parent.type}, which can't hold children.`,
-					};
-				}
+				const invalid = parentError(
+					{ id: parent.id, type: parent.type ?? "PAGE", parent: null },
+					siblings !== undefined,
+				);
+				if (invalid || !siblings) return invalid as BridgeError;
 				return { nodes: nodes.map((spec) => createNode(spec, siblings)) };
 			} catch (error) {
 				if (!(error instanceof FakeCommandError)) throw error;

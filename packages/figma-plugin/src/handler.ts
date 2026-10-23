@@ -14,6 +14,13 @@ import { getDesignSystem } from "./design-system";
 import { createNodes, updateNodes } from "./edit";
 import { CommandError, nodeNotFound, toBridgeError } from "./errors";
 import { getReactions, removeReactions, setReactions } from "./reactions";
+import {
+	deleteNodes,
+	duplicateNode,
+	groupNodes,
+	reparentNodes,
+	ungroupNodes,
+} from "./restructure";
 import { serializeNode } from "./serialize";
 
 type CommandImplementations = {
@@ -91,6 +98,11 @@ const implementations: CommandImplementations = {
 
 	create_nodes: createNodes,
 	update_nodes: updateNodes,
+	delete_nodes: deleteNodes,
+	duplicate_node: duplicateNode,
+	reparent_nodes: reparentNodes,
+	group_nodes: groupNodes,
+	ungroup_nodes: ungroupNodes,
 	get_reactions: getReactions,
 	set_reactions: setReactions,
 	remove_reactions: removeReactions,

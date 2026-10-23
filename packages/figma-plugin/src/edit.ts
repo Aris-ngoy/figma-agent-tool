@@ -10,6 +10,7 @@ import {
 	type NodeProps,
 	type NodeSpec,
 	type PaintInput,
+	parentError,
 	STYLE_SLOTS,
 	type StyleSlot,
 	type UpdatedNode,
@@ -29,15 +30,12 @@ export async function createNodes({
 		? await figma.getNodeByIdAsync(parentId)
 		: figma.currentPage;
 	if (!parent) throw nodeNotFound(parentId as string);
-	if (!("appendChild" in parent) || parent.type === "DOCUMENT") {
-		throw new CommandError(
-			"invalid_parent",
-			`Node ${parent.id} is a ${parent.type}, which can't hold children. Create nodes under a page, frame, group, section or component.`,
-		);
-	}
-	if (parent.type === "PAGE") await parent.loadAsync();
+	const invalid = parentError(parent, "appendChild" in parent);
+	if (invalid) throw new CommandError(invalid.code, invalid.message);
+	const container = parent as Container;
+	if (container.type === "PAGE") await container.loadAsync();
 	const results: CreatedNode[] = [];
-	for (const spec of nodes) results.push(await createNode(spec, parent));
+	for (const spec of nodes) results.push(await createNode(spec, container));
 	figma.commitUndo();
 	return { nodes: results };
 }

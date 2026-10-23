@@ -9,7 +9,12 @@ import type {
 	Response,
 	SerializedNode,
 } from "../src";
-import { PROTOCOL_VERSION } from "../src";
+import {
+	layerError,
+	notAGroupError,
+	PROTOCOL_VERSION,
+	parentError,
+} from "../src";
 
 const loginScreen = {
 	id: "1:1",
@@ -772,6 +777,22 @@ export function prefixIds(
 	};
 }
 
+/**
+ * Copies a subtree with fresh IDs, in pre-order, as the fakes duplicate
+ * nodes: `nextId` gives each copied node its ID.
+ */
+export function renumber(
+	node: SerializedNode,
+	nextId: () => string,
+): SerializedNode {
+	const id = nextId();
+	return {
+		...structuredClone(node),
+		id,
+		children: node.children?.map((child) => renumber(child, nextId)),
+	};
+}
+
 /** Per-node error when a text edit needs a font that isn't installed. */
 export function fontNotFoundError(font: { family: string; style: string }) {
 	return {
@@ -1178,6 +1199,128 @@ export const bindNodesResponse = {
 	},
 } satisfies Response;
 
+/** Deletes the divider; a missing node and a page fail alone. */
+export const deleteNodesRequest = {
+	type: "request",
+	id: "req-17",
+	command: "delete_nodes",
+	params: { ids: ["1:5", "9:99", "0:2"] },
+} satisfies Request;
+
+export const deleteNodesResponse = {
+	type: "response",
+	id: "req-17",
+	ok: true,
+	result: {
+		nodes: [
+			{ id: "1:5", ok: true },
+			{ id: "9:99", ok: false, error: nodeNotFoundResponse("", "9:99").error },
+			{
+				id: "0:2",
+				ok: false,
+				error: layerError({ id: "0:2", type: "PAGE", parent: null }, "delete"),
+			},
+		],
+	},
+} satisfies Response;
+
+/** Two more sign-in buttons, right after the first. */
+export const duplicateNodeRequest = {
+	type: "request",
+	id: "req-18",
+	command: "duplicate_node",
+	params: { id: "1:3", count: 2 },
+} satisfies Request;
+
+export const duplicateNodeResponse = {
+	type: "response",
+	id: "req-18",
+	ok: true,
+	result: {
+		// Each copy's label takes the ID after the copy's own.
+		nodes: [
+			{ id: createdNodeId(1), name: "Button", type: "INSTANCE" },
+			{ id: createdNodeId(3), name: "Button", type: "INSTANCE" },
+		],
+	},
+} satisfies Response;
+
+/** Moves the note and the Home frame into Login's auto-layout, below the title. */
+export const reparentNodesRequest = {
+	type: "request",
+	id: "req-19",
+	command: "reparent_nodes",
+	params: { parentId: "1:1", ids: ["1:20", "1:10"], index: 1 },
+} satisfies Request;
+
+export const reparentNodesResponse = {
+	type: "response",
+	id: "req-19",
+	ok: true,
+	result: {
+		nodes: [
+			{ id: "1:20", ok: true },
+			{ id: "1:10", ok: true },
+		],
+	},
+} satisfies Response;
+
+/** A text node can't hold children, so nothing moves. */
+export const reparentIntoTextRequest = {
+	type: "request",
+	id: "req-20",
+	command: "reparent_nodes",
+	params: { parentId: "1:2", ids: ["1:5"] },
+} satisfies Request;
+
+export const reparentIntoTextResponse = {
+	type: "response",
+	id: "req-20",
+	ok: false,
+	error: parentError({ id: "1:2", type: "TEXT", parent: null }, false) as {
+		code: string;
+		message: string;
+	},
+} satisfies Response;
+
+/** Groups the divider and the title; the group takes the divider's place. */
+export const groupNodesRequest = {
+	type: "request",
+	id: "req-21",
+	command: "group_nodes",
+	params: { ids: ["1:5", "1:2"], name: "Header" },
+} satisfies Request;
+
+export const groupNodesResponse = {
+	type: "response",
+	id: "req-21",
+	ok: true,
+	result: { node: { id: createdNodeId(1), name: "Header", type: "GROUP" } },
+} satisfies Response;
+
+/** Only groups ungroup; a frame fails alone. */
+export const ungroupFrameRequest = {
+	type: "request",
+	id: "req-22",
+	command: "ungroup_nodes",
+	params: { ids: ["1:1"] },
+} satisfies Request;
+
+export const ungroupFrameResponse = {
+	type: "response",
+	id: "req-22",
+	ok: true,
+	result: {
+		nodes: [
+			{
+				id: "1:1",
+				ok: false,
+				error: notAGroupError({ id: "1:1", type: "FRAME", parent: null }),
+			},
+		],
+	},
+} satisfies Response;
+
 /**
  * Every request the fakes know how to answer, paired with the plugin's
  * response. The fake plugin matches on command + params; the plugin tests
@@ -1200,4 +1343,10 @@ export const exchanges: [Request, Response][] = [
 	[removeReactionsRequest, removeReactionsResponse],
 	[getDesignSystemRequest, getDesignSystemResponse],
 	[bindNodesRequest, bindNodesResponse],
+	[deleteNodesRequest, deleteNodesResponse],
+	[duplicateNodeRequest, duplicateNodeResponse],
+	[reparentNodesRequest, reparentNodesResponse],
+	[reparentIntoTextRequest, reparentIntoTextResponse],
+	[groupNodesRequest, groupNodesResponse],
+	[ungroupFrameRequest, ungroupFrameResponse],
 ];
