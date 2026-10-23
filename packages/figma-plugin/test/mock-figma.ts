@@ -661,18 +661,7 @@ function nestTracks(tracks: KeyframeTrack[]) {
 	const nested: Record<string, unknown> = {};
 	// Newest first, so the plugin can't rely on the order Figma reports.
 	for (const { field, ...binding } of [...tracks].reverse()) {
-		const path =
-			field.type === "PROPERTY"
-				? [field.name]
-				: [
-						field.collection,
-						String(field.index),
-						...(field.propertyId
-							? ["properties", field.propertyId]
-							: field.field
-								? [field.field]
-								: []),
-					];
+		const path = nestedTrackPath(field);
 		const key = path.pop() as string;
 		let at = nested;
 		for (const step of path) {
@@ -682,6 +671,15 @@ function nestTracks(tracks: KeyframeTrack[]) {
 		at[key] = binding;
 	}
 	return nested;
+}
+
+/** Where a field's track sits in the nested `manualKeyframeTracks` record. */
+function nestedTrackPath(field: KeyframeField): string[] {
+	if (field.type === "PROPERTY") return [field.name];
+	const item = [field.collection, String(field.index)];
+	if (field.propertyId) return [...item, "properties", field.propertyId];
+	if (field.field) return [...item, field.field];
+	return item;
 }
 
 /** The box around the nodes, in their parent's coordinates. */

@@ -159,12 +159,12 @@ function readTracks(node: MotionNode): KeyframeTrack[] {
 		["strokes", strokes],
 	] as const) {
 		for (const [index, track] of Object.entries(paints ?? {})) {
+			if (!track) continue;
 			const field = {
 				type: "INDEXED_ITEM",
 				collection,
 				index: Number(index),
 			} as const;
-			if (!track) continue;
 			if ("properties" in track) addProperties(field, track.properties);
 			else add(field, track);
 		}

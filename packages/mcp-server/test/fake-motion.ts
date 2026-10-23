@@ -120,8 +120,9 @@ export function createFakeMotion(doc: DocumentFixture) {
 			if (animationStyles) {
 				const added = animationStyles.map(
 					({ type, styleId, ...config }): AppliedAnimationStyle => {
-						const id = appliedStyleId(nodeId, (applied.get(nodeId) ?? 0) + 1);
-						applied.set(nodeId, (applied.get(nodeId) ?? 0) + 1);
+						const n = (applied.get(nodeId) ?? 0) + 1;
+						applied.set(nodeId, n);
+						const id = appliedStyleId(nodeId, n);
 						const { name, description } = offered(type, styleId) ?? {};
 						return type === "CUSTOM"
 							? withoutUndefined({
