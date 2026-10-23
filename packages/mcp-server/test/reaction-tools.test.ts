@@ -3,6 +3,7 @@ import type { Reaction } from "@figma-agent-tool/protocol";
 import {
 	appendReactionsRequest,
 	appendReactionsResponse,
+	brokenReactionNodeIds,
 	document,
 	getReactionsRequest,
 	getReactionsResponse,
@@ -62,7 +63,10 @@ describe("get_reactions", () => {
 describe("set_reactions", () => {
 	test("round trip: writing every node's reactions back leaves them unchanged", async () => {
 		const harness = await connected();
-		for (const nodeId of Object.keys(document.reactions)) {
+		const writable = Object.keys(document.reactions).filter(
+			(nodeId) => !brokenReactionNodeIds.includes(nodeId),
+		);
+		for (const nodeId of writable) {
 			const reactions = await reactionsOf(harness, nodeId);
 			const result = await harness.callTool("set_reactions", {
 				nodeId,

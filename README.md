@@ -68,6 +68,14 @@ Image outputs such as `export_node_image` and `capture_device_screenshot` are wr
 
 `get_reactions`, `set_reactions` and `remove_reactions` read and wire a node's prototype interactions. Reactions use the Figma Plugin API's shape: a `trigger` (on click, hover, press, drag, after delay, mouse enter/leave/up/down, key or gamepad) and an `actions` array whose NODE actions carry a `destinationId`, a `navigation` and a `transition` (null for instant, or dissolve, smart animate, move in/out, push, slide in/out with a direction) with an easing preset, custom cubic bezier or spring and a duration in seconds. Every trigger and action type round-trips: reactions read with `get_reactions` can be written back unchanged. `set_reactions` replaces (default) or appends; `remove_reactions` clears all reactions or those matching a trigger type and/or destination. NAVIGATE, OVERLAY and SWAP must go to a top-level frame and CHANGE_TO to a component variant; otherwise the call fails with `invalid_destination` and nothing is written. Each write is one undo step.
 
+## Flows and the prototype graph
+
+`list_flows` lists the flow starting points Figma's prototype viewer shows (every page's, or one page's); `set_flow_start` makes a top-level frame a starting point, or renames the flow it already starts, in one undo step.
+
+`trace_flow` walks breadth-first from a starting frame over the reactions of every layer in each screen, following NAVIGATE, OVERLAY and SWAP to further screens; screens already seen aren't walked again, so cycles end. It returns `screens` (with `depth`, the number of interactions from the start), `edges` (source screen and layer, trigger, action — NAVIGATE, OVERLAY, SWAP, SCROLL_TO, CHANGE_TO, BACK, CLOSE or URL — destination and transition; actions inside conditionals are marked `conditional`) and `dangling` edges whose destination is unset, deleted, unusable for the navigation (say, NAVIGATE to a nested layer) or on another page. `maxDepth` caps the walk and sets `truncated`. The plugin only returns raw reactions (one request per level of the walk); the server builds the graph.
+
+`export_flow_json` returns the same graph as `{ version, file, graph }` and, given a `path`, also writes it there.
+
 ## Design system
 
 `get_design_system` lists the file's local components and component sets (property definitions, variants and their values), paint, text and effect styles, and variables grouped by collection, with one value per mode (colors as hex, aliases as `{ "alias": "<variableId>" }`).
