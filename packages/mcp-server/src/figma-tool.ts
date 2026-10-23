@@ -1,5 +1,5 @@
-// Figma-backed tools need the plugin; this wrapper turns bridge failures into
-// tool errors the agent can act on.
+// Figma-backed tools need the plugin; these wrappers turn bridge (or device
+// runner) failures into tool errors the agent can act on.
 import type {
 	McpServer,
 	ToolCallback,
@@ -8,7 +8,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { z } from "zod";
 import { BridgeRequestError } from "./bridge";
 
-type FigmaToolConfig<
+type ToolConfig<
 	Shape extends z.ZodRawShape,
 	OutputShape extends z.ZodRawShape,
 > = {
@@ -25,8 +25,25 @@ export function registerFigmaTool<
 >(
 	server: McpServer,
 	name: string,
-	config: FigmaToolConfig<Shape, OutputShape>,
+	config: ToolConfig<Shape, OutputShape>,
 	handler: ToolCallback<Shape>,
+) {
+	registerGuardedTool(server, name, config, handler, BridgeRequestError);
+}
+
+/**
+ * Registers a tool whose `expected` failures (with messages written for the
+ * agent) become tool errors; anything else still throws.
+ */
+export function registerGuardedTool<
+	Shape extends z.ZodRawShape,
+	OutputShape extends z.ZodRawShape = z.ZodRawShape,
+>(
+	server: McpServer,
+	name: string,
+	config: ToolConfig<Shape, OutputShape>,
+	handler: ToolCallback<Shape>,
+	expected: abstract new (...args: never[]) => Error,
 ) {
 	const callback = (async (...args: Parameters<typeof handler>) => {
 		try {
@@ -34,7 +51,7 @@ export function registerFigmaTool<
 				...args,
 			);
 		} catch (error) {
-			if (error instanceof BridgeRequestError) return toolError(error.message);
+			if (error instanceof expected) return toolError(error.message);
 			throw error;
 		}
 	}) as ToolCallback<Shape>;

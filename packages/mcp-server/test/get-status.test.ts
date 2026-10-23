@@ -7,7 +7,7 @@ describe("get_status", () => {
 		const harness = await startHarness();
 		const result = await harness.callTool("get_status");
 		expect(result.isError).toBeFalsy();
-		expect(result.structuredContent).toEqual({
+		expect(result.structuredContent).toMatchObject({
 			bridge: { connected: false, port: harness.bridge.port },
 		});
 	});
@@ -16,7 +16,7 @@ describe("get_status", () => {
 		const harness = await startHarness();
 		await harness.connectFakePlugin();
 		const result = await harness.callTool("get_status");
-		expect(result.structuredContent).toEqual({
+		expect(result.structuredContent).toMatchObject({
 			bridge: {
 				connected: true,
 				port: harness.bridge.port,
@@ -38,6 +38,45 @@ describe("get_status", () => {
 					.connected === false
 			);
 		});
+	});
+
+	test("reports the Yoqa runner as reachable with no active device", async () => {
+		const harness = await startHarness();
+		const result = await harness.callTool("get_status");
+		expect(result.structuredContent).toMatchObject({
+			runner: {
+				url: harness.yoqa.url,
+				reachable: true,
+				version: "1.0.4",
+				activeDevice: null,
+			},
+		});
+	});
+
+	test("reports the runner's active device", async () => {
+		const harness = await startHarness();
+		const active = {
+			deviceId: "00008110-PHONE",
+			platform: "ios",
+			connectedAt: 1_700_000_000_000,
+		};
+		harness.yoqa.state.active = active;
+		const result = await harness.callTool("get_status");
+		expect(result.structuredContent).toMatchObject({
+			runner: { reachable: true, activeDevice: active },
+		});
+	});
+
+	test("reports an unreachable runner with how to start it, without failing", async () => {
+		const harness = await startHarness({ yoqaRunning: false });
+		const result = await harness.callTool("get_status");
+		expect(result.isError).toBeFalsy();
+		const { runner } = result.structuredContent as {
+			runner: { url: string; reachable: boolean; error: string };
+		};
+		expect(runner.url).toBe(harness.yoqa.url);
+		expect(runner.reachable).toBe(false);
+		expect(runner.error).toContain("yoqa serve");
 	});
 
 	test("returns its status as text for clients without structured content", async () => {

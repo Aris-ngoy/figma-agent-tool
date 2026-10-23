@@ -39,15 +39,25 @@ bun run check      # Biome lint + format
 
    - `FIGMA_AGENT_BRIDGE_PORT`: bridge port (default `3055`). Set the same port in the plugin panel's **Bridge port** field, and add it to `devAllowedDomains` in `packages/figma-plugin/manifest.json`, since Figma only lets the plugin reach listed origins.
    - `FIGMA_AGENT_REQUEST_TIMEOUT_MS`: how long a command may wait for the plugin before the tool returns a timeout error (default `30000`).
+   - `FIGMA_AGENT_YOQA_URL`: base URL of the Yoqa runner (default `http://127.0.0.1:7420`, Yoqa's own default port).
 
 3. In Figma desktop: Plugins → Development → Import plugin from manifest… and pick `packages/figma-plugin/manifest.json`. Run it in the file you want to bridge; the panel shows whether it's connected, which file is bridged and the last command it ran.
 
    The plugin reconnects on its own (with backoff) if the MCP server restarts, and the server accepts it again after Figma reloads the plugin. Only one plugin window is bridged at a time: opening the plugin in another file replaces the older connection (the server logs a warning, and the older panel offers **Reconnect** to take the bridge back).
 4. Ask your agent to call `get_status` to check the connection.
 
+## Devices (Yoqa)
+
+`list_devices`, `connect_device` and `capture_device_screenshot` reach iOS simulators, Android emulators and physical iOS and Android devices through the [Yoqa](https://yoqa.mintlify.app/docs/cli) local runner's HTTP API. **Yoqa is installed separately** (`@yoqa/runner`, not bundled with or imported by this MIT package). Start it with `yoqa serve` (or the `yoqa-runner` bin) before using the device tools. Device setup such as the Appium runtime, iOS signing and trusting the runner on a physical iPhone is Yoqa's job; its errors are passed through to the agent.
+
+- `list_devices`: devices on both platforms (or one, with `platform`), with kind (`simulator` / `emulator` / `physical`) and the runner's status string.
+- `connect_device`: reuses the active session when it is already that device. Yoqa holds one session at a time, so connecting a different device moves the session to it; the result names the device it replaced.
+- `capture_device_screenshot`: writes the active device's screen to the artifacts folder and returns its path and pixel size.
+- `get_status` reports whether the runner is reachable and which device is active.
+
 ## Artifacts
 
-Image outputs such as `export_node_image` are written to `.figma-agent/` in the server's working directory and returned as file paths (inline images only on request). Set `FIGMA_AGENT_ARTIFACTS_DIR` to write them elsewhere. Add `.figma-agent/` to your project's `.gitignore`; this repo already ignores it.
+Image outputs such as `export_node_image` and `capture_device_screenshot` are written to `.figma-agent/` in the server's working directory and returned as file paths (inline images only on request). Set `FIGMA_AGENT_ARTIFACTS_DIR` to write them elsewhere. Add `.figma-agent/` to your project's `.gitignore`; this repo already ignores it.
 
 ## Editing
 
