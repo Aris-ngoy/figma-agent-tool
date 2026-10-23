@@ -47,6 +47,12 @@ bun run check      # Biome lint + format
    The plugin reconnects on its own (with backoff) if the MCP server restarts, and the server accepts it again after Figma reloads the plugin. Only one plugin window is bridged at a time: opening the plugin in another file replaces the older connection (the server logs a warning, and the older panel offers **Reconnect** to take the bridge back).
 4. Ask your agent to call `get_status` to check the connection.
 
+### The official Figma MCP
+
+Every read and write goes through the plugin and the Plugin API, so this tool works on any Figma seat (free included), without the official Figma MCP server and without the REST API's rate limits. It doesn't proxy or wrap the official server. With a Full or Dev seat you can run both side by side; they don't share state.
+
+Before a release, run the manual [smoke test](docs/smoke-test.md) against real Figma.
+
 ## Devices (Yoqa)
 
 `list_devices`, `connect_device`, `navigate_device` and `capture_device_screenshot` reach iOS simulators, Android emulators and physical iOS and Android devices through the [Yoqa](https://yoqa.mintlify.app/docs/cli) local runner's HTTP API. **Yoqa is installed separately** (`@yoqa/runner`, not bundled with or imported by this MIT package). Start it with `yoqa serve` (or the `yoqa-runner` bin) before using the device tools. Device setup such as the Appium runtime, iOS signing and trusting the runner on a physical iPhone is Yoqa's job; its errors are passed through to the agent.
