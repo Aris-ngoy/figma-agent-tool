@@ -42,7 +42,7 @@ export class BridgeNotConnectedError extends BridgeRequestError {
 		super(
 			"No Figma plugin is connected. Open the Figma Agent Tool plugin in " +
 				"the Figma file you want to work on (Plugins → Development → Figma " +
-				`Agent Tool); it connects to ws://${BRIDGE_HOSTNAME}:${port} automatically.`,
+				`Agent Tool); it connects to ws://localhost:${port} automatically.`,
 		);
 		this.name = "BridgeNotConnectedError";
 	}

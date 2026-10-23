@@ -36,9 +36,9 @@ bun run check      # Biome lint + format
    }
    ```
 
-   The bridge listens on `ws://127.0.0.1:3055` (localhost only). Configure it with environment variables in the server entry (`"env": { ... }`):
+   The bridge listens on `ws://127.0.0.1:3055` (localhost only); the plugin connects to it as `ws://localhost:3055`, since Figma's manifest accepts host names but not IP addresses. Configure it with environment variables in the server entry (`"env": { ... }`):
 
-   - `FIGMA_AGENT_BRIDGE_PORT`: bridge port (default `3055`). Set the same port in the plugin panel's **Bridge port** field, and add it to `devAllowedDomains` in `packages/figma-plugin/manifest.json`, since Figma only lets the plugin reach listed origins.
+   - `FIGMA_AGENT_BRIDGE_PORT`: bridge port (default `3055`). Set the same port in the plugin panel's **Bridge port** field, and add `ws://localhost:<port>` to `devAllowedDomains` in `packages/figma-plugin/manifest.json`, since Figma only lets the plugin reach listed origins.
    - `FIGMA_AGENT_REQUEST_TIMEOUT_MS`: how long a command may wait for the plugin before the tool returns a timeout error (default `30000`).
    - `FIGMA_AGENT_YOQA_URL`: base URL of the Yoqa runner (default `http://127.0.0.1:7420`, Yoqa's own default port).
 

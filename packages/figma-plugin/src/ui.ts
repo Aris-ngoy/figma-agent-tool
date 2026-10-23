@@ -12,8 +12,10 @@ function toSandbox(message: UiToSandbox) {
 	parent.postMessage({ pluginMessage: message }, "*");
 }
 
+// `localhost`, not 127.0.0.1: Figma's manifest validator rejects IP addresses
+// in devAllowedDomains, and the plugin may only reach listed origins.
 function bridgeUrl(port: number): string {
-	return `ws://127.0.0.1:${port}`;
+	return `ws://localhost:${port}`;
 }
 
 function element<T extends HTMLElement>(id: string): T {
