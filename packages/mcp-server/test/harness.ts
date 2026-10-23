@@ -33,6 +33,7 @@ import { type Bridge, startBridge } from "../src/bridge";
 import { createMcpServer } from "../src/server";
 import { createYoqaRunner } from "../src/yoqa-runner";
 import { createFakeEditor } from "./fake-edits";
+import { createFakeFlows } from "./fake-flows";
 import { createFakeReactions } from "./fake-reactions";
 import { startFakeYoqa } from "./fake-yoqa";
 
@@ -102,6 +103,7 @@ type FakeDocument = {
 	document: DocumentFixture;
 	editor: ReturnType<typeof createFakeEditor>;
 	reactions: ReturnType<typeof createFakeReactions>;
+	flows: ReturnType<typeof createFakeFlows>;
 };
 
 /** A copy of the document fixture that this fake plugin's edits change. */
@@ -111,13 +113,14 @@ function fakeDocument(): FakeDocument {
 		document: copy,
 		editor: createFakeEditor(copy),
 		reactions: createFakeReactions(copy),
+		flows: createFakeFlows(copy),
 	};
 }
 
 /** Answers server requests from the plugin's document and the fixtures. */
 function answer(
 	message: ServerMessage,
-	{ document, editor, reactions }: FakeDocument,
+	{ document, editor, reactions, flows }: FakeDocument,
 ): Response | undefined {
 	if (message.type !== "request") return undefined;
 	const { id } = message;
@@ -197,6 +200,14 @@ function answer(
 			const { command } = message;
 			const params = commands[command].params.parse(message.params);
 			const handle = reactions[command] as (params: unknown) => object;
+			return okOrFailure(handle(params));
+		}
+		case "list_flows":
+		case "set_flow_start":
+		case "get_flow_nodes": {
+			const { command } = message;
+			const params = commands[command].params.parse(message.params);
+			const handle = flows[command] as (params: unknown) => object;
 			return okOrFailure(handle(params));
 		}
 		default:

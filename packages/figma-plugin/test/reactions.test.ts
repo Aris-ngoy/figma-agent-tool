@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { Reaction } from "@figma-agent-tool/protocol";
-import { document } from "@figma-agent-tool/protocol/fixtures";
+import {
+	brokenReactionNodeIds,
+	document,
+} from "@figma-agent-tool/protocol/fixtures";
 import { createCommandHandler } from "../src/handler";
 import { installMockFigma } from "./mock-figma";
 
@@ -60,7 +63,10 @@ describe("get_reactions", () => {
 describe("set_reactions", () => {
 	test("writing every node's reactions back leaves them unchanged", async () => {
 		const figma = plugin();
-		for (const nodeId of Object.keys(document.reactions)) {
+		const writable = Object.keys(document.reactions).filter(
+			(nodeId) => !brokenReactionNodeIds.includes(nodeId),
+		);
+		for (const nodeId of writable) {
 			const reactions = await figma.reactions(nodeId);
 			await figma.result("set_reactions", { nodeId, reactions });
 			expect(await figma.reactions(nodeId)).toEqual(

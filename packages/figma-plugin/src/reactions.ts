@@ -10,7 +10,7 @@ import {
 } from "@figma-agent-tool/protocol";
 import { CommandError, nodeNotFound } from "./errors";
 
-type ReactiveNode = BaseNode & ReactionMixin;
+export type ReactiveNode = BaseNode & ReactionMixin;
 
 export async function getReactions({
 	nodeId,
@@ -62,7 +62,7 @@ async function reactiveNode(id: string): Promise<ReactiveNode> {
 }
 
 /** The node's reactions, without the deprecated single `action`. */
-function readReactions(node: ReactiveNode): Reaction[] {
+export function readReactions(node: ReactiveNode): Reaction[] {
 	return node.reactions.map(({ trigger, actions, action }) => ({
 		trigger,
 		actions: actions ?? (action ? [action] : []),

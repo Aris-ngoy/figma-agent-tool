@@ -256,6 +256,8 @@ export function installMockFigma(document: DocumentFixture) {
 			name: page.name,
 			type: "PAGE",
 			selection: [],
+			// Like Figma, a readonly array the plugin replaces to change flows.
+			flowStartingPoints: Object.freeze(structuredClone(page.flows)),
 			async loadAsync() {
 				loadedPages.add(page.id);
 			},

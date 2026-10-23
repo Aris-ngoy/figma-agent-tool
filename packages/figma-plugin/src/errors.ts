@@ -17,6 +17,13 @@ export function nodeNotFound(id: string) {
 	);
 }
 
+export function pageNotFound(id: string | undefined) {
+	return new CommandError(
+		"page_not_found",
+		`No page with ID "${id}" exists in this file. Get page IDs from list_pages.`,
+	);
+}
+
 export function toBridgeError(error: unknown): BridgeError {
 	return {
 		code: error instanceof CommandError ? error.code : "command_failed",

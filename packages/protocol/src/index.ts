@@ -856,6 +856,121 @@ export function destinationError(
 	}
 }
 
+/** A prototype flow starting point, as Figma's prototype viewer lists it. */
+export const FlowStart = z.object({
+	nodeId: z.string(),
+	name: z.string(),
+	page: PageRef,
+});
+export type FlowStart = z.infer<typeof FlowStart>;
+
+/**
+ * Why `set_flow_start` can't start a flow at `node` (undefined when it can):
+ * flows start at a top-level frame, like NAVIGATE destinations.
+ */
+export function flowStartError(
+	nodeId: string,
+	node: { type: string; topLevel: boolean } | undefined,
+): BridgeError | undefined {
+	if (node?.topLevel && (node.type === "FRAME" || node.type === "COMPONENT")) {
+		return undefined;
+	}
+	return {
+		code: "invalid_flow_start",
+		message: node
+			? `A flow starts at a top-level frame, but ${nodeId} is a ${node.topLevel ? "top-level" : "nested"} ${node.type}. Use a frame from list_frames.`
+			: `No node with ID "${nodeId}" exists in this file. Use a frame from list_frames.`,
+	};
+}
+
+/**
+ * A node as `trace_flow` sees it, with the raw reactions of every layer in
+ * its subtree (itself included) that has any.
+ */
+export const FlowNode = z.object({
+	id: z.string(),
+	name: z.string(),
+	type: z.string(),
+	// Null for the document itself.
+	page: PageRef.nullable(),
+	// A direct child of a page.
+	topLevel: z.boolean(),
+	width: z.number().optional(),
+	height: z.number().optional(),
+	reactions: z.array(
+		z.object({
+			nodeId: z.string(),
+			nodeName: z.string(),
+			reactions: z.array(Reaction),
+		}),
+	),
+});
+export type FlowNode = z.infer<typeof FlowNode>;
+
+/** Interactions the prototype graph records, by NODE navigation or action type. */
+export const EDGE_ACTIONS = [...NAVIGATIONS, "BACK", "CLOSE", "URL"] as const;
+
+/** Navigations that present another screen, which the trace then walks. */
+export const SCREEN_NAVIGATIONS = ["NAVIGATE", "OVERLAY", "SWAP"] as const;
+
+/** A screen reached from the flow's start, `depth` interactions away. */
+export const FlowScreen = z.object({
+	id: z.string(),
+	name: z.string(),
+	type: z.string(),
+	width: z.number().optional(),
+	height: z.number().optional(),
+	depth: z.number().int(),
+});
+export type FlowScreen = z.infer<typeof FlowScreen>;
+
+/**
+ * One interaction: on `trigger`, layer `nodeId` of screen `from` does `action`
+ * to `to` (a screen, a layer for SCROLL_TO, a variant for CHANGE_TO; null for
+ * BACK, CLOSE and URL).
+ */
+export const FlowEdge = z.object({
+	from: z.string(),
+	nodeId: z.string(),
+	nodeName: z.string(),
+	trigger: Trigger.nullable(),
+	action: z.enum(EDGE_ACTIONS),
+	to: z.string().nullable(),
+	transition: Transition.nullable(),
+	// Runs only when a conditional block's condition holds.
+	conditional: z.literal(true).optional(),
+	url: z.string().optional(),
+	openInNewTab: z.boolean().optional(),
+	preserveScrollPosition: z.boolean().optional(),
+	overlayRelativePosition: Vector.optional(),
+	resetVideoPosition: z.boolean().optional(),
+	resetScrollPosition: z.boolean().optional(),
+	resetInteractiveComponents: z.boolean().optional(),
+});
+export type FlowEdge = z.infer<typeof FlowEdge>;
+
+/**
+ * An interaction that goes nowhere: no destination set, a deleted one, one
+ * the navigation can't use, or a screen on another page.
+ */
+export const DanglingEdge = FlowEdge.extend({
+	reason: z.enum(["no_destination", "missing", "invalid", "other_page"]),
+	message: z.string(),
+});
+export type DanglingEdge = z.infer<typeof DanglingEdge>;
+
+/** Every screen reachable from `start`, and the interactions between them. */
+export const PrototypeGraph = z.object({
+	start: z.string(),
+	page: PageRef,
+	screens: z.array(FlowScreen),
+	edges: z.array(FlowEdge),
+	dangling: z.array(DanglingEdge),
+	// Set when `maxDepth` stopped the walk before every screen was expanded.
+	truncated: z.literal(true).optional(),
+});
+export type PrototypeGraph = z.infer<typeof PrototypeGraph>;
+
 /** How many levels of children to include below each returned node. */
 export const Depth = z.number().int().min(0).max(100);
 export const DEFAULT_DEPTH = 2;
@@ -936,6 +1051,27 @@ export const commands = {
 	get_design_system: {
 		params: z.object({}),
 		result: DesignSystem,
+	},
+	list_flows: {
+		// Every page's flows when no page is given.
+		params: z.object({ pageId: z.string().min(1).optional() }),
+		result: z.object({ flows: z.array(FlowStart) }),
+	},
+	set_flow_start: {
+		params: z.object({
+			nodeId: z.string().min(1),
+			name: z.string().min(1),
+		}),
+		// `created` is false when the frame already started a flow (renamed).
+		result: z.object({ flow: FlowStart, created: z.boolean() }),
+	},
+	get_flow_nodes: {
+		params: z.object({ nodeIds: z.array(z.string().min(1)).min(1) }),
+		// Requested IDs with no node are listed in `missing`.
+		result: z.object({
+			nodes: z.array(FlowNode),
+			missing: z.array(z.string()),
+		}),
 	},
 } as const;
 

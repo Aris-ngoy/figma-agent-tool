@@ -133,6 +133,7 @@ describe("list_pages", () => {
 			pages: [
 				{ id: "0:1", name: "Screens", current: true },
 				{ id: "0:2", name: "Components", current: false },
+				{ id: "0:3", name: "Onboarding", current: false },
 			],
 		});
 	});

@@ -2,12 +2,17 @@
 // plugin's command handler (plugin tests) replay these same messages, so the
 // two can't drift apart.
 import type {
+	Action,
 	DesignSystem,
+	FlowNode,
+	FlowStart,
 	Handshake,
+	NodeAction,
 	Reaction,
 	Request,
 	Response,
 	SerializedNode,
+	Transition,
 } from "../src";
 import { PROTOCOL_VERSION } from "../src";
 
@@ -223,6 +228,71 @@ const chipSet = {
 	children: [chipVariant("3:2", "Small", 80), chipVariant("3:3", "Large", 120)],
 } satisfies SerializedNode;
 
+/** A top-level screen on the Onboarding page, laid out left to right. */
+function onboardingScreen(
+	id: string,
+	name: string,
+	column: number,
+	children: SerializedNode[],
+	height = 852,
+) {
+	return {
+		id,
+		name,
+		type: "FRAME",
+		x: column * 493,
+		y: 0,
+		width: 393,
+		height,
+		fills: [{ type: "SOLID", color: "#ffffff" }],
+		children,
+	} satisfies SerializedNode;
+}
+
+/** A tappable layer inside an onboarding screen. */
+function tappable(id: string, name: string, y: number): SerializedNode {
+	return { id, name, type: "RECTANGLE", x: 24, y, width: 345, height: 48 };
+}
+
+/**
+ * The Onboarding page: a multi-screen prototype with a cycle (Done restarts at
+ * Welcome), an overlay that swaps to a second overlay, scroll-to, back, close
+ * and URL actions, broken links, and an Orphan screen nothing leads to.
+ */
+const onboardingScreens = [
+	onboardingScreen("4:1", "Welcome", 0, [tappable("4:2", "Get started", 700)]),
+	onboardingScreen("4:10", "Permissions", 1, [
+		tappable("4:11", "Allow", 640),
+		tappable("4:12", "Learn more", 700),
+		tappable("4:13", "Privacy policy", 760),
+	]),
+	onboardingScreen("4:20", "Done", 2, [
+		tappable("4:21", "Start over", 640),
+		tappable("4:22", "Broken", 700),
+		tappable("4:23", "Unwired", 760),
+	]),
+	onboardingScreen(
+		"4:30",
+		"Info sheet",
+		3,
+		[
+			tappable("4:31", "Close", 24),
+			tappable("4:32", "Next tip", 96),
+			tappable("4:33", "Jump to footer", 168),
+			tappable("4:34", "Footer", 352),
+		],
+		400,
+	),
+	onboardingScreen(
+		"4:40",
+		"Second tip",
+		4,
+		[tappable("4:41", "Got it", 24)],
+		400,
+	),
+	onboardingScreen("4:50", "Orphan", 5, [tappable("4:51", "Back home", 700)]),
+];
+
 /** The file's local styles, as get_design_system returns them. */
 const styles = {
 	paint: [
@@ -357,6 +427,26 @@ const collections = [
 		],
 	},
 ] satisfies DesignSystem["collections"];
+
+function onClick(action: Action): Reaction {
+	return { trigger: { type: "ON_CLICK" }, actions: [action] };
+}
+
+function navigate(
+	destinationId: string | null,
+	navigation: NodeAction["navigation"],
+	transition: Transition | null,
+): NodeAction {
+	return { type: "NODE", destinationId, navigation, transition };
+}
+
+const push = {
+	type: "PUSH",
+	direction: "LEFT",
+	matchLayers: false,
+	easing: { type: "EASE_IN_AND_OUT" },
+	duration: 0.3,
+} satisfies Transition;
 
 /**
  * Prototype reactions by node ID, covering every trigger, transition and
@@ -545,6 +635,64 @@ const reactions: Record<string, Reaction[]> = {
 		},
 		{ trigger: null, actions: [{ type: "BACK" }] },
 	],
+	// Onboarding: Welcome pushes to Permissions.
+	"4:2": [onClick(navigate("4:10", "NAVIGATE", push))],
+	// Permissions: swipe back, allow, open the info sheet, read the policy.
+	"4:10": [{ trigger: { type: "ON_DRAG" }, actions: [{ type: "BACK" }] }],
+	"4:11": [
+		onClick(
+			navigate("4:20", "NAVIGATE", {
+				type: "DISSOLVE",
+				easing: { type: "EASE_OUT" },
+				duration: 0.2,
+			}),
+		),
+	],
+	"4:12": [
+		onClick({
+			...navigate("4:30", "OVERLAY", {
+				type: "MOVE_IN",
+				direction: "BOTTOM",
+				matchLayers: false,
+				easing: { type: "EASE_OUT" },
+				duration: 0.3,
+			}),
+			overlayRelativePosition: { x: 0, y: 452 },
+		}),
+	],
+	"4:13": [onClick({ type: "URL", url: "https://example.com/privacy" })],
+	// Done: start over (a cycle), a deleted destination, a screen on another
+	// page, and a reaction whose destination was never set.
+	"4:21": [onClick(navigate("4:1", "NAVIGATE", null))],
+	"4:22": [
+		onClick(navigate("4:99", "NAVIGATE", null)),
+		{
+			trigger: { type: "ON_HOVER" },
+			actions: [navigate("1:1", "NAVIGATE", null)],
+		},
+	],
+	"4:23": [onClick(navigate(null, "NAVIGATE", null))],
+	// Info sheet: close, swap to the second tip, scroll to the footer, and a
+	// NAVIGATE to a nested layer, which Figma can't follow.
+	"4:31": [onClick({ type: "CLOSE" })],
+	"4:32": [
+		onClick(
+			navigate("4:40", "SWAP", {
+				type: "SMART_ANIMATE",
+				easing: { type: "GENTLE" },
+				duration: 0.5,
+			}),
+		),
+	],
+	"4:33": [
+		onClick(navigate("4:34", "SCROLL_TO", null)),
+		{
+			trigger: { type: "ON_PRESS" },
+			actions: [navigate("4:34", "NAVIGATE", null)],
+		},
+	],
+	"4:41": [onClick({ type: "CLOSE" })],
+	"4:51": [onClick(navigate("4:1", "NAVIGATE", null))],
 };
 
 /**
@@ -562,11 +710,20 @@ export const document = {
 			id: "0:1",
 			name: "Screens",
 			children: [loginScreen, homeScreen, stickyNote] as SerializedNode[],
+			// Prototype flow starting points, as Figma's prototype viewer lists them.
+			flows: [{ nodeId: "1:1", name: "Sign in" }],
 		},
 		{
 			id: "0:2",
 			name: "Components",
 			children: [buttonComponent, chipSet] as SerializedNode[],
+			flows: [] as { nodeId: string; name: string }[],
+		},
+		{
+			id: "0:3",
+			name: "Onboarding",
+			children: onboardingScreens as SerializedNode[],
+			flows: [{ nodeId: "4:1", name: "Onboarding" }],
 		},
 	],
 	reactions,
@@ -575,12 +732,21 @@ export const document = {
 };
 export type DocumentFixture = typeof document;
 
+/**
+ * Nodes whose reactions go to a deleted node or a nested layer. set_reactions
+ * rejects those, so they can't be written back as they are.
+ */
+export const brokenReactionNodeIds = ["4:22", "4:33"];
+
 /** Every node in the document, pages included, keyed by ID. */
 export function findNode(
 	id: string,
 	doc: DocumentFixture = document,
 ): SerializedNode | undefined {
-	const pages = doc.pages.map((page) => ({ ...page, type: "PAGE" }));
+	const pages = doc.pages.map(({ flows: _, ...page }) => ({
+		...page,
+		type: "PAGE",
+	}));
 	const stack: SerializedNode[] = [...pages];
 	while (stack.length > 0) {
 		const node = stack.pop() as SerializedNode;
@@ -682,6 +848,7 @@ export const listPagesResponse = {
 		pages: [
 			{ id: "0:1", name: "Screens", current: true },
 			{ id: "0:2", name: "Components", current: false },
+			{ id: "0:3", name: "Onboarding", current: false },
 		],
 	},
 } satisfies Response;
@@ -1178,6 +1345,115 @@ export const bindNodesResponse = {
 	},
 } satisfies Response;
 
+export const listFlowsRequest = {
+	type: "request",
+	id: "req-17",
+	command: "list_flows",
+	params: {},
+} satisfies Request;
+
+const screensPage = { id: "0:1", name: "Screens" };
+const onboardingPage = { id: "0:3", name: "Onboarding" };
+
+export const listFlowsResponse = {
+	type: "response",
+	id: "req-17",
+	ok: true,
+	result: {
+		flows: [
+			{ nodeId: "1:1", name: "Sign in", page: screensPage },
+			{ nodeId: "4:1", name: "Onboarding", page: onboardingPage },
+		] satisfies FlowStart[],
+	},
+} satisfies Response;
+
+/** Starts a new flow at Home, after the page's existing Sign in flow. */
+export const setFlowStartRequest = {
+	type: "request",
+	id: "req-18",
+	command: "set_flow_start",
+	params: { nodeId: "1:10", name: "Returning user" },
+} satisfies Request;
+
+export const setFlowStartResponse = {
+	type: "response",
+	id: "req-18",
+	ok: true,
+	result: {
+		flow: { nodeId: "1:10", name: "Returning user", page: screensPage },
+		created: true,
+	},
+} satisfies Response;
+
+/** Flows start at top-level frames; a nested layer fails. */
+export const setNestedFlowStartRequest = {
+	type: "request",
+	id: "req-19",
+	command: "set_flow_start",
+	params: { nodeId: "1:3", name: "Button flow" },
+} satisfies Request;
+
+export const setNestedFlowStartResponse = {
+	type: "response",
+	id: "req-19",
+	ok: false,
+	error: {
+		code: "invalid_flow_start",
+		message:
+			"A flow starts at a top-level frame, but 1:3 is a nested INSTANCE. Use a frame from list_frames.",
+	},
+} satisfies Response;
+
+const reactionsOn = (nodeId: string, nodeName: string) => ({
+	nodeId,
+	nodeName,
+	reactions: reactions[nodeId] as Reaction[],
+});
+
+/** A screen with its layers' reactions, a nested layer, and a missing node. */
+export const getFlowNodesRequest = {
+	type: "request",
+	id: "req-20",
+	command: "get_flow_nodes",
+	params: { nodeIds: ["4:10", "4:34", "9:99"] },
+} satisfies Request;
+
+export const getFlowNodesResponse = {
+	type: "response",
+	id: "req-20",
+	ok: true,
+	result: {
+		nodes: [
+			{
+				id: "4:10",
+				name: "Permissions",
+				type: "FRAME",
+				page: onboardingPage,
+				topLevel: true,
+				width: 393,
+				height: 852,
+				reactions: [
+					reactionsOn("4:10", "Permissions"),
+					reactionsOn("4:11", "Allow"),
+					reactionsOn("4:12", "Learn more"),
+					reactionsOn("4:13", "Privacy policy"),
+				],
+			},
+			{
+				id: "4:34",
+				name: "Footer",
+				type: "RECTANGLE",
+				page: onboardingPage,
+				topLevel: false,
+				width: 345,
+				height: 48,
+				reactions: [],
+			},
+		] satisfies FlowNode[],
+		missing: ["9:99"],
+	},
+} satisfies Response;
+
 /**
  * Every request the fakes know how to answer, paired with the plugin's
  * response. The fake plugin matches on command + params; the plugin tests
@@ -1200,4 +1476,8 @@ export const exchanges: [Request, Response][] = [
 	[removeReactionsRequest, removeReactionsResponse],
 	[getDesignSystemRequest, getDesignSystemResponse],
 	[bindNodesRequest, bindNodesResponse],
+	[listFlowsRequest, listFlowsResponse],
+	[setFlowStartRequest, setFlowStartResponse],
+	[setNestedFlowStartRequest, setNestedFlowStartResponse],
+	[getFlowNodesRequest, getFlowNodesResponse],
 ];

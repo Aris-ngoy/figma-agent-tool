@@ -12,7 +12,13 @@ import {
 } from "@figma-agent-tool/protocol";
 import { getDesignSystem } from "./design-system";
 import { createNodes, updateNodes } from "./edit";
-import { CommandError, nodeNotFound, toBridgeError } from "./errors";
+import {
+	CommandError,
+	nodeNotFound,
+	pageNotFound,
+	toBridgeError,
+} from "./errors";
+import { getFlowNodes, listFlows, setFlowStart } from "./flows";
 import { getReactions, removeReactions, setReactions } from "./reactions";
 import { serializeNode } from "./serialize";
 
@@ -49,12 +55,7 @@ const implementations: CommandImplementations = {
 		const page = pageId
 			? await figma.getNodeByIdAsync(pageId)
 			: figma.currentPage;
-		if (page?.type !== "PAGE") {
-			throw new CommandError(
-				"page_not_found",
-				`No page with ID "${pageId}" exists in this file. Get page IDs from list_pages.`,
-			);
-		}
+		if (page?.type !== "PAGE") throw pageNotFound(pageId);
 		await page.loadAsync();
 		return {
 			page: pageRef(page),
@@ -95,6 +96,9 @@ const implementations: CommandImplementations = {
 	set_reactions: setReactions,
 	remove_reactions: removeReactions,
 	get_design_system: getDesignSystem,
+	list_flows: listFlows,
+	set_flow_start: setFlowStart,
+	get_flow_nodes: getFlowNodes,
 };
 
 function pageRef(page: PageNode) {
