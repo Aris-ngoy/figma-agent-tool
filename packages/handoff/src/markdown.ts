@@ -344,46 +344,56 @@ function tokenRows(tree: SerializedNode, designSystem: DesignSystem) {
 			use(slot as StyleSlot, id, slot);
 		}
 	}
-	const variables = designSystem.collections.flatMap((collection) =>
-		collection.variables.map((variable) => ({ collection, variable })),
+	const variables = new Map(
+		designSystem.collections.flatMap((collection) =>
+			collection.variables.map(
+				(variable) => [variable.id, { collection, variable }] as const,
+			),
+		),
 	);
-	const variableName = (id: string) =>
-		variables.find(({ variable }) => variable.id === id)?.variable.name ?? id;
-	const rows = [...uses.values()].map(({ kind, id, fields }) => {
-		const usedFor = [...fields].sort().join(", ");
-		if (kind === "variable") {
-			const found = variables.find(({ variable }) => variable.id === id);
-			if (!found) return { order: 0, row: [id, "variable", NONE, usedFor] };
-			const { collection, variable } = found;
-			const values = collection.modes.map(({ name }) => {
-				const value = describeValue(
-					variable.valuesByMode[name] ?? null,
-					variableName,
-				);
-				return collection.modes.length > 1 ? `${name}: ${value}` : value;
-			});
+	const variableName = (id: string) => variables.get(id)?.variable.name ?? id;
+	type Row = [token: string, kind: string, value: string, usedFor: string];
+	const rows = [...uses.values()].map(
+		({ kind, id, fields }): { order: number; row: Row } => {
+			const usedFor = [...fields].sort().join(", ");
+			if (kind === "variable") {
+				const found = variables.get(id);
+				if (!found) {
+					return { order: 0, row: [id, "variable", NONE, usedFor] };
+				}
+				const { collection, variable } = found;
+				const values = collection.modes.map(({ name }) => {
+					const value = describeValue(
+						variable.valuesByMode[name] ?? null,
+						variableName,
+					);
+					return collection.modes.length > 1 ? `${name}: ${value}` : value;
+				});
+				return {
+					order: 0,
+					row: [
+						variable.name,
+						`${variable.type} variable`,
+						values.join("; "),
+						usedFor,
+					],
+				};
+			}
+			const type = STYLE_SLOTS[kind];
+			const style = describeStyle(type, id, designSystem);
 			return {
-				order: 0,
+				order: 1,
 				row: [
-					variable.name,
-					`${variable.type} variable`,
-					values.join("; "),
+					style?.name ?? id,
+					`${type} style`,
+					style?.value ?? NONE,
 					usedFor,
 				],
 			};
-		}
-		const type = STYLE_SLOTS[kind];
-		const style = describeStyle(type, id, designSystem);
-		return {
-			order: 1,
-			row: [style?.name ?? id, `${type} style`, style?.value ?? NONE, usedFor],
-		};
-	});
+		},
+	);
 	return rows
-		.sort(
-			(a, b) =>
-				a.order - b.order || compare(a.row[0] as string, b.row[0] as string),
-		)
+		.sort((a, b) => a.order - b.order || compare(a.row[0], b.row[0]))
 		.map(({ row }) => row);
 }
 
@@ -460,8 +470,11 @@ function componentRows(tree: SerializedNode, context: Context): string[][] {
 		const { mainComponent, properties } = node.instance;
 		const values = Object.entries(properties)
 			// Figma suffixes non-variant property names with `#<id>`.
-			.map(([name, value]) => [name.replace(/#[^#]*$/, ""), String(value)])
-			.sort(([a], [b]) => compare(a as string, b as string))
+			.map(([name, value]): [string, string] => [
+				name.replace(/#[^#]*$/, ""),
+				String(value),
+			])
+			.sort(([a], [b]) => compare(a, b))
 			.map(([name, value]) => `${name}=${value}`);
 		return [
 			[
@@ -477,5 +490,7 @@ function componentRows(tree: SerializedNode, context: Context): string[][] {
 
 /** Locale-independent, so output doesn't depend on where it runs. */
 function compare(a: string, b: string): number {
-	return a < b ? -1 : a > b ? 1 : 0;
+	if (a < b) return -1;
+	if (a > b) return 1;
+	return 0;
 }
