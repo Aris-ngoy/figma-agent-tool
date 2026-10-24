@@ -54,6 +54,22 @@ Automated tests drive the MCP server with a fake plugin and a fake Yoqa runner, 
 - [ ] Export again without changes: the file is byte-identical (`git diff` is empty). Change one color and export: only that line changes.
 - [ ] `export_screen_markdown` on one screen and `export_flow_json` on the flow match what the flow export says.
 
+## Design Project loop (v2)
+
+In a scratch repo, with the MCP server's working directory there (or `FIGMA_AGENT_DESIGN_DIR` set):
+
+- [ ] `init_design_project` (or `figma-agent-tool init`) creates `design/` with `project.json`, `DESIGN.md`, `screens/` and `assets/`.
+- [ ] Ask the agent for a login screen: it writes `design/screens/login.html` with tokens as CSS variables, and `check_design_project` passes. Break it on purpose (a `<table>`, `display:grid`): Check names the file, line, element and rule.
+- [ ] `figma-agent-tool preview` shows the Screen at its Screen Size; editing the file reloads the page. `render_screen` (or `figma-agent-tool render login`) writes a PNG that looks the same as the Preview (headless Chromium downloads on first use).
+- [ ] With the plugin open in a fresh file, `push` asks to confirm “<file name>”; confirming links it. The frame appears on the Screens Page at 393×852 with auto layout, layers named as in the Screen and editable text, and Cmd+Z removes the whole Push in one step.
+- [ ] Rename the frame and move it to another page, then `pull`: nothing changes (`unchanged`) and `git diff` on the Screen is empty.
+- [ ] Open the plugin in another file and `push`: refused, naming both files. Go back to the Linked File.
+- [ ] In Figma, change the title's text and the button's padding: `get_status` lists `login` under `unpulledChanges`, and `push` is refused naming it.
+- [ ] `pull`: the Screen gets the new text and padding, the tokens it used elsewhere stay `var(--…)`, and `push` works again; every layer keeps its node ID (check one with `get_node`).
+- [ ] Change the same text in Figma and in the file, then `pull`: the file has `<<<<<<< Design Project` / `>>>>>>> Figma` markers, `get_status` lists `syncConflicts`, and `push` is refused. Keep one side, delete the markers, `push`: the frame shows the kept text.
+- [ ] Add a shadow and a vector in Figma, then `pull`: both are listed as kept in Figma, the Screen doesn't change, and the next `push` leaves them as they are.
+- [ ] Cut the frame and paste it back (new node IDs): `pull` still finds it, and `push` updates it rather than making a new one.
+
 ## Agent loop
 
 - [ ] Ask the agent to "wire the onboarding flow with push transitions and export the handoff Markdown": it sets the reactions, traces the flow and writes the file without help.

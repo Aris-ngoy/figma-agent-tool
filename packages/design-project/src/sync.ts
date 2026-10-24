@@ -152,6 +152,15 @@ export function baselineRoot(screen: ScreenFile, baseline: Baseline): Element {
 const sha256 = (bytes: Uint8Array) =>
 	createHash("sha256").update(bytes).digest("hex");
 
+/**
+ * How a Screen's image goes to Figma: by the hash of the image Figma
+ * already has for it, or as bytes sent under `image`.
+ */
+export type PushedImage = { sha256: string } & (
+	| { imageHash: string }
+	| { image: string }
+);
+
 /** The node tree a checked Screen (every element keyed) pushes as, with image bytes to send. */
 export async function screenPush(
 	project: DesignProject,
@@ -160,40 +169,61 @@ export async function screenPush(
 	baseline: Baseline | undefined,
 ): Promise<{
 	tree: ScreenNode;
+	/** Image bytes (base64) to send, by name. */
 	images: Record<string, string>;
-	imageShas: Record<string, string>;
+	/** How each `src` is pushed. */
+	sources: Record<string, PushedImage>;
 }> {
 	const images: Record<string, string> = {};
-	const imageShas: Record<string, string> = {};
+	const sources: Record<string, PushedImage> = {};
 	const srcs = new Set<string>();
 	const walk = (element: Element) => {
 		if (element.src) srcs.add(element.src);
 		element.children.forEach(walk);
 	};
 	walk(root);
-	const fills = new Map<string, { imageHash: string } | { image: string }>();
 	for (const src of srcs) {
 		const path = imagePath(project, screen, src) as string;
 		const bytes = await readFile(path);
 		const sha = sha256(bytes);
-		imageShas[src] = sha;
 		const known = baseline?.images[src];
 		if (known?.sha256 === sha) {
-			fills.set(src, { imageHash: known.imageHash });
+			sources[src] = { sha256: sha, imageHash: known.imageHash };
 		} else {
 			// Named by project path, so Screens sharing an image send it once.
 			const name = relative(project.dir, path).split("\\").join("/");
 			images[name] = bytes.toString("base64");
-			fills.set(src, { image: name });
+			sources[src] = { sha256: sha, image: name };
 		}
 	}
 	const tree = toScreenNode(root, {
 		...resolveContext(project, screen),
 		nodeIds: baseline?.nodes ?? {},
-		imageFill: (src, scaleMode) =>
-			({ type: "IMAGE", scaleMode, ...fills.get(src) }) as ScreenFill,
+		imageFill: (src, scaleMode) => {
+			const { sha256: _, ...fill } = sources[src] as PushedImage;
+			return { type: "IMAGE", scaleMode, ...fill } as ScreenFill;
+		},
 	});
-	return { tree, images, imageShas };
+	return { tree, images, sources };
+}
+
+/** The Figma image each `src` became, given the hashes the Plugin made from sent bytes. */
+export function pushedImageRecords(
+	sources: Record<string, PushedImage>,
+	hashes: Record<string, string>,
+): Record<string, ImageRecord> {
+	return Object.fromEntries(
+		Object.entries(sources).map(([src, pushed]) => [
+			src,
+			{
+				imageHash:
+					"imageHash" in pushed
+						? pushed.imageHash
+						: (hashes[pushed.image] as string),
+				sha256: pushed.sha256,
+			},
+		]),
+	);
 }
 
 /** The Baseline after a Push: the pushed source and where each element landed. */
@@ -288,20 +318,9 @@ export function readFrame(
 	const keysById = new Map(
 		Object.entries(baseline.nodes).map(([key, id]) => [id, key]),
 	);
-	const byKey = new Map<string, Element>();
-	const index = (element: Element | undefined) => {
-		if (!element) return;
-		if (element.key && !byKey.has(element.key)) byKey.set(element.key, element);
-		element.children.forEach(index);
-	};
-	index(local);
-	index(base);
-	const baseByKey = new Map<string, Element>();
-	const indexBase = (element: Element) => {
-		if (element.key) baseByKey.set(element.key, element);
-		element.children.forEach(indexBase);
-	};
-	indexBase(base);
+	const baseByKey = elementsByKey(base);
+	// Tags as the Design Project writes them now, else as the Baseline did.
+	const tags = new Map([...baseByKey, ...(local ? elementsByKey(local) : [])]);
 	const srcs = new Map(
 		Object.entries(baseline.images).map(([src, image]) => [
 			image.imageHash,
@@ -319,12 +338,22 @@ export function readFrame(
 			return key;
 		},
 		tagFor: (key: string | undefined, kind: Kind) => {
-			const element = key ? byKey.get(key) : undefined;
+			const element = key ? tags.get(key) : undefined;
 			return element?.kind === kind ? element.tag : undefined;
 		},
 		srcFor: (imageHash) => srcs.get(imageHash),
 		baseElement: (key) => baseByKey.get(key),
 	});
+}
+
+function elementsByKey(root: Element): Map<string, Element> {
+	const byKey = new Map<string, Element>();
+	const walk = (element: Element) => {
+		if (element.key) byKey.set(element.key, element);
+		element.children.forEach(walk);
+	};
+	walk(root);
+	return byKey;
 }
 
 /** A layer's element key: its plugin data, checked against the node ID map. */
@@ -341,6 +370,22 @@ function layerKey(
 	// The layer it was pushed to is gone (cut and pasted): this is it.
 	if (pushedTo === undefined || !ids.has(pushedTo)) return node.key;
 	return undefined;
+}
+
+/**
+ * The Baseline pointing at the frame as it is now: a frame that was cut and
+ * pasted has a new ID, and so does every layer in it.
+ */
+export function followFrame(
+	project: DesignProject,
+	screen: ScreenFile,
+	baseline: Baseline,
+	frame: SyncedNode,
+): Baseline {
+	if (frame.id === baseline.frameId) return baseline;
+	const { root } = readFrame(project, screen, baseline, frame);
+	if (!root) return { ...baseline, frameId: frame.id };
+	return { ...baseline, frameId: frame.id, nodes: elementNodeMap(root, {}) };
 }
 
 /** Whether a frame was edited in Figma since the Baseline. */
@@ -406,12 +451,10 @@ export function pullScreen(
 		local: resolveContext(project, screen),
 		figma: resolveContext(project, screen),
 	};
-	const frameMoved = frame.id !== baseline.frameId;
 	if (sameElement(base, figma, { a: contexts.base, b: contexts.figma }, true)) {
-		const unchanged = { ...withImages, frameId: frame.id };
 		return {
 			changed: false,
-			baseline: frameMoved ? unchanged : baseline,
+			baseline: followFrame(project, screen, baseline, frame),
 			conflicts: 0,
 			unsupported,
 		};

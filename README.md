@@ -5,7 +5,9 @@ An MCP server plus a Figma development plugin that lets any MCP client work on t
 ## Packages
 
 - `packages/protocol`: runtime-validated (zod) bridge messages and the shared test fixtures.
-- `packages/mcp-server`: the MCP server (stdio) and the localhost WebSocket bridge the plugin connects to.
+- `packages/design-project`: pure: reads and writes a Design Project, checks Screens against the Screen Subset, converts Screens to and from the node trees the plugin applies, and does Pull's three-way merge. No Figma, network or browser knowledge.
+- `packages/preview`: the local Preview server and the one renderer that both the Preview and Render use.
+- `packages/mcp-server`: the MCP server (stdio), the localhost WebSocket bridge the plugin connects to, and the `figma-agent-tool` CLI.
 - `packages/figma-plugin`: the Figma plugin (sandbox command handler + UI iframe that owns the connection).
 - `packages/handoff`: pure rendering of the prototype graph, screen layers and design system as handoff Markdown.
 - `packages/visual-diff`: pure image comparison (align, mask, pixel-diff, cluster mismatches), with no Figma or device knowledge. Its PNG fixtures are regenerated with `bun run fixtures` in that package.
@@ -41,6 +43,8 @@ bun run check      # Biome lint + format
    - `FIGMA_AGENT_BRIDGE_PORT`: bridge port (default `3055`). Set the same port in the plugin panel's **Bridge port** field, and add `ws://localhost:<port>` to `devAllowedDomains` in `packages/figma-plugin/manifest.json`, since Figma only lets the plugin reach listed origins.
    - `FIGMA_AGENT_REQUEST_TIMEOUT_MS`: how long a command may wait for the plugin before the tool returns a timeout error (default `30000`).
    - `FIGMA_AGENT_YOQA_URL`: base URL of the Yoqa runner (default `http://127.0.0.1:7420`, Yoqa's own default port).
+   - `FIGMA_AGENT_DESIGN_DIR`: the Design Project's folder (default `design`, relative to the working directory).
+   - `FIGMA_AGENT_CHROME`: a Chrome or Chromium binary for Render; otherwise Render downloads Chrome for Testing's headless shell into `~/.cache/figma-agent-tool` on first use.
 
 3. In Figma desktop: Plugins → Development → Import plugin from manifest… and pick `packages/figma-plugin/manifest.json`. Run it in the file you want to bridge; the panel shows whether it's connected, which file is bridged and the last command it ran.
 
@@ -52,6 +56,72 @@ bun run check      # Biome lint + format
 Every read and write goes through the plugin and the Plugin API, so this tool works on any Figma seat (free included), without the official Figma MCP server and without the REST API's rate limits. It doesn't proxy or wrap the official server. With a Full or Dev seat you can run both side by side; they don't share state.
 
 Before a release, run the manual [smoke test](docs/smoke-test.md) against real Figma.
+
+## Design Projects (v2)
+
+The Agent designs **Screens** as files in a **Design Project** in the repo, sees them in a local **Preview**, and **Pushes** them to Figma; designers' edits come back with **Pull**. See `CONTEXT.md` for the vocabulary and `docs/adr/` for the decisions.
+
+```
+design/
+  project.json        { "screenSize": { "width": 393, "height": 852 }, "screensPage": "Screens" }
+  DESIGN.md           the Design System (Google Labs' DESIGN.md format)
+  screens/login.html  one Screen per file
+  assets/             images Screens use
+  sync/               the Linked File and each Screen's Baseline; commit it so teammates share it
+```
+
+Every tool has a CLI command doing the same thing (`bun packages/mcp-server/src/cli.ts <command>`, or the `figma-agent-tool` bin once built):
+
+| MCP tool | CLI | |
+| --- | --- | --- |
+| `init_design_project` | `init [--size 393x852]` | Create the folder above. |
+| `check_design_project` | `check` | Check Screens and DESIGN.md; each error names the file, line, element and rule. |
+| `render_screen` | `render <screen> [--out file.png]` | A PNG of the Screen exactly as the Preview shows it. |
+| `open_preview` | `preview [--port 4321]` | Every Screen at its Screen Size, reloading as files change. |
+| `push` | `push [<screen>…] [--yes]` | Screens → frames on the Screens Page, updated in place. |
+| `pull` | `pull` | Designers' edits → the Screens, merged against the Baseline. |
+| `relink_file` | `relink [--yes]` | Link the Bridged File instead of the Linked File. |
+
+The CLI's `push`, `pull` and `relink` host the plugin bridge while they run, so they can't run while the MCP server holds its port; use the MCP tools then.
+
+### Screens
+
+A Screen is one `<body>` element in the basic **Screen Subset**, where everything has an exact Figma equivalent:
+
+```html
+<body style="display:flex; flex-direction:column; gap:var(--spacing-md); padding:24px; background:var(--colors-surface)">
+  <img src="../assets/logo.png" style="width:64px; height:64px; border-radius:var(--rounded-md)">
+  <h1 style="font-size:28px; font-weight:700; color:var(--colors-text)">Welcome back</h1>
+  <div data-name="Button" style="display:flex; justify-content:center; padding:12px 16px; align-self:stretch; background:var(--colors-primary); border-radius:12px">
+    <p style="font-weight:600; color:#ffffff">Sign in</p>
+  </div>
+  <div style="height:1px; align-self:stretch; background:#dddddd"></div>
+</body>
+```
+
+- `<body>` is the Screen's frame, at the project's Screen Size unless it sets both `width` and `height`.
+- `<div style="display:flex">` is an auto-layout frame (`flex-direction`, `gap`, `padding`, `justify-content`, `align-items`, `flex-wrap`); a `<div>` without children or `display` is a rectangle; `<p>`, `<span>` and `<h1>`–`<h6>` are text (`<br>` for line breaks); `<img>` is a rectangle with an image fill (`object-fit: cover | contain`).
+- Sizes: a `px` width or height is fixed, none hugs the content, `flex: 1` fills the parent's main axis and `align-self: stretch` its cross axis.
+- Boxes take `background`, `border-radius` and `opacity`; text takes `color`, `font-family`, `font-size`, `font-weight`, `font-style` and `text-align`. There's no inheritance: text styles go on text elements.
+- `data-name` names the layer. Push writes a `data-key` into each element, which links it to its layer: leave it, and don't copy it onto another element.
+- DESIGN.md's tokens are CSS variables named after their path: `colors.primary` is `var(--colors-primary)`, `typography.title.fontSize` is `var(--typography-title-font-size)`.
+
+### Push and Pull
+
+- The first Push names the Bridged File and asks to confirm it (the `push` tool returns `status: "confirm_link"`; call it again with `confirmLink: true`). The file then is the Linked File: Push and Pull refuse any other Bridged File, naming both, until `relink`.
+- Push creates or updates one frame per Screen on the Screens Page, keeping node IDs (and with them comments and Figma-only interactions), as one undo step. Layers designers added stay. It refuses Screens that fail Check or have Sync Conflicts, and frames with Unpulled Changes.
+- Pull merges each frame's edits into its Screen against the Baseline. A Screen Figma didn't change stays byte for byte; one it did is rewritten in canonical form. Where both sides changed the same element the file gets markers to resolve:
+
+  ```
+  <<<<<<< Design Project
+      <p data-key="e6" style="color:#fff; font-weight:600">Log in</p>
+  =======
+      <p data-key="e6" style="color:#ffffff; font-weight:600">Continue</p>
+  >>>>>>> Figma
+  ```
+
+- Layers the basic subset can't express (vectors, effects, strokes, frames without auto layout, …) stay in Figma untouched and are listed by Pull; Figma-owned Elements for them come later.
+- `get_status` reports the Design Project, its Linked File, and Screens with Unpulled Changes or Sync Conflicts.
 
 ## Devices (Yoqa)
 

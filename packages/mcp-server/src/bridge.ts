@@ -33,6 +33,8 @@ export type BridgeStatus =
 			file: FileInfo;
 			pluginVersion: string;
 			capabilities: Capabilities;
+			/** The Link ID stored in the Bridged File, if a Design Project linked it. */
+			linkId: string | null;
 	  };
 
 export type Bridge = ReturnType<typeof startBridge>;
@@ -96,6 +98,7 @@ type Session = {
 	file: FileInfo;
 	pluginVersion: string;
 	capabilities: Capabilities;
+	linkId: string | null;
 };
 
 type Pending = {
@@ -151,6 +154,7 @@ export function startBridge({
 							file: message.file,
 							pluginVersion: message.pluginVersion,
 							capabilities: message.capabilities,
+							linkId: message.linkId ?? null,
 						};
 						const ack: HandshakeAck = {
 							type: "handshake_ack",
@@ -201,14 +205,20 @@ export function startBridge({
 
 		status(): BridgeStatus {
 			if (!session) return { connected: false, port: boundPort };
-			const { file, pluginVersion, capabilities } = session;
+			const { file, pluginVersion, capabilities, linkId } = session;
 			return {
 				connected: true,
 				port: boundPort,
 				file,
 				pluginVersion,
 				capabilities,
+				linkId,
 			};
+		},
+
+		/** Records the Link ID a link_file request stored in the Bridged File. */
+		setLinkId(linkId: string) {
+			if (session) session.linkId = linkId;
 		},
 
 		async request<C extends CommandName>(

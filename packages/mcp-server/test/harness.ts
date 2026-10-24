@@ -4,6 +4,7 @@ import { afterEach } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Screenshotter } from "@figma-agent-tool/preview";
 import {
 	type BridgeError,
 	commands,
@@ -38,6 +39,7 @@ import { createFakeFlows } from "./fake-flows";
 import { createFakeMotion } from "./fake-motion";
 import { createFakeReactions } from "./fake-reactions";
 import { createFakeRestructure } from "./fake-restructure";
+import { createFakeScreens } from "./fake-screens";
 import { startFakeYoqa } from "./fake-yoqa";
 
 const cleanups: (() => unknown)[] = [];
@@ -50,11 +52,16 @@ export async function startHarness({
 	setup,
 	requestTimeoutMs,
 	artifactsDir,
+	designDir,
+	screenshot,
 	yoqaRunning = true,
 }: {
 	setup?: (server: McpServer, bridge: Bridge) => void;
 	requestTimeoutMs?: number;
 	artifactsDir?: string;
+	/** The Design Project's folder; an empty scratch folder by default. */
+	designDir?: string;
+	screenshot?: Screenshotter;
 	/** When false, the runner URL points at a port nothing listens on. */
 	yoqaRunning?: boolean;
 } = {}) {
@@ -69,13 +76,20 @@ export async function startHarness({
 	const scratch = await mkdtemp(join(tmpdir(), "figma-agent-test-"));
 	cleanups.push(() => rm(scratch, { recursive: true, force: true }));
 	artifactsDir ??= join(scratch, "artifacts");
+	designDir ??= join(scratch, "design");
 
 	const yoqa = startFakeYoqa();
 	cleanups.push(() => yoqa.stop());
 	if (!yoqaRunning) yoqa.stop();
 	const deviceRunner = createYoqaRunner({ baseUrl: yoqa.url });
 
-	const server = createMcpServer({ bridge, artifactsDir, deviceRunner });
+	const server = createMcpServer({
+		bridge,
+		artifactsDir,
+		designDir,
+		deviceRunner,
+		screenshot,
+	});
 	setup?.(server, bridge);
 	const client = new Client({ name: "test-client", version: "0.0.0" });
 	const [clientTransport, serverTransport] =
@@ -90,6 +104,7 @@ export async function startHarness({
 		/** Everything the bridge logged, in order. */
 		logs,
 		artifactsDir,
+		designDir,
 		yoqa,
 		async callTool(name: string, args: Record<string, unknown> = {}) {
 			return client.callTool({ name, arguments: args });
@@ -109,6 +124,7 @@ type FakeDocument = {
 	flows: ReturnType<typeof createFakeFlows>;
 	motion: ReturnType<typeof createFakeMotion>;
 	restructure: ReturnType<typeof createFakeRestructure>;
+	screens: ReturnType<typeof createFakeScreens>;
 };
 
 /** A copy of the document fixture that this fake plugin's edits change. */
@@ -123,13 +139,22 @@ function fakeDocument(): FakeDocument {
 		flows: createFakeFlows(copy),
 		motion: createFakeMotion(copy),
 		restructure: createFakeRestructure(copy, nextId),
+		screens: createFakeScreens(copy, nextId),
 	};
 }
 
 /** Answers server requests from the plugin's document and the fixtures. */
 function answer(
 	message: ServerMessage,
-	{ document, editor, reactions, flows, motion, restructure }: FakeDocument,
+	{
+		document,
+		editor,
+		reactions,
+		flows,
+		motion,
+		restructure,
+		screens,
+	}: FakeDocument,
 	exportPng: FakePluginOptions["exportPng"],
 ): Response | undefined {
 	if (message.type !== "request") return undefined;
@@ -244,6 +269,15 @@ function answer(
 			const handle = motion[command] as (params: unknown) => object;
 			return okOrFailure(handle(params));
 		}
+		case "push_screens":
+		case "read_screens":
+		case "link_file":
+		case "get_image": {
+			const { command } = message;
+			const params = commands[command].params.parse(message.params);
+			const handle = screens[command] as (params: unknown) => object;
+			return okOrFailure(handle(params));
+		}
 		default:
 			return replayExchange(message);
 	}
@@ -280,7 +314,8 @@ type FakePluginOptions = {
 	host?: string;
 };
 
-async function connectFakePlugin(
+/** Connects a fake plugin to a bridge on `port`, such as one the CLI hosts. */
+export async function connectFakePlugin(
 	port: number,
 	{
 		handshake = handshakeFixture,
@@ -314,6 +349,8 @@ async function connectFakePlugin(
 	return {
 		/** This plugin's copy of the document fixture, edits included. */
 		document: fake.document,
+		/** The frames Push made, which tests edit as a designer would. */
+		screens: fake.screens,
 		/** Requests the server sent this plugin, in order. */
 		requests,
 		/** Resolves when the connection closes, from either side. */

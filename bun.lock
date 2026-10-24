@@ -43,10 +43,13 @@
       "name": "@figma-agent-tool/mcp-server",
       "version": "0.0.0",
       "bin": {
+        "figma-agent-tool": "./dist/cli.js",
         "figma-agent-mcp": "./dist/main.js",
       },
       "dependencies": {
+        "@figma-agent-tool/design-project": "workspace:*",
         "@figma-agent-tool/handoff": "workspace:*",
+        "@figma-agent-tool/preview": "workspace:*",
         "@figma-agent-tool/protocol": "workspace:*",
         "@figma-agent-tool/visual-diff": "workspace:*",
         "@modelcontextprotocol/sdk": "^1.32.1",
@@ -55,6 +58,16 @@
       "devDependencies": {
         "@types/pngjs": "^6.0.5",
         "pngjs": "^7.0.0",
+      },
+    },
+    "packages/preview": {
+      "name": "@figma-agent-tool/preview",
+      "version": "0.0.0",
+      "dependencies": {
+        "@figma-agent-tool/design-project": "workspace:*",
+      },
+      "devDependencies": {
+        "@figma-agent-tool/protocol": "workspace:*",
       },
     },
     "packages/protocol": {
@@ -112,6 +125,8 @@
     "@figma-agent-tool/handoff": ["@figma-agent-tool/handoff@workspace:packages/handoff"],
 
     "@figma-agent-tool/mcp-server": ["@figma-agent-tool/mcp-server@workspace:packages/mcp-server"],
+
+    "@figma-agent-tool/preview": ["@figma-agent-tool/preview@workspace:packages/preview"],
 
     "@figma-agent-tool/protocol": ["@figma-agent-tool/protocol@workspace:packages/protocol"],
 

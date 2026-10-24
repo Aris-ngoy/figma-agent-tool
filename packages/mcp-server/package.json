@@ -4,17 +4,20 @@
 	"private": true,
 	"type": "module",
 	"bin": {
+		"figma-agent-tool": "./dist/cli.js",
 		"figma-agent-mcp": "./dist/main.js"
 	},
 	"scripts": {
-		"build": "bun build src/main.ts --target bun --outdir dist",
+		"build": "bun build src/main.ts src/cli.ts --target bun --outdir dist",
 		"start": "bun src/main.ts",
 		"lint": "biome lint .",
 		"typecheck": "tsc --noEmit",
 		"test": "bun test"
 	},
 	"dependencies": {
+		"@figma-agent-tool/design-project": "workspace:*",
 		"@figma-agent-tool/handoff": "workspace:*",
+		"@figma-agent-tool/preview": "workspace:*",
 		"@figma-agent-tool/protocol": "workspace:*",
 		"@figma-agent-tool/visual-diff": "workspace:*",
 		"@modelcontextprotocol/sdk": "^1.32.1",

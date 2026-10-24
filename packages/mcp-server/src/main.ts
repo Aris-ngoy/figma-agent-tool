@@ -55,6 +55,7 @@ const server = createMcpServer({
 		baseUrl: urlEnv("FIGMA_AGENT_YOQA_URL", DEFAULT_YOQA_URL),
 	}),
 	artifactsDir: process.env.FIGMA_AGENT_ARTIFACTS_DIR || undefined,
+	designDir: process.env.FIGMA_AGENT_DESIGN_DIR || undefined,
 });
 await server.connect(new StdioServerTransport());
 

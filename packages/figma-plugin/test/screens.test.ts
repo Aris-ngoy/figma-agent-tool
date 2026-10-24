@@ -6,6 +6,7 @@ import {
 	checkScreen,
 	hasUnpulledChanges,
 	loadProject,
+	pushedImageRecords,
 	type ScreenFile,
 	screenPush,
 } from "@figma-agent-tool/design-project";
@@ -62,7 +63,7 @@ async function push(
 	baseline?: Baseline,
 	page = { name: "Screens" },
 ) {
-	const { tree, images, imageShas } = await screenPush(
+	const { tree, images, sources } = await screenPush(
 		login.project,
 		login.screen,
 		login.root,
@@ -74,17 +75,7 @@ async function push(
 		images,
 	});
 	const frame = result.screens[0]?.frame as SyncedNode;
-	const imageRecords = Object.fromEntries(
-		Object.entries(imageShas).map(([src, sha256]) => [
-			src,
-			{
-				imageHash:
-					baseline?.images[src]?.imageHash ??
-					(Object.values(result.images)[0] as string),
-				sha256,
-			},
-		]),
-	);
+	const imageRecords = pushedImageRecords(sources, result.images);
 	return {
 		result,
 		frame,

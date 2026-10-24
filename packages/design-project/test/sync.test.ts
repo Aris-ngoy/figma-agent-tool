@@ -9,6 +9,7 @@ import {
 	type DesignProject,
 	hasUnpulledChanges,
 	pullScreen,
+	pushedImageRecords,
 	type ScreenFile,
 	screenPush,
 } from "../src";
@@ -24,7 +25,7 @@ async function push(
 	const keyed = { ...screen, source };
 	const { root } = checkScreen(project, keyed);
 	if (!root) throw new Error("Screen doesn't check");
-	const { tree, images, imageShas } = await screenPush(
+	const { tree, images, sources } = await screenPush(
 		project,
 		keyed,
 		root,
@@ -35,17 +36,10 @@ async function push(
 		nextId: () => `9:${++id}`,
 		imageHash: (name) => `hash-of-${name}`,
 	});
-	const imageRecords = Object.fromEntries(
-		Object.entries(imageShas).map(([src, sha256]) => [
-			src,
-			{
-				imageHash:
-					previous?.baseline.images[src]?.imageHash ??
-					`hash-of-${Object.keys(images)[0]}`,
-				sha256,
-			},
-		]),
+	const hashes = Object.fromEntries(
+		Object.keys(images).map((name) => [name, `hash-of-${name}`]),
 	);
+	const imageRecords = pushedImageRecords(sources, hashes);
 	const baseline = baselineAfterPush(project, source, frame, imageRecords);
 	return { tree, images, frame, baseline, screen: keyed };
 }

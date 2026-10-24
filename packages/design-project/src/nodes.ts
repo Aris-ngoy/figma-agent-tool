@@ -316,6 +316,8 @@ function unsupportedReason(
 		if (!text || text.fontName === "mixed" || text.fontSize === "mixed")
 			return "mixes text styles";
 		if (fill?.type !== "SOLID") return "has text without a solid color";
+		if (/^ | $| {2}|\n | \n/.test(text.characters))
+			return "has spaces HTML would collapse";
 		if (!parseFontStyle(text.fontName.style))
 			return `uses the font style ${text.fontName.style}`;
 		if (node.sizing?.vertical === "FIXED") return "is text with a fixed height";
