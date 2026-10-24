@@ -191,7 +191,7 @@ export async function screenPush(
 			sources[src] = { sha256: sha, imageHash: known.imageHash };
 		} else {
 			// Named by project path, so Screens sharing an image send it once.
-			const name = relative(project.dir, path).split("\\").join("/");
+			const name = posixRelative(project.dir, path);
 			images[name] = bytes.toString("base64");
 			sources[src] = { sha256: sha, image: name };
 		}
@@ -290,8 +290,13 @@ export async function saveImage(
 	);
 	await mkdir(dirname(path), { recursive: true });
 	await writeFile(path, bytes);
-	const src = relative(dirname(screen.path), path).split("\\").join("/");
+	const src = posixRelative(dirname(screen.path), path);
 	return { src, record: { imageHash, sha256: sha256(bytes) } };
+}
+
+/** A relative path with forward slashes, as Screens and image names use. */
+function posixRelative(from: string, to: string): string {
+	return relative(from, to).split("\\").join("/");
 }
 
 function imageExtension(bytes: Uint8Array): string {

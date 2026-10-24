@@ -116,20 +116,21 @@ class Merger {
 			common(local).join() === common(base).join();
 		const [skeleton, other] = figmaReordered ? [figma, local] : [local, figma];
 
+		/** An element's version in one list: by key, or itself when unkeyed. */
+		const versionIn = (
+			list: Element[],
+			byKeyInList: Map<string, Element>,
+			element: Element,
+		): Element | undefined => {
+			if (element.key) return byKeyInList.get(element.key);
+			return list.includes(element) ? element : undefined;
+		};
+
 		/** The merged version of an element in either list, or null to drop it. */
 		const merge = (element: Element): Element | null => {
-			const { key } = element;
-			const inLocal = key
-				? l.get(key)
-				: local.includes(element)
-					? element
-					: undefined;
-			const inFigma = key
-				? f.get(key)
-				: figma.includes(element)
-					? element
-					: undefined;
-			const inBase = key ? b.get(key) : undefined;
+			const inLocal = versionIn(local, l, element);
+			const inFigma = versionIn(figma, f, element);
+			const inBase = element.key ? b.get(element.key) : undefined;
 			if (inLocal && inFigma && inBase)
 				return this.element(inBase, inLocal, inFigma);
 			if (inLocal && inFigma) return inLocal;
@@ -142,8 +143,8 @@ class Merger {
 			return inLocal ? this.conflict(side, null) : this.conflict(null, side);
 		};
 
-		const same = (a: Element, other_: Element) =>
-			a === other_ || (a.key !== undefined && a.key === other_.key);
+		const same = (first: Element, second: Element) =>
+			first === second || (first.key !== undefined && first.key === second.key);
 		const result = skeleton.map((element) => ({
 			source: element,
 			merged: merge(element),

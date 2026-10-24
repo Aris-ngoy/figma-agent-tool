@@ -151,13 +151,14 @@ function fills(
 }
 
 function cornerRadius(radius: string): ScreenNode["cornerRadius"] {
+	const corners = radius.split(" ").map(Number);
 	const [
 		topLeft = 0,
 		topRight = topLeft,
 		bottomRight = topLeft,
 		bottomLeft = topRight,
-	] = radius.split(" ").map(Number);
-	if (radius.split(" ").length === 1) return topLeft;
+	] = corners;
+	if (corners.length === 1) return topLeft;
 	return { topLeft, topRight, bottomRight, bottomLeft };
 }
 

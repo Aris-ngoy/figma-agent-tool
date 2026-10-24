@@ -21,6 +21,7 @@ import { writePngArtifact } from "./artifacts";
 import { type Bridge, BridgeRequestError } from "./bridge";
 import {
 	DesignSyncError,
+	findScreen,
 	pullDesignProject,
 	pushDesignProject,
 	relinkDesignProject,
@@ -133,12 +134,7 @@ export function registerDesignTools(
 		},
 		async ({ screen: name, inline }) => {
 			const project = await loadProject(designDir);
-			const screen = project.screens.find((s) => s.name === name);
-			if (!screen) {
-				throw new DesignProjectError(
-					`No Screen named "${name}": the Design Project has ${project.screens.map((s) => s.name).join(", ") || "no Screens"}.`,
-				);
-			}
+			const screen = findScreen(project, name);
 			const { png } = await renderScreen(project, screen, { screenshot });
 			const structuredContent = await writePngArtifact(
 				artifactsDir,

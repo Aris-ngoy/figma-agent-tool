@@ -89,15 +89,17 @@ function printStyle(element: Element): string {
 		element.kind === "frame" ? ["display:flex"] : [];
 	const { props } = element;
 	const padding = PADDING.map((prop) => props[prop]);
+	const allPadding = padding.every((side) => side !== undefined);
 	for (const prop of PROP_NAMES) {
-		const value = props[prop];
-		if (prop === "padding-top" && padding.every((side) => side !== undefined)) {
-			declarations.push(`padding:${paddingShorthand(padding as string[])}`);
-		}
-		if (value === undefined) continue;
-		if (PADDING.includes(prop) && padding.every((side) => side !== undefined))
+		if (allPadding && PADDING.includes(prop)) {
+			// The four sides print as one shorthand, where padding-top goes.
+			if (prop === "padding-top") {
+				declarations.push(`padding:${paddingShorthand(padding as string[])}`);
+			}
 			continue;
-		declarations.push(`${prop}:${value}`);
+		}
+		const value = props[prop];
+		if (value !== undefined) declarations.push(`${prop}:${value}`);
 	}
 	return declarations.join("; ");
 }

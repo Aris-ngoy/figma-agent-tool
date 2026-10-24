@@ -62,13 +62,25 @@ function checkBridgedFile(bridge: Bridge, link: Link) {
 	}
 }
 
+/** `file:line element [rule] message`, as the CLI and refusals print a Check error. */
+export function formatCheckError(error: CheckError): string {
+	const element = error.element ? ` ${error.element}` : "";
+	return `${error.file}:${error.line}${element} [${error.rule}] ${error.message}`;
+}
+
 function describeErrors(errors: CheckError[]): string {
-	return errors
-		.map(
-			(error) =>
-				`- ${error.file}:${error.line}${error.element ? ` ${error.element}` : ""} [${error.rule}] ${error.message}`,
-		)
-		.join("\n");
+	return errors.map((error) => `- ${formatCheckError(error)}`).join("\n");
+}
+
+/** The Screen with this name, or a DesignSyncError listing the Screens there are. */
+export function findScreen(project: DesignProject, name: string): ScreenFile {
+	const screen = project.screens.find((s) => s.name === name);
+	if (!screen) {
+		throw new DesignSyncError(
+			`No Screen named "${name}": the Design Project has ${project.screens.map((s) => s.name).join(", ") || "no Screens"}.`,
+		);
+	}
+	return screen;
 }
 
 export type PushResult =
@@ -141,13 +153,12 @@ export async function pushDesignProject(
 
 	const baselines = await readBaselines(project);
 	const frames = await readFrames(bridge, screens, baselines);
-	const unpulled = screens.filter((screen) => {
-		const baseline = baselines.get(screen.name);
-		const frame = frames.get(screen.name);
-		return (
-			baseline && frame && hasUnpulledChanges(project, screen, baseline, frame)
-		);
-	});
+	const unpulled = screensWithUnpulledChanges(
+		project,
+		screens,
+		baselines,
+		frames,
+	);
 	if (unpulled.length > 0) {
 		throw new DesignSyncError(
 			`Push refused: ${unpulled.map((screen) => `${screen.name} (frame “${frames.get(screen.name)?.name}”)`).join(", ")} ${unpulled.length === 1 ? "has" : "have"} Unpulled Changes: a designer edited ${unpulled.length === 1 ? "its frame" : "their frames"} in Figma. Pull first; it merges their edits into the Screens.`,
@@ -239,14 +250,22 @@ function selectScreens(
 	only: string[] | undefined,
 ): ScreenFile[] {
 	if (!only || only.length === 0) return project.screens;
-	return only.map((name) => {
-		const screen = project.screens.find((s) => s.name === name);
-		if (!screen) {
-			throw new DesignSyncError(
-				`No Screen named "${name}": the Design Project has ${project.screens.map((s) => s.name).join(", ") || "no Screens"}.`,
-			);
-		}
-		return screen;
+	return only.map((name) => findScreen(project, name));
+}
+
+/** The Screens whose frames a designer edited since their Baseline. */
+function screensWithUnpulledChanges(
+	project: DesignProject,
+	screens: ScreenFile[],
+	baselines: Map<string, Baseline>,
+	frames: Map<string, SyncedNode>,
+): ScreenFile[] {
+	return screens.filter((screen) => {
+		const baseline = baselines.get(screen.name);
+		const frame = frames.get(screen.name);
+		return (
+			baseline && frame && hasUnpulledChanges(project, screen, baseline, frame)
+		);
 	});
 }
 
@@ -406,17 +425,12 @@ export async function designProjectStatus(
 		const baselines = await readBaselines(project);
 		try {
 			const frames = await readFrames(bridge, project.screens, baselines);
-			unpulledChanges = project.screens
-				.filter((screen) => {
-					const baseline = baselines.get(screen.name);
-					const frame = frames.get(screen.name);
-					return (
-						baseline &&
-						frame &&
-						hasUnpulledChanges(project, screen, baseline, frame)
-					);
-				})
-				.map((screen) => screen.name);
+			unpulledChanges = screensWithUnpulledChanges(
+				project,
+				project.screens,
+				baselines,
+				frames,
+			).map((screen) => screen.name);
 		} catch {
 			unpulledChanges = null;
 		}

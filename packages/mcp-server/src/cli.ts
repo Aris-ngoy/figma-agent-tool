@@ -22,6 +22,7 @@ import { DEFAULT_BRIDGE_PORT } from "@figma-agent-tool/protocol";
 import { type Bridge, BridgeRequestError, startBridge } from "./bridge";
 import {
 	DesignSyncError,
+	formatCheckError,
 	pullDesignProject,
 	pushDesignProject,
 	relinkDesignProject,
@@ -163,9 +164,7 @@ async function check(dir: string, io: CliIo): Promise<number> {
 	const project = await loadProject(dir);
 	const { errors } = await checkProject(project);
 	for (const error of errors) {
-		io.out(
-			`${error.file}:${error.line}${error.element ? ` ${error.element}` : ""} [${error.rule}] ${error.message}`,
-		);
+		io.out(formatCheckError(error));
 	}
 	io.out(
 		errors.length === 0
@@ -247,6 +246,11 @@ async function withBridge(
 	}
 }
 
+/** The user's answer; no without a terminal to ask on. */
+async function ask(io: CliIo, question: string): Promise<boolean> {
+	return io.confirm ? io.confirm(question) : false;
+}
+
 async function push(
 	dir: string,
 	bridge: Bridge,
@@ -257,7 +261,7 @@ async function push(
 	let result = await pushDesignProject(dir, bridge, { screens });
 	if (result.status === "confirm_link") {
 		const question = `Link the Design Project to the Bridged File, “${result.file.name}”? Push and Pull will only work with that file.`;
-		const confirmed = yes || (io.confirm ? await io.confirm(question) : false);
+		const confirmed = yes || (await ask(io, question));
 		if (!confirmed) {
 			io.err(`${question}\nNot linked. Run push again with --yes to confirm.`);
 			return 1;
@@ -308,7 +312,7 @@ async function relink(
 	const status = bridge.status();
 	const name = status.connected ? status.file.name : "the Bridged File";
 	const question = `Relink the Design Project to “${name}”? The next Push creates new frames there.`;
-	const confirmed = yes || (io.confirm ? await io.confirm(question) : false);
+	const confirmed = yes || (await ask(io, question));
 	if (!confirmed) {
 		io.err(
 			`${question}\nNot relinked. Run relink again with --yes to confirm.`,
