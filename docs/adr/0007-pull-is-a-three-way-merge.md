@@ -1,0 +1,3 @@
+# Pull is a three-way merge against a Baseline
+
+Pull merges Figma's changes into a Screen against its Baseline (the version at the last Push or Pull) instead of overwriting the file, and writes Sync Conflicts into the file where both sides changed the same element. Without it, a Screen the Agent edited and a frame a designer edited would deadlock: Push refuses because of Unpulled Changes, and an overwriting Pull would lose the Agent's work. Agents resolve conflict markers well, and Push stays refused until none remain. The cost is that the tool must store a Baseline for every Screen, Component and the Design System.

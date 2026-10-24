@@ -276,6 +276,8 @@ type FakePluginOptions = {
 	answers?: boolean;
 	/** Base64 PNG to export for a node and scale; fixtures otherwise. */
 	exportPng?: (nodeId: string, scale: number) => string | undefined;
+	/** Loopback address to connect to, as a URL host. */
+	host?: string;
 };
 
 async function connectFakePlugin(
@@ -284,9 +286,10 @@ async function connectFakePlugin(
 		handshake = handshakeFixture,
 		answers = true,
 		exportPng,
+		host = "127.0.0.1",
 	}: FakePluginOptions,
 ) {
-	const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+	const socket = new WebSocket(`ws://${host}:${port}`);
 	const requests: Request[] = [];
 	const fake = fakeDocument();
 	const closed = new Promise<CloseEvent>((resolve) =>
