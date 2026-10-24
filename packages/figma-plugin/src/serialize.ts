@@ -143,7 +143,7 @@ function styleIds(node: BaseNode): SerializedNode["styles"] {
 	return Object.keys(out).length > 0 ? out : undefined;
 }
 
-function cornerRadius(
+export function cornerRadius(
 	node: {
 		cornerRadius?: number | PluginAPI["mixed"];
 	} & Partial<RectangleCornerMixin>,
@@ -221,7 +221,7 @@ export function effect(e: Effect): EffectInfo {
 	}
 }
 
-function text(node: TextNode): TextInfo {
+export function text(node: TextNode): TextInfo {
 	const info: TextInfo = {
 		characters: node.characters,
 		fontName: node.fontName === figma.mixed ? "mixed" : node.fontName,

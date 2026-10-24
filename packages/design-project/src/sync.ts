@@ -1,0 +1,452 @@
+// The sync state a Design Project commits in sync/ (the Linked File, and per
+// Screen its Baseline and element ↔ node ID map), and the pure steps of Push
+// and Pull around the Plugin's reads and writes.
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join, relative } from "node:path";
+import type {
+	FileInfo,
+	ScreenFill,
+	ScreenNode,
+	SyncedNode,
+} from "@figma-agent-tool/protocol";
+import type { Tokens } from "./design-md";
+import { assignElementKeys, elementKeys } from "./keys";
+import { mergeScreen } from "./merge";
+import { fromSyncedNode, toScreenNode, type UnsupportedLayer } from "./nodes";
+import { printScreen } from "./print";
+import { type DesignProject, imagePath, type ScreenFile } from "./project";
+import { type ResolveContext, sameElement } from "./resolve";
+import { type Element, parseScreen } from "./screen";
+import type { Kind } from "./subset";
+
+/** The Linked File, as the first Push (or a re-link) recorded it. */
+export type Link = {
+	/** Stored in the file too, so the tool knows it even without a file key. */
+	linkId: string;
+	file: FileInfo;
+	screensPage: { id: string; name: string };
+};
+
+export type ImageRecord = { imageHash: string; sha256: string };
+
+/** A Screen as of its last Push or Pull, and where its elements went. */
+export type Baseline = {
+	frameId: string;
+	source: string;
+	/** The token values the Baseline's source was written against. */
+	tokens: Record<string, string>;
+	/** Element key → node ID. */
+	nodes: Record<string, string>;
+	/** Image `src` → the Figma image made from it. */
+	images: Record<string, ImageRecord>;
+};
+
+const linkPath = (project: { dir: string }) =>
+	join(project.dir, "sync", "link.json");
+const baselinePath = (project: { dir: string }, name: string) =>
+	join(project.dir, "sync", "screens", `${name}.json`);
+
+export async function readLink(project: {
+	dir: string;
+}): Promise<Link | undefined> {
+	return readJson(linkPath(project));
+}
+
+export async function writeLink(project: { dir: string }, link: Link) {
+	await writeJson(linkPath(project), link);
+}
+
+export async function readBaseline(
+	project: { dir: string },
+	name: string,
+): Promise<Baseline | undefined> {
+	return readJson(baselinePath(project, name));
+}
+
+export async function writeBaseline(
+	project: { dir: string },
+	name: string,
+	baseline: Baseline,
+) {
+	await writeJson(baselinePath(project, name), baseline);
+}
+
+/** Every Screen with a Baseline, by name. */
+export async function readBaselines(project: {
+	dir: string;
+}): Promise<Map<string, Baseline>> {
+	const dir = join(project.dir, "sync", "screens");
+	if (!existsSync(dir)) return new Map();
+	const names = (await readdir(dir))
+		.filter((file) => file.endsWith(".json"))
+		.sort();
+	const entries = await Promise.all(
+		names.map(async (file) => {
+			const name = file.slice(0, -".json".length);
+			return [name, (await readBaseline(project, name)) as Baseline] as const;
+		}),
+	);
+	return new Map(entries);
+}
+
+/** Forgets every Screen's frame, as a re-link to another file does. */
+export async function clearBaselines(project: { dir: string }) {
+	await rm(join(project.dir, "sync", "screens"), {
+		recursive: true,
+		force: true,
+	});
+}
+
+async function readJson<T>(path: string): Promise<T | undefined> {
+	if (!existsSync(path)) return undefined;
+	return JSON.parse(await readFile(path, "utf8")) as T;
+}
+
+async function writeJson(path: string, data: unknown) {
+	await mkdir(dirname(path), { recursive: true });
+	await writeFile(path, `${JSON.stringify(data, null, "\t")}\n`);
+}
+
+function tokenRecord(tokens: Tokens): Record<string, string> {
+	return Object.fromEntries(tokens.variables);
+}
+
+function tokensFrom(record: Record<string, string>): Tokens {
+	return { variables: new Map(Object.entries(record)) };
+}
+
+export function resolveContext(
+	project: DesignProject,
+	screen: { name: string },
+): ResolveContext {
+	return {
+		tokens: project.tokens,
+		screenName: screen.name,
+		screenSize: project.config.screenSize,
+	};
+}
+
+function baselineContext(
+	project: DesignProject,
+	screen: { name: string },
+	baseline: Baseline,
+) {
+	return {
+		...resolveContext(project, screen),
+		tokens: tokensFrom(baseline.tokens),
+	};
+}
+
+/** Parses a Baseline's source against the tokens it was written with. */
+export function baselineRoot(screen: ScreenFile, baseline: Baseline): Element {
+	const { root } = parseScreen(screen.file, baseline.source, {
+		tokens: tokensFrom(baseline.tokens),
+		imageExists: () => true,
+	});
+	if (!root) throw new Error(`The Baseline of ${screen.file} doesn't parse.`);
+	return root;
+}
+
+const sha256 = (bytes: Uint8Array) =>
+	createHash("sha256").update(bytes).digest("hex");
+
+/** The node tree a checked Screen (every element keyed) pushes as, with image bytes to send. */
+export async function screenPush(
+	project: DesignProject,
+	screen: ScreenFile,
+	root: Element,
+	baseline: Baseline | undefined,
+): Promise<{
+	tree: ScreenNode;
+	images: Record<string, string>;
+	imageShas: Record<string, string>;
+}> {
+	const images: Record<string, string> = {};
+	const imageShas: Record<string, string> = {};
+	const srcs = new Set<string>();
+	const walk = (element: Element) => {
+		if (element.src) srcs.add(element.src);
+		element.children.forEach(walk);
+	};
+	walk(root);
+	const fills = new Map<string, { imageHash: string } | { image: string }>();
+	for (const src of srcs) {
+		const path = imagePath(project, screen, src) as string;
+		const bytes = await readFile(path);
+		const sha = sha256(bytes);
+		imageShas[src] = sha;
+		const known = baseline?.images[src];
+		if (known?.sha256 === sha) {
+			fills.set(src, { imageHash: known.imageHash });
+		} else {
+			// Named by project path, so Screens sharing an image send it once.
+			const name = relative(project.dir, path).split("\\").join("/");
+			images[name] = bytes.toString("base64");
+			fills.set(src, { image: name });
+		}
+	}
+	const tree = toScreenNode(root, {
+		...resolveContext(project, screen),
+		nodeIds: baseline?.nodes ?? {},
+		imageFill: (src, scaleMode) =>
+			({ type: "IMAGE", scaleMode, ...fills.get(src) }) as ScreenFill,
+	});
+	return { tree, images, imageShas };
+}
+
+/** The Baseline after a Push: the pushed source and where each element landed. */
+export function baselineAfterPush(
+	project: DesignProject,
+	source: string,
+	frame: SyncedNode,
+	images: Record<string, ImageRecord>,
+): Baseline {
+	return {
+		frameId: frame.id,
+		source,
+		tokens: tokenRecord(project.tokens),
+		nodes: nodeMap(frame),
+		images,
+	};
+}
+
+function nodeMap(frame: SyncedNode): Record<string, string> {
+	const nodes: Record<string, string> = {};
+	const walk = (node: SyncedNode) => {
+		if (node.key) nodes[node.key] = node.id;
+		node.children?.forEach(walk);
+	};
+	walk(frame);
+	return nodes;
+}
+
+/** Image hashes in a frame that the Baseline has no `src` for. */
+export function unknownImages(frame: SyncedNode, baseline: Baseline): string[] {
+	const known = new Set(
+		Object.values(baseline.images).map((image) => image.imageHash),
+	);
+	const unknown = new Set<string>();
+	const walk = (node: SyncedNode) => {
+		if (node.fills !== "mixed") {
+			for (const fill of node.fills) {
+				if (
+					fill.type === "IMAGE" &&
+					fill.imageHash &&
+					!known.has(fill.imageHash)
+				) {
+					unknown.add(fill.imageHash);
+				}
+			}
+		}
+		node.children?.forEach(walk);
+	};
+	walk(frame);
+	return [...unknown];
+}
+
+/** Saves an image Pull read from Figma into assets/ and returns its `src` for the Screen. */
+export async function saveImage(
+	project: DesignProject,
+	screen: ScreenFile,
+	imageHash: string,
+	bytes: Uint8Array,
+): Promise<{ src: string; record: ImageRecord }> {
+	const path = join(
+		project.dir,
+		"assets",
+		`${imageHash}.${imageExtension(bytes)}`,
+	);
+	await mkdir(dirname(path), { recursive: true });
+	await writeFile(path, bytes);
+	const src = relative(dirname(screen.path), path).split("\\").join("/");
+	return { src, record: { imageHash, sha256: sha256(bytes) } };
+}
+
+function imageExtension(bytes: Uint8Array): string {
+	if (bytes[0] === 0xff && bytes[1] === 0xd8) return "jpg";
+	if (bytes[0] === 0x47 && bytes[1] === 0x49) return "gif";
+	return "png";
+}
+
+/** A frame read as a Screen against its Baseline; layers outside the subset are listed. */
+export function readFrame(
+	project: DesignProject,
+	screen: ScreenFile,
+	baseline: Baseline,
+	frame: SyncedNode,
+	local?: Element,
+): { root?: Element; unsupported: UnsupportedLayer[] } {
+	const base = baselineRoot(screen, baseline);
+	const ids = new Set<string>();
+	const collect = (node: SyncedNode) => {
+		ids.add(node.id);
+		node.children?.forEach(collect);
+	};
+	collect(frame);
+	const keysById = new Map(
+		Object.entries(baseline.nodes).map(([key, id]) => [id, key]),
+	);
+	const byKey = new Map<string, Element>();
+	const index = (element: Element | undefined) => {
+		if (!element) return;
+		if (element.key && !byKey.has(element.key)) byKey.set(element.key, element);
+		element.children.forEach(index);
+	};
+	index(local);
+	index(base);
+	const baseByKey = new Map<string, Element>();
+	const indexBase = (element: Element) => {
+		if (element.key) baseByKey.set(element.key, element);
+		element.children.forEach(indexBase);
+	};
+	indexBase(base);
+	const srcs = new Map(
+		Object.entries(baseline.images).map(([src, image]) => [
+			image.imageHash,
+			src,
+		]),
+	);
+	const claimed = new Set<string>();
+	return fromSyncedNode(frame, {
+		...resolveContext(project, screen),
+		keyFor: (node) => {
+			const key = layerKey(node, baseline, ids, keysById);
+			// A designer's copy of a layer carries its key too: first one wins.
+			if (!key || claimed.has(key)) return undefined;
+			claimed.add(key);
+			return key;
+		},
+		tagFor: (key: string | undefined, kind: Kind) => {
+			const element = key ? byKey.get(key) : undefined;
+			return element?.kind === kind ? element.tag : undefined;
+		},
+		srcFor: (imageHash) => srcs.get(imageHash),
+		baseElement: (key) => baseByKey.get(key),
+	});
+}
+
+/** A layer's element key: its plugin data, checked against the node ID map. */
+function layerKey(
+	node: SyncedNode,
+	baseline: Baseline,
+	ids: Set<string>,
+	keysById: Map<string, string>,
+): string | undefined {
+	const mapped = keysById.get(node.id);
+	if (mapped) return mapped;
+	if (!node.key) return undefined;
+	const pushedTo = baseline.nodes[node.key];
+	// The layer it was pushed to is gone (cut and pasted): this is it.
+	if (pushedTo === undefined || !ids.has(pushedTo)) return node.key;
+	return undefined;
+}
+
+/** Whether a frame was edited in Figma since the Baseline. */
+export function hasUnpulledChanges(
+	project: DesignProject,
+	screen: ScreenFile,
+	baseline: Baseline,
+	frame: SyncedNode,
+): boolean {
+	const { root } = readFrame(project, screen, baseline, frame);
+	if (!root) return true;
+	const base = baselineRoot(screen, baseline);
+	return !sameElement(
+		base,
+		root,
+		{
+			a: baselineContext(project, screen, baseline),
+			b: resolveContext(project, screen),
+		},
+		true,
+	);
+}
+
+export type ScreenPull = {
+	/** Whether Figma changed the frame since the Baseline. */
+	changed: boolean;
+	/** The merged Screen file, when changed. */
+	source?: string;
+	baseline: Baseline;
+	conflicts: number;
+	unsupported: UnsupportedLayer[];
+};
+
+/**
+ * Merges a frame's changes into a checked Screen. A file Figma didn't change
+ * stays exactly as it is.
+ */
+export function pullScreen(
+	project: DesignProject,
+	screen: ScreenFile,
+	local: Element,
+	baseline: Baseline,
+	frame: SyncedNode,
+	fetchedImages: Record<string, { src: string; record: ImageRecord }> = {},
+): ScreenPull {
+	const images = { ...baseline.images };
+	for (const { src, record } of Object.values(fetchedImages))
+		images[src] = record;
+	const withImages = { ...baseline, images };
+	const { root: figma, unsupported } = readFrame(
+		project,
+		screen,
+		withImages,
+		frame,
+		local,
+	);
+	if (!figma) {
+		return { changed: false, baseline, conflicts: 0, unsupported };
+	}
+	const base = baselineRoot(screen, baseline);
+	const contexts = {
+		base: baselineContext(project, screen, baseline),
+		local: resolveContext(project, screen),
+		figma: resolveContext(project, screen),
+	};
+	const frameMoved = frame.id !== baseline.frameId;
+	if (sameElement(base, figma, { a: contexts.base, b: contexts.figma }, true)) {
+		const unchanged = { ...withImages, frameId: frame.id };
+		return {
+			changed: false,
+			baseline: frameMoved ? unchanged : baseline,
+			conflicts: 0,
+			unsupported,
+		};
+	}
+	const merged = mergeScreen(base, local, figma, contexts);
+	assignElementKeys(figma, [
+		...elementKeys(local),
+		...elementKeys(merged.root),
+	]);
+	return {
+		changed: true,
+		source: printScreen(merged.root),
+		baseline: {
+			frameId: frame.id,
+			source: printScreen(figma),
+			tokens: tokenRecord(project.tokens),
+			nodes: elementNodeMap(figma, baseline.nodes),
+			images,
+		},
+		conflicts: merged.conflicts,
+		unsupported,
+	};
+}
+
+/** Element key → node ID; elements kept from the Baseline keep their old IDs. */
+function elementNodeMap(
+	root: Element,
+	previous: Record<string, string>,
+): Record<string, string> {
+	const nodes: Record<string, string> = {};
+	const walk = (element: Element) => {
+		const id = element.nodeId ?? (element.key && previous[element.key]);
+		if (element.key && id) nodes[element.key] = id;
+		element.children.forEach(walk);
+	};
+	walk(root);
+	return nodes;
+}

@@ -533,10 +533,10 @@ function currentFonts(node: TextNode): FontName[] {
 		: [node.fontName];
 }
 
-const fontKey = (font: FontName) => `${font.family} ${font.style}`;
+export const fontKey = (font: FontName) => `${font.family} ${font.style}`;
 
 /** Loads each distinct font once, all at the same time; returns those that failed. */
-async function loadFonts(fonts: FontName[]): Promise<Set<string>> {
+export async function loadFonts(fonts: FontName[]): Promise<Set<string>> {
 	const unique = new Map(fonts.map((font) => [fontKey(font), font]));
 	const failed = new Set<string>();
 	await Promise.all(

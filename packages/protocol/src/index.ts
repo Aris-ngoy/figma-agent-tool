@@ -33,6 +33,9 @@ export const Handshake = z.object({
 	pluginVersion: z.string(),
 	file: FileInfo,
 	capabilities: Capabilities,
+	// The Link ID a Design Project stored in the file on its first Push (null
+	// when none has). It identifies the Linked File even without a file key.
+	linkId: z.string().nullable().optional(),
 });
 export type Handshake = z.infer<typeof Handshake>;
 
@@ -1447,6 +1450,174 @@ export function notAGroupError(node: TreeNode): BridgeError {
 	};
 }
 
+// Push and Pull: Screens travel as trees of ScreenNodes, which the server
+// builds from Screens and reads back from frames. The plugin only applies a
+// tree in place and reads frames; the server decides everything else.
+
+/** Shared plugin data namespace for the keys Push stores on layers. */
+export const SYNC_NAMESPACE = "figmaagent";
+
+/** Shared plugin data keys: a frame's Screen, a layer's element key, the file's Link ID. */
+export const SYNC_KEYS = {
+	screen: "screen",
+	element: "key",
+	link: "link",
+} as const;
+
+const ScreenSizing = z.object({ horizontal: Sizing, vertical: Sizing });
+
+const ScreenLayout = z.object({
+	mode: z.enum(["HORIZONTAL", "VERTICAL"]),
+	itemSpacing: z.number(),
+	padding: z.object({
+		top: z.number(),
+		right: z.number(),
+		bottom: z.number(),
+		left: z.number(),
+	}),
+	primaryAxisAlignItems: z.enum(["MIN", "CENTER", "MAX", "SPACE_BETWEEN"]),
+	counterAxisAlignItems: z.enum(["MIN", "CENTER", "MAX"]),
+	wrap: z.boolean(),
+});
+
+/**
+ * A fill Push sets: a solid, or an image given by its Figma hash or by a
+ * name in the push's `images`, whose bytes the plugin turns into one.
+ */
+export const ScreenFill = z.union([
+	z.object({
+		type: z.literal("SOLID"),
+		color: HexColor,
+		opacity: z.number().min(0).max(1).optional(),
+	}),
+	z.object({
+		type: z.literal("IMAGE"),
+		scaleMode: z.enum(["FILL", "FIT"]),
+		imageHash: z.string().min(1),
+	}),
+	z.object({
+		type: z.literal("IMAGE"),
+		scaleMode: z.enum(["FILL", "FIT"]),
+		image: z.string().min(1),
+	}),
+]);
+export type ScreenFill = z.infer<typeof ScreenFill>;
+
+export type ScreenNode = {
+	// The layer to update in place; absent to create one.
+	id?: string;
+	// The Screen element's stable key, stored in the layer's shared plugin data.
+	key: string;
+	type: "FRAME" | "TEXT" | "RECTANGLE";
+	// Absent on TEXT: Figma names it after its characters.
+	name?: string;
+	// The size on FIXED axes.
+	width: number;
+	height: number;
+	// Ignored on the top-level frame, which is FIXED.
+	sizing: z.infer<typeof ScreenSizing>;
+	layout?: z.infer<typeof ScreenLayout>;
+	fills: ScreenFill[];
+	cornerRadius?: z.infer<typeof CornerRadius>;
+	opacity?: number;
+	text?: {
+		characters: string;
+		fontName: z.infer<typeof FontName>;
+		fontSize: number;
+		textAlignHorizontal: "LEFT" | "CENTER" | "RIGHT" | "JUSTIFIED";
+	};
+	children?: ScreenNode[];
+};
+
+/** A layer as Push wants it; the whole state, not a patch. */
+export const ScreenNode: z.ZodType<ScreenNode> = z.object({
+	id: z.string().min(1).optional(),
+	key: z.string().min(1),
+	type: z.enum(["FRAME", "TEXT", "RECTANGLE"]),
+	name: z.string().optional(),
+	width: z.number().positive(),
+	height: z.number().positive(),
+	sizing: ScreenSizing,
+	layout: ScreenLayout.optional(),
+	fills: z.array(ScreenFill),
+	cornerRadius: CornerRadius.optional(),
+	opacity: z.number().min(0).max(1).optional(),
+	text: z
+		.object({
+			characters: z.string(),
+			fontName: FontName,
+			fontSize: z.number().positive(),
+			textAlignHorizontal: z.enum(["LEFT", "CENTER", "RIGHT", "JUSTIFIED"]),
+		})
+		.optional(),
+	get children() {
+		return z.array(ScreenNode).optional();
+	},
+});
+
+export type SyncedNode = {
+	id: string;
+	// The element key in the layer's shared plugin data; null if it has none.
+	key: string | null;
+	type: string;
+	name: string;
+	visible: boolean;
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+	rotation: number;
+	opacity: number;
+	sizing?: z.infer<typeof ScreenSizing>;
+	// Frames only; mode NONE is a frame without auto layout.
+	layout?: Omit<
+		z.infer<typeof ScreenLayout>,
+		"mode" | "primaryAxisAlignItems" | "counterAxisAlignItems"
+	> & {
+		mode: string;
+		primaryAxisAlignItems: string;
+		counterAxisAlignItems: string;
+	};
+	fills: Paint[] | "mixed";
+	strokes: number;
+	effects: number;
+	cornerRadius: z.infer<typeof CornerRadius>;
+	text?: TextInfo;
+	children?: SyncedNode[];
+};
+
+/**
+ * A layer as Pull reads it, at full depth: everything a Screen element can
+ * express, plus enough to tell when a layer uses more than that.
+ */
+export const SyncedNode: z.ZodType<SyncedNode> = z.object({
+	id: z.string(),
+	key: z.string().nullable(),
+	type: z.string(),
+	name: z.string(),
+	visible: z.boolean(),
+	x: z.number(),
+	y: z.number(),
+	width: z.number(),
+	height: z.number(),
+	rotation: z.number(),
+	opacity: z.number(),
+	sizing: ScreenSizing.optional(),
+	layout: ScreenLayout.extend({
+		mode: z.string(),
+		primaryAxisAlignItems: z.string(),
+		counterAxisAlignItems: z.string(),
+	}).optional(),
+	fills: z.union([z.array(Paint), Mixed]),
+	strokes: z.number().int(),
+	effects: z.number().int(),
+	cornerRadius: CornerRadius,
+	text: TextInfo.optional(),
+	get children() {
+		return z.array(SyncedNode).optional();
+	},
+});
+
 /** How many levels of children to include below each returned node. */
 export const Depth = z.number().int().min(0).max(100);
 export const DEFAULT_DEPTH = 2;
@@ -1616,6 +1787,54 @@ export const commands = {
 		}),
 		result: NodeMotion,
 	},
+	// Push: applies each Screen's tree to its frame in place (creating the
+	// frame on the Screens Page when it has none), as one undo step.
+	push_screens: {
+		params: z.object({
+			// The Screens Page: found by ID, else by name, else created.
+			page: z.object({ id: z.string().min(1).optional(), name: z.string() }),
+			screens: z
+				.array(
+					z.object({
+						screen: z.string().min(1),
+						frameId: z.string().min(1).optional(),
+						tree: ScreenNode,
+					}),
+				)
+				.min(1),
+			// Image bytes (base64) by the name IMAGE fills give in `image`.
+			images: z.record(z.string(), z.base64()).default({}),
+		}),
+		result: z.object({
+			page: PageRef,
+			// The Figma image hash each entry of `images` became.
+			images: z.record(z.string(), z.string()),
+			screens: z.array(z.object({ screen: z.string(), frame: SyncedNode })),
+		}),
+	},
+	// Pull: reads frames, found by ID or else by the Screen in their shared
+	// plugin data (a cut and pasted frame gets a new ID).
+	read_screens: {
+		params: z.object({
+			screens: z.array(
+				z.object({ screen: z.string().min(1), frameId: z.string().min(1) }),
+			),
+		}),
+		result: z.object({
+			screens: z.array(
+				z.object({ screen: z.string(), frame: SyncedNode.nullable() }),
+			),
+		}),
+	},
+	// Stores a Design Project's Link ID in the file.
+	link_file: {
+		params: z.object({ linkId: z.string().min(1) }),
+		result: z.object({ file: FileInfo, linkId: z.string() }),
+	},
+	get_image: {
+		params: z.object({ imageHash: z.string().min(1) }),
+		result: z.object({ bytes: z.base64() }),
+	},
 } as const;
 
 export type CommandName = keyof typeof commands;
@@ -1635,6 +1854,7 @@ const commandNames = Object.keys(commands) as [CommandName, ...CommandName[]];
 export const DEADLINE_COMMANDS: readonly CommandName[] = [
 	"create_nodes",
 	"update_nodes",
+	"push_screens",
 ];
 
 /**

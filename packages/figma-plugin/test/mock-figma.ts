@@ -331,6 +331,9 @@ export function installMockFigma(
 	function register(node: MockNode, parent?: MockNode): MockNode {
 		node.parent = parent;
 		byId.set(node.id, node);
+		sharedPluginData(node);
+		if (node.type === "TEXT") autoRename(node);
+		if (node.type !== "PAGE") guardSizing(node);
 		// Every canvas node exports the fixture PNG; tests check the settings.
 		node.exportAsync = async (settings: unknown) => {
 			exports.push({ nodeId: node.id, settings });
@@ -488,7 +491,12 @@ export function installMockFigma(
 		return place(toFigmaNode({ id: createdNodeId(++created), ...node }));
 	}
 
-	const pages = document.pages.map((page) => {
+	function mockPage(page: {
+		id: string;
+		name: string;
+		children: SerializedNode[];
+		flows: { nodeId: string; name: string }[];
+	}): MockNode {
 		const children = page.children.map(toFigmaNode);
 		const mockPage: MockNode = {
 			id: page.id,
@@ -524,10 +532,14 @@ export function installMockFigma(
 		};
 		Object.defineProperty(mockPage, RAW_CHILDREN, { value: children });
 		canAppend(mockPage);
+		sharedPluginData(mockPage);
 		for (const child of children) register(child, mockPage);
 		byId.set(page.id, mockPage);
 		return mockPage;
-	});
+	}
+
+	const pages = document.pages.map(mockPage);
+	const images = new Map<string, Uint8Array>();
 
 	const currentPage = pages.find((page) => page.id === document.currentPageId);
 	if (currentPage) {
@@ -543,8 +555,37 @@ export function installMockFigma(
 				storage.set(key, value);
 			},
 		},
-		root: { id: "0:0", name: document.name, type: "DOCUMENT", children: pages },
+		root: sharedPluginData({
+			id: "0:0",
+			name: document.name,
+			type: "DOCUMENT",
+			children: pages,
+		}),
 		currentPage,
+		createPage() {
+			const page = mockPage({
+				id: createdNodeId(++created),
+				name: "Page",
+				children: [],
+				flows: [],
+			});
+			loadedPages.add(page.id);
+			page.parent = mock.root;
+			pages.push(page);
+			return page;
+		},
+		createImage(bytes: Uint8Array) {
+			const hash = `image-${images.size + 1}`;
+			images.set(hash, bytes);
+			return { hash };
+		},
+		getImageByHash(hash: string) {
+			const bytes = images.get(hash);
+			return bytes ? { hash, getBytesAsync: async () => bytes } : null;
+		},
+		base64Decode(data: string) {
+			return new Uint8Array(Buffer.from(data, "base64"));
+		},
 		async getNodeByIdAsync(id: string) {
 			return byId.get(id) ?? null;
 		},
@@ -643,6 +684,64 @@ export function installMockFigma(
 }
 
 const newGeometry = { x: 0, y: 0, width: 100, height: 100 };
+
+/** Shared plugin data, which Figma keeps per node and namespace. */
+function sharedPluginData<T extends Record<string, unknown>>(node: T): T {
+	const data = new Map<string, string>();
+	Object.assign(node, {
+		setSharedPluginData(namespace: string, key: string, value: string) {
+			if (!/^[A-Za-z0-9_.]{3,}$/.test(namespace)) {
+				throw new Error(`Invalid namespace "${namespace}"`);
+			}
+			data.set(`${namespace}/${key}`, value);
+		},
+		getSharedPluginData: (namespace: string, key: string) =>
+			data.get(`${namespace}/${key}`) ?? "",
+	});
+	return node;
+}
+
+/** Like Figma, a text layer with `autoRename` is named after its characters. */
+function autoRename(node: MockNode) {
+	let name = node.name as string;
+	node.autoRename = false;
+	Object.defineProperty(node, "name", {
+		enumerable: true,
+		get: () => (node.autoRename ? node.characters : name),
+		set: (value: string) => {
+			name = value;
+			node.autoRename = false;
+		},
+	});
+}
+
+/**
+ * Like Figma: only children of auto-layout frames can FILL, and only text
+ * and auto-layout frames can HUG.
+ */
+function guardSizing(node: MockNode) {
+	for (const axis of ["layoutSizingHorizontal", "layoutSizingVertical"]) {
+		let sizing = node[axis] ?? "FIXED";
+		Object.defineProperty(node, axis, {
+			enumerable: true,
+			get: () => sizing,
+			set: (value: string) => {
+				const parent = node.parent as MockNode | undefined;
+				if (value === "FILL" && (parent?.layoutMode ?? "NONE") === "NONE") {
+					throw new Error(
+						"FILL can only be set on children of auto-layout frames",
+					);
+				}
+				const hugs =
+					node.type === "TEXT" || (node.layoutMode ?? "NONE") !== "NONE";
+				if (value === "HUG" && !hugs) {
+					throw new Error("HUG can only be set on auto-layout frames and text");
+				}
+				sizing = value;
+			},
+		});
+	}
+}
 
 /**
  * Like Figma with dynamic-page access: `reactions` is read-only and

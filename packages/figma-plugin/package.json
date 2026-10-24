@@ -13,6 +13,7 @@
 		"@figma-agent-tool/protocol": "workspace:*"
 	},
 	"devDependencies": {
+		"@figma-agent-tool/design-project": "workspace:*",
 		"@figma/plugin-typings": "^1.142.0"
 	}
 }
