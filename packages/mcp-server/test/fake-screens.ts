@@ -1,7 +1,10 @@
 // The fake plugin's Push and Pull commands: frames live in serialized form,
 // applied in place with the same rules as the real plugin (shared with the
 // design-project tests), so tests can edit them as a designer would.
-import { applyScreenTree } from "@figma-agent-tool/design-project/fixtures";
+import {
+	applyScreenTree,
+	createFakeDesignSystem,
+} from "@figma-agent-tool/design-project/fixtures";
 import type {
 	BridgeError,
 	CommandParams,
@@ -17,6 +20,7 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 		{ screen: string; pageId: string; frame: SyncedNode }
 	>();
 	const images = new Map<string, string>();
+	const designSystem = createFakeDesignSystem(nextId);
 	let linkId: string | null = null;
 
 	function frameOf(screen: string, frameId: string) {
@@ -28,6 +32,8 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 
 	return {
 		frames,
+		/** The variables and text styles Push made, which tests edit as a designer would. */
+		designSystem,
 		get linkId() {
 			return linkId;
 		},
@@ -42,6 +48,7 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 			page,
 			screens,
 			images: bytes,
+			designSystem: tokens,
 		}: CommandParams<"push_screens">): CommandResult<"push_screens"> {
 			let target =
 				doc.pages.find((p) => p.id === page.id) ??
@@ -57,14 +64,17 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 				hashes[name] = hash;
 			}
 			const pageId = target.id;
+			const pushed = tokens && designSystem.push(tokens);
 			return {
 				page: { id: target.id, name: target.name },
 				images: hashes,
+				...(pushed && { designSystem: pushed }),
 				screens: screens.map(({ screen, frameId, tree }) => {
 					const previous = frameId ? frames.get(frameId) : undefined;
 					const frame = applyScreenTree(tree, previous?.frame, {
 						nextId,
 						imageHash: (name) => hashes[name] as string,
+						designSystem,
 					});
 					if (previous) frames.delete(previous.frame.id);
 					frames.set(frame.id, { screen, pageId, frame });
@@ -79,9 +89,20 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 			return {
 				screens: screens.map(({ screen, frameId }) => {
 					const entry = frameOf(screen, frameId);
-					return { screen, frame: entry ? structuredClone(entry.frame) : null };
+					return {
+						screen,
+						frame: entry
+							? designSystem.resolve(structuredClone(entry.frame))
+							: null,
+					};
 				}),
 			};
+		},
+
+		read_design_system(
+			params: CommandParams<"read_design_system">,
+		): CommandResult<"read_design_system"> {
+			return designSystem.read(params);
 		},
 
 		link_file({

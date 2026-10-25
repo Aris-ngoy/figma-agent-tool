@@ -69,6 +69,10 @@ In a scratch repo, with the MCP server's working directory there (or `FIGMA_AGEN
 - [ ] Change the same text in Figma and in the file, then `pull`: the file has `<<<<<<< Design Project` / `>>>>>>> Figma` markers, `get_status` lists `syncConflicts`, and `push` is refused. Keep one side, delete the markers, `push`: the frame shows the kept text.
 - [ ] Add a shadow and a vector in Figma, then `pull`: both are listed as kept in Figma, the Screen doesn't change, and the next `push` leaves them as they are.
 - [ ] Cut the frame and paste it back (new node IDs): `pull` still finds it, and `push` updates it rather than making a new one.
+- [ ] After a `push`, the file's local variables have a “Design System” collection with `colors/…`, `spacing/…` and `rounded/…` (aliases where DESIGN.md references a token), and a text style per typography token. Select the frame: its fill, gap and padding show the variables; the title shows its text style.
+- [ ] Change `colors/primary` and the title style's size in Figma: the button and title update, `get_status` lists both under `designSystem.unpulledChanges`, and `push` is refused naming them. `pull`: DESIGN.md gets the new values and nothing else changes (`git diff`), the Screen file doesn't change, and `npx @google/design.md lint design/DESIGN.md` reports no errors.
+- [ ] Change the same token in Figma and in DESIGN.md, then `pull`: DESIGN.md has the markers and `push` is refused until they're resolved.
+- [ ] Unverified against the mock: binding corner radii and padding with `setBoundVariable`, `setTextStyleIdAsync` after the synchronous pass, and creating variables with `createVariable(name, collection, type)`.
 
 ## Agent loop
 

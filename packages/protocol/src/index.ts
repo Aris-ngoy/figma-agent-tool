@@ -1503,6 +1503,103 @@ export const ScreenFill = z.union([
 ]);
 export type ScreenFill = z.infer<typeof ScreenFill>;
 
+/**
+ * The layer fields Push binds to the Design System: `fill` (the first
+ * fill's color), spacing and corner radius to variables, `textStyle` to a
+ * text style. Push gives token paths (`colors.primary`, `typography.title`);
+ * Pull reads the bound variable or style IDs.
+ */
+export const ScreenBindings = z
+	.object({
+		fill: z.string(),
+		itemSpacing: z.string(),
+		paddingTop: z.string(),
+		paddingRight: z.string(),
+		paddingBottom: z.string(),
+		paddingLeft: z.string(),
+		cornerRadius: z.string(),
+		textStyle: z.string(),
+	})
+	.partial();
+export type ScreenBindings = z.infer<typeof ScreenBindings>;
+
+/** The fields of ScreenBindings that bind to FLOAT variables. */
+export const FLOAT_BINDINGS = [
+	"itemSpacing",
+	"paddingTop",
+	"paddingRight",
+	"paddingBottom",
+	"paddingLeft",
+	"cornerRadius",
+] as const;
+
+/**
+ * The Design System as Push wants it in Figma: variables in one collection
+ * (default mode) and text styles, each updated in place by ID or created,
+ * and named by its DESIGN.md token path so bindings and aliases can refer
+ * to it before it exists.
+ */
+export const DesignSystemPush = z.object({
+	// Found by ID, else created.
+	collection: z.object({ id: z.string().min(1).optional(), name: z.string() }),
+	variables: z.array(
+		z.object({
+			token: z.string().min(1),
+			id: z.string().min(1).optional(),
+			name: z.string().min(1),
+			type: z.enum(["COLOR", "FLOAT"]),
+			value: z.union([
+				z.object({
+					color: HexColor,
+					opacity: z.number().min(0).max(1).optional(),
+				}),
+				z.number(),
+				// Another variable of this push, by token path.
+				z.object({ token: z.string().min(1) }),
+			]),
+		}),
+	),
+	textStyles: z.array(
+		TextStyleInfo.omit({ id: true, description: true }).extend({
+			token: z.string().min(1),
+			id: z.string().min(1).optional(),
+		}),
+	),
+	// Variables and text styles a previous Push made that DESIGN.md dropped.
+	remove: z.object({
+		variables: z.array(z.string().min(1)),
+		textStyles: z.array(z.string().min(1)),
+	}),
+});
+export type DesignSystemPush = z.infer<typeof DesignSystemPush>;
+
+/** Where each token of a DesignSystemPush went: collection, variable and style IDs. */
+export const PushedDesignSystem = z.object({
+	collectionId: z.string(),
+	// Token path → ID.
+	variables: z.record(z.string(), z.string()),
+	textStyles: z.record(z.string(), z.string()),
+});
+export type PushedDesignSystem = z.infer<typeof PushedDesignSystem>;
+
+/**
+ * Variables and text styles as Pull reads them: the default mode's value
+ * (aliases by ID) and the value aliases resolve to. Deleted ones are left out.
+ */
+export const SyncedDesignSystem = z.object({
+	variables: z.array(
+		z.object({
+			id: z.string(),
+			name: z.string(),
+			type: VariableInfo.shape.type,
+			value: VariableValue.nullable(),
+			resolved: VariableValue.nullable(),
+		}),
+	),
+	textStyles: z.array(TextStyleInfo),
+});
+export type SyncedDesignSystem = z.infer<typeof SyncedDesignSystem>;
+
 export type ScreenNode = {
 	// The layer to update in place; absent to create one.
 	id?: string;
@@ -1526,6 +1623,8 @@ export type ScreenNode = {
 		fontSize: number;
 		textAlignHorizontal: "LEFT" | "CENTER" | "RIGHT" | "JUSTIFIED";
 	};
+	// Fields bound to the Design System, by token path.
+	bindings?: ScreenBindings;
 	children?: ScreenNode[];
 };
 
@@ -1550,6 +1649,7 @@ export const ScreenNode: z.ZodType<ScreenNode> = z.object({
 			textAlignHorizontal: z.enum(["LEFT", "CENTER", "RIGHT", "JUSTIFIED"]),
 		})
 		.optional(),
+	bindings: ScreenBindings.optional(),
 	get children() {
 		return z.array(ScreenNode).optional();
 	},
@@ -1583,6 +1683,8 @@ export type SyncedNode = {
 	effects: number;
 	cornerRadius: z.infer<typeof CornerRadius>;
 	text?: TextInfo;
+	// Variable and text style IDs; a fill's variable is on the fill.
+	bindings?: Omit<ScreenBindings, "fill">;
 	children?: SyncedNode[];
 };
 
@@ -1613,6 +1715,7 @@ export const SyncedNode: z.ZodType<SyncedNode> = z.object({
 	effects: z.number().int(),
 	cornerRadius: CornerRadius,
 	text: TextInfo.optional(),
+	bindings: ScreenBindings.omit({ fill: true }).optional(),
 	get children() {
 		return z.array(SyncedNode).optional();
 	},
@@ -1804,13 +1907,24 @@ export const commands = {
 				.min(1),
 			// Image bytes (base64) by the name IMAGE fills give in `image`.
 			images: z.record(z.string(), z.base64()).default({}),
+			// Applied first, so the trees' bindings can refer to its tokens.
+			designSystem: DesignSystemPush.optional(),
 		}),
 		result: z.object({
 			page: PageRef,
 			// The Figma image hash each entry of `images` became.
 			images: z.record(z.string(), z.string()),
 			screens: z.array(z.object({ screen: z.string(), frame: SyncedNode })),
+			designSystem: PushedDesignSystem.optional(),
 		}),
+	},
+	// Pull: reads the variables and text styles Push made, by ID.
+	read_design_system: {
+		params: z.object({
+			variables: z.array(z.string().min(1)),
+			textStyles: z.array(z.string().min(1)),
+		}),
+		result: SyncedDesignSystem,
 	},
 	// Pull: reads frames, found by ID or else by the Screen in their shared
 	// plugin data (a cut and pasted frame gets a new ID).

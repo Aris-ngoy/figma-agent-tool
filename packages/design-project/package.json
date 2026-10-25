@@ -14,6 +14,7 @@
 	},
 	"dependencies": {
 		"@figma-agent-tool/protocol": "workspace:*",
+		"@google/design.md": "0.4.0",
 		"yaml": "^2.9.1"
 	}
 }

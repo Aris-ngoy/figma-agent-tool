@@ -85,11 +85,45 @@ export function installMockFigma(
 		defaultModeId: modeId(collection, collection.defaultMode),
 		variableIds: collection.variables.map((variable) => variable.id),
 	}));
-	const variables = new Map(
+	type MockCollection = (typeof collections)[number];
+	type MockVariable = {
+		id: string;
+		name: string;
+		resolvedType: string;
+		description: string;
+		scopes: string[];
+		variableCollectionId: string;
+		valuesByMode: Record<string, unknown>;
+		setValueForMode(modeId: string, value: unknown): void;
+		remove(): void;
+	};
+	/** Like Figma's Variable: values set per mode, and removable. */
+	function mockVariable(
+		variable: Omit<MockVariable, "setValueForMode" | "remove">,
+	): MockVariable {
+		return {
+			...variable,
+			setValueForMode(modeId: string, value: unknown) {
+				this.valuesByMode[modeId] = value;
+			},
+			remove() {
+				variables.delete(this.id);
+				const collection = collections.find(
+					(c) => c.id === this.variableCollectionId,
+				);
+				if (collection) {
+					collection.variableIds = collection.variableIds.filter(
+						(id) => id !== this.id,
+					);
+				}
+			},
+		};
+	}
+	const variables = new Map<string, MockVariable>(
 		document.collections.flatMap((collection) =>
 			collection.variables.map((variable) => [
 				variable.id,
-				{
+				mockVariable({
 					id: variable.id,
 					name: variable.name,
 					resolvedType: variable.type,
@@ -102,11 +136,10 @@ export function installMockFigma(
 							toVariableValue(value as VariableValue),
 						]),
 					),
-				},
+				}),
 			]),
 		),
 	);
-	type MockVariable = NonNullable<ReturnType<typeof variables.get>>;
 
 	/** A variable's value in its collection's default mode, aliases followed. */
 	function resolve(variable: MockVariable): unknown {
@@ -163,6 +196,45 @@ export function installMockFigma(
 			...(motion ? customAnimationStyles : []),
 		].map((style) => [style.id, style]),
 	);
+	/** Like Figma's TextStyle: its font must be loaded to change it. */
+	function mockTextStyle(style: (typeof styles.text)[number]) {
+		let { fontName } = style;
+		const requireLoaded = (font: Font) => {
+			if (!loadedFonts.has(fontKey(font))) {
+				throw new Error(
+					`Cannot write to style with unloaded font "${fontKey(font)}"`,
+				);
+			}
+		};
+		const mocked = Object.assign(style, {
+			remove() {
+				stylesById.delete(style.id);
+				styles.text.splice(styles.text.indexOf(mocked), 1);
+			},
+		});
+		for (const key of ["fontSize", "lineHeight", "letterSpacing"] as const) {
+			let value = style[key];
+			Object.defineProperty(mocked, key, {
+				enumerable: true,
+				get: () => value,
+				set: (next) => {
+					requireLoaded(fontName);
+					value = next;
+				},
+			});
+		}
+		Object.defineProperty(mocked, "fontName", {
+			enumerable: true,
+			get: () => fontName,
+			set: (next: Font) => {
+				requireLoaded(fontName);
+				requireLoaded(next);
+				fontName = next;
+			},
+		});
+		return mocked;
+	}
+	styles.text.forEach(mockTextStyle);
 
 	/** Binding and style setters, which need the file's variables and styles. */
 	function bindable(node: MockNode) {
@@ -597,6 +669,21 @@ export function installMockFigma(
 		},
 		getLocalPaintStylesAsync: async () => styles.paint,
 		getLocalTextStylesAsync: async () => styles.text,
+		createTextStyle() {
+			const style = mockTextStyle({
+				id: `S:created-${++created}`,
+				name: "Text style",
+				description: "",
+				type: "TEXT",
+				fontName: { family: "Inter", style: "Regular" },
+				fontSize: 12,
+				lineHeight: { unit: "AUTO" },
+				letterSpacing: { value: 0, unit: "PERCENT" },
+			} as (typeof styles.text)[number]);
+			styles.text.push(style);
+			stylesById.set(style.id, style);
+			return style;
+		},
 		getLocalEffectStylesAsync: async () => styles.effect,
 		...(motion && {
 			motion: {
@@ -610,6 +697,42 @@ export function installMockFigma(
 			getLocalVariablesAsync: async () => [...variables.values()],
 			async getVariableByIdAsync(id: string) {
 				return variables.get(id) ?? null;
+			},
+			async getVariableCollectionByIdAsync(id: string) {
+				return collections.find((collection) => collection.id === id) ?? null;
+			},
+			createVariableCollection(name: string): MockCollection {
+				const id = `VariableCollectionId:created-${++created}`;
+				const collection = {
+					id,
+					name,
+					modes: [{ modeId: `${id}/mode`, name: "Mode 1" }],
+					defaultModeId: `${id}/mode`,
+					variableIds: [] as string[],
+				};
+				collections.push(collection);
+				return collection;
+			},
+			createVariable(
+				name: string,
+				collection: MockCollection,
+				resolvedType: string,
+			) {
+				const variable = mockVariable({
+					id: `VariableID:created-${++created}`,
+					name,
+					resolvedType,
+					description: "",
+					scopes: ["ALL_SCOPES"],
+					variableCollectionId: collection.id,
+					valuesByMode: {},
+				});
+				variables.set(variable.id, variable);
+				collection.variableIds.push(variable.id);
+				return variable;
+			},
+			createVariableAlias(variable: MockVariable) {
+				return { type: "VARIABLE_ALIAS", id: variable.id };
 			},
 			setBoundVariableForPaint(
 				paint: Record<string, unknown>,

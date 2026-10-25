@@ -1,5 +1,7 @@
 export * from "./design-md";
+export * from "./design-system";
 export * from "./keys";
+export * from "./lint";
 export * from "./merge";
 export * from "./nodes";
 export * from "./print";

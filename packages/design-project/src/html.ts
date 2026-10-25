@@ -48,7 +48,8 @@ export function parseHtml(source: string): {
 	}
 }
 
-function conflictMarkers(source: string): HtmlError[] {
+/** A sync-conflict error at the first Sync Conflict marker line, if any. */
+export function conflictMarkers(source: string): HtmlError[] {
 	const index = source
 		.split("\n")
 		.findIndex((line) => CONFLICT_MARKER.test(line.trimStart()));

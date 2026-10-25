@@ -7,6 +7,7 @@ import type {
 	ScreenNode,
 	SyncedNode,
 } from "@figma-agent-tool/protocol";
+import { elementBindings, type TokenBindings } from "./design-system";
 import { defaultName, type ResolveContext, resolveElement } from "./resolve";
 import type { Element } from "./screen";
 import {
@@ -22,6 +23,8 @@ export type PushContext = ResolveContext & {
 	nodeIds: Record<string, string>;
 	/** The fill an image `src` pushes as. */
 	imageFill: (src: string, scaleMode: "FILL" | "FIT") => ScreenFill;
+	/** The Design System's variables and text styles elements bind to. */
+	bindings?: TokenBindings;
 };
 
 const PRIMARY_ALIGN = {
@@ -84,6 +87,9 @@ function convert(
 		opacity: Number(r.opacity),
 	};
 	if (context.nodeIds[key]) node.id = context.nodeIds[key];
+	const bindings =
+		context.bindings && elementBindings(element, r, context.bindings);
+	if (bindings) node.bindings = bindings;
 	if (element.kind !== "text") {
 		node.name = element.name ?? defaultName(element, context, isRoot);
 		node.cornerRadius = cornerRadius(r["border-radius"] as string);

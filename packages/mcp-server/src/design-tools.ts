@@ -28,6 +28,14 @@ import {
 } from "./design-sync";
 import { jsonResult, registerGuardedTool } from "./figma-tool";
 
+const CheckFinding = z.object({
+	file: z.string(),
+	line: z.number(),
+	element: z.string(),
+	rule: z.string(),
+	message: z.string(),
+});
+
 const EXPECTED = [
 	DesignProjectError,
 	DesignSyncError,
@@ -89,25 +97,22 @@ export function registerDesignTools(
 		"check_design_project",
 		{
 			description:
-				"Check every Screen against the Screen Subset and DESIGN.md's front matter. Each " +
-				"error names the file, line, element (a CSS selector), rule and how to fix it. Push " +
-				"refuses Screens that fail Check.",
+				"Check every Screen against the Screen Subset, and DESIGN.md against the DESIGN.md " +
+				"spec (the rules of `npx @google/design.md lint`, WCAG contrast included). Each " +
+				"finding names the file, line, element (a CSS selector, or a DESIGN.md token path), " +
+				"rule and how to fix it. Push refuses while there are errors; warnings (low " +
+				"contrast, tokens Figma variables can't hold) don't stop it.",
 			outputSchema: {
 				ok: z.boolean(),
-				errors: z.array(
-					z.object({
-						file: z.string(),
-						line: z.number(),
-						element: z.string(),
-						rule: z.string(),
-						message: z.string(),
-					}),
-				),
+				errors: z.array(CheckFinding),
+				warnings: z.array(CheckFinding),
 			},
 		},
 		async () => {
-			const { errors } = await checkProject(await loadProject(designDir));
-			return jsonResult({ ok: errors.length === 0, errors });
+			const { errors, warnings } = await checkProject(
+				await loadProject(designDir),
+			);
+			return jsonResult({ ok: errors.length === 0, errors, warnings });
 		},
 		EXPECTED,
 	);
@@ -189,12 +194,15 @@ export function registerDesignTools(
 		"push",
 		{
 			description:
-				"Push Screens to the Linked File: each becomes (or updates, in place, keeping node " +
-				"IDs) an auto-layout frame on the Screens Page, as one undo step. Writes a data-key " +
-				"into every element. The first Push asks to confirm the Bridged File before linking " +
-				"it (status confirm_link): ask the user, then call again with confirmLink. Refused " +
-				"while the Bridged File isn't the Linked File, a Screen fails Check or has Sync " +
-				"Conflicts, or a frame has Unpulled Changes (Pull first).",
+				"Push Screens and the Design System to the Linked File: each Screen becomes (or " +
+				"updates, in place, keeping node IDs) an auto-layout frame on the Screens Page, and " +
+				"DESIGN.md's colors, spacing and rounded tokens become variables (typography: text " +
+				"styles), updated in place too. Fills, spacing, radii and text written with a token's " +
+				"var(--…) are bound to its variable or style. One undo step. Writes a data-key into " +
+				"every element. The first Push asks to confirm the Bridged File before linking it " +
+				"(status confirm_link): ask the user, then call again with confirmLink. Refused " +
+				"while the Bridged File isn't the Linked File, a Screen or DESIGN.md fails Check or " +
+				"has Sync Conflicts, or a frame or the Design System has Unpulled Changes (Pull first).",
 			inputSchema: {
 				screens: z
 					.array(z.string().min(1))
@@ -218,11 +226,12 @@ export function registerDesignTools(
 		"pull",
 		{
 			description:
-				"Pull designers' edits from the Linked File into the Screens: a three-way merge " +
+				"Pull designers' edits from the Linked File into the Screens, and their edits to the " +
+				"Design System's variables and text styles into DESIGN.md: a three-way merge " +
 				"against the Baseline (the last Push or Pull). Where both sides changed the same " +
-				"element, the file gets Sync Conflict markers (<<<<<<< Design Project / ======= / " +
-				">>>>>>> Figma): keep one side, delete the markers, then Push. Layers the Screen " +
-				"Subset can't express stay in Figma and are listed as `unsupported`.",
+				"element or token, the file gets Sync Conflict markers (<<<<<<< Design Project / " +
+				"======= / >>>>>>> Figma): keep one side, delete the markers, then Push. Layers the " +
+				"Screen Subset can't express stay in Figma and are listed as `unsupported`.",
 		},
 		async () => jsonResult(await pullDesignProject(designDir, bridge)),
 		EXPECTED,

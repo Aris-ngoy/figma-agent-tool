@@ -249,6 +249,11 @@ export function isVariable(raw: string): boolean {
 	return VAR.test(raw.trim());
 }
 
+/** `--colors-primary` from a value that is just `var(--colors-primary)`. */
+export function variableName(raw: string | undefined): string | undefined {
+	return raw === undefined ? undefined : VAR.exec(raw.trim())?.[1];
+}
+
 /** Figma font style names by CSS weight. */
 export const FONT_STYLES: Record<string, string> = {
 	"100": "Thin",

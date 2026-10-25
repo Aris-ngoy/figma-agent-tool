@@ -271,6 +271,7 @@ function answer(
 		}
 		case "push_screens":
 		case "read_screens":
+		case "read_design_system":
 		case "link_file":
 		case "get_image": {
 			const { command } = message;

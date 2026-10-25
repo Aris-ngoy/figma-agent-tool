@@ -4,6 +4,7 @@
 // these.
 import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
 	assignKeys,
 	type Baseline,
@@ -13,23 +14,36 @@ import {
 	checkScreen,
 	clearBaselines,
 	type DesignProject,
+	type DesignSystemBaseline,
+	designSystemChanges,
+	designSystemPush,
 	type Element,
+	type FigmaDesignSystem,
+	figmaDesignSystem,
+	figmaTokens,
 	followFrame,
 	hasUnpulledChanges,
 	type ImageRecord,
 	type Link,
 	loadProject,
 	type PushedImage,
+	parseDesignMd,
+	pullDesignSystem,
 	pullScreen,
 	pushedImageRecords,
 	readBaselines,
+	readDesignSystemBaseline,
 	readLink,
 	type ScreenFile,
 	saveImage,
 	screenPush,
+	type Tokens,
+	tokenBindings,
 	type UnsupportedLayer,
 	unknownImages,
+	withTokens,
 	writeBaseline,
+	writeDesignSystemBaseline,
 	writeLink,
 } from "@figma-agent-tool/design-project";
 import type {
@@ -128,7 +142,7 @@ export async function pushDesignProject(
 			[
 				conflicted.length > 0
 					? `Push refused: ${conflicted.join(", ")} still ${conflicted.length === 1 ? "has" : "have"} Sync Conflicts to resolve.`
-					: "Push refused: these Screens fail Check.",
+					: "Push refused: these files fail Check.",
 				describeErrors(failing),
 			].join("\n"),
 		);
@@ -151,7 +165,13 @@ export async function pushDesignProject(
 		checkBridgedFile(bridge, link);
 	}
 
-	const baselines = await readBaselines(project);
+	const linked = await readLinkedDesignSystem(project, bridge);
+	if (linked && linked.changes.length > 0) {
+		throw new DesignSyncError(
+			`Push refused: the Design System has Unpulled Changes: a designer edited ${linked.changes.join(", ")} in Figma. Pull first; it merges them into DESIGN.md.`,
+		);
+	}
+	const baselines = linkedBaselines(await readBaselines(project), linked);
 	const frames = await readFrames(bridge, screens, baselines);
 	const unpulled = screensWithUnpulledChanges(
 		project,
@@ -165,6 +185,11 @@ export async function pushDesignProject(
 		);
 	}
 
+	const { push: designSystem } = designSystemPush(
+		project.fields,
+		linked?.baseline,
+	);
+	const bindings = tokenBindings(designSystem);
 	const pushes: {
 		screen: ScreenFile;
 		tree: ScreenNode;
@@ -186,7 +211,7 @@ export async function pushDesignProject(
 			frame && previous
 				? followFrame(project, screen, previous, frame)
 				: undefined;
-		const push = await screenPush(project, screen, root, baseline);
+		const push = await screenPush(project, screen, root, baseline, bindings);
 		Object.assign(images, push.images);
 		pushes.push({
 			screen,
@@ -203,8 +228,15 @@ export async function pushDesignProject(
 			tree,
 		})),
 		images,
+		designSystem,
 	});
 	await writeLink(project, { ...link, screensPage: result.page });
+	if (result.designSystem) {
+		await writeDesignSystemBaseline(project, {
+			source: project.designMd,
+			...result.designSystem,
+		});
+	}
 	const pushed = [];
 	for (const [index, push] of pushes.entries()) {
 		const frame = result.screens[index]?.frame as SyncedNode;
@@ -269,6 +301,56 @@ function screensWithUnpulledChanges(
 	});
 }
 
+/** The Design System as the Linked File has it, against its Baseline; undefined before its first Push. */
+type LinkedDesignSystem = {
+	baseline: DesignSystemBaseline;
+	figma: FigmaDesignSystem;
+	/** Token fields a designer changed since the Baseline. */
+	changes: string[];
+	/** The tokens layers bound to the Design System show. */
+	tokens: Tokens;
+};
+
+async function readLinkedDesignSystem(
+	project: DesignProject,
+	bridge: Bridge,
+): Promise<LinkedDesignSystem | undefined> {
+	const baseline = await readDesignSystemBaseline(project);
+	if (!baseline) return undefined;
+	const read = await bridge.request("read_design_system", {
+		variables: Object.values(baseline.variables),
+		textStyles: Object.values(baseline.textStyles),
+	});
+	const figma = figmaDesignSystem(read, baseline);
+	const base = parseDesignMd(baseline.source).fields;
+	return {
+		baseline,
+		figma,
+		changes: designSystemChanges(base, figma),
+		tokens: figmaTokens(base, figma),
+	};
+}
+
+/** A Screen's Baseline resolving tokens as the Linked File shows them. */
+function linkedBaseline(
+	baseline: Baseline,
+	linked: LinkedDesignSystem | undefined,
+): Baseline {
+	return linked ? withTokens(baseline, linked.tokens) : baseline;
+}
+
+function linkedBaselines(
+	baselines: Map<string, Baseline>,
+	linked: LinkedDesignSystem | undefined,
+): Map<string, Baseline> {
+	return new Map(
+		[...baselines].map(([name, baseline]) => [
+			name,
+			linkedBaseline(baseline, linked),
+		]),
+	);
+}
+
 /** The current frame of each Screen that has a Baseline; missing when deleted. */
 async function readFrames(
 	bridge: Bridge,
@@ -290,6 +372,13 @@ async function readFrames(
 
 export type PullResult = {
 	linkedFile: FileInfo;
+	designSystem: {
+		/** merged: Figma's token edits are in DESIGN.md; unchanged: nothing to pull; not_pushed: no Push sent it yet. */
+		status: "merged" | "unchanged" | "not_pushed";
+		/** Token fields Figma changed. */
+		changed: string[];
+		conflicts: number;
+	};
 	screens: {
 		screen: string;
 		/** merged: Figma's edits are in the file; unchanged: nothing to pull; missing: the frame is gone. */
@@ -305,7 +394,7 @@ export async function pullDesignProject(
 	dir: string,
 	bridge: Bridge,
 ): Promise<PullResult> {
-	const project = await loadProject(dir);
+	let project = await loadProject(dir);
 	const link = await readLink(project);
 	if (!link) {
 		throw new DesignSyncError(
@@ -317,17 +406,55 @@ export async function pullDesignProject(
 	const screens = project.screens.filter((screen) =>
 		baselines.has(screen.name),
 	);
-	const checked = screens.map((screen) => checkScreen(project, screen));
-	const failing = checked.flatMap((screen) => screen.errors);
+	const failing = [
+		...project.designMdErrors,
+		...screens.flatMap((screen) => checkScreen(project, screen).errors),
+	];
 	if (failing.length > 0) {
 		throw new DesignSyncError(
-			`Pull refused: these Screens fail Check, so Figma's edits can't be merged into them. Fix them (or resolve their Sync Conflicts) first.\n${describeErrors(failing)}`,
+			`Pull refused: these files fail Check, so Figma's edits can't be merged into them. Fix them (or resolve their Sync Conflicts) first.\n${describeErrors(failing)}`,
 		);
 	}
-	const frames = await readFrames(bridge, screens, baselines);
+	const linked = await readLinkedDesignSystem(project, bridge);
+	const designSystem: PullResult["designSystem"] = {
+		status: linked ? "unchanged" : "not_pushed",
+		changed: [],
+		conflicts: 0,
+	};
+	if (linked && linked.changes.length > 0) {
+		const pulled = pullDesignSystem(
+			project.designMd,
+			linked.baseline,
+			linked.figma,
+		);
+		if (pulled.source !== undefined) {
+			await writeFile(join(project.dir, "DESIGN.md"), pulled.source);
+		}
+		await writeDesignSystemBaseline(project, {
+			...linked.baseline,
+			source: pulled.baselineSource,
+		});
+		Object.assign(designSystem, {
+			status: "merged",
+			changed: pulled.changed,
+			conflicts: pulled.conflicts,
+		});
+		// Screens merge against the merged tokens, unless they're in conflict.
+		if (pulled.conflicts === 0) project = await loadProject(dir);
+	}
+	const checked = screens.map((original) => {
+		const screen = project.screens.find((s) => s.name === original.name);
+		return checkScreen(project, screen ?? original);
+	});
+	const frames = await readFrames(
+		bridge,
+		screens,
+		linkedBaselines(baselines, linked),
+	);
 	const results: PullResult["screens"] = [];
 	for (const screen of checked) {
-		const baseline = baselines.get(screen.name) as Baseline;
+		const stored = baselines.get(screen.name) as Baseline;
+		const baseline = linkedBaseline(stored, linked);
 		const frame = frames.get(screen.name);
 		if (!frame) {
 			results.push({
@@ -358,7 +485,7 @@ export async function pullDesignProject(
 		);
 		if (pulled.source !== undefined)
 			await writeFile(screen.path, pulled.source);
-		if (pulled.baseline !== baseline)
+		if (JSON.stringify(pulled.baseline) !== JSON.stringify(stored))
 			await writeBaseline(project, screen.name, pulled.baseline);
 		results.push({
 			screen: screen.name,
@@ -369,8 +496,12 @@ export async function pullDesignProject(
 	}
 	return {
 		linkedFile: link.file,
+		designSystem,
 		screens: results,
-		conflicts: results.reduce((sum, screen) => sum + screen.conflicts, 0),
+		conflicts: results.reduce(
+			(sum, screen) => sum + screen.conflicts,
+			designSystem.conflicts,
+		),
 	};
 }
 
@@ -396,6 +527,12 @@ export type DesignStatus = {
 	/** Screens whose frames have Unpulled Changes; null when Figma can't be read. */
 	unpulledChanges: string[] | null;
 	syncConflicts: string[];
+	designSystem: {
+		/** Token fields with Unpulled Changes; null when Figma can't be read. */
+		unpulledChanges: string[] | null;
+		/** Whether DESIGN.md has Sync Conflicts to resolve. */
+		syncConflicts: boolean;
+	};
 };
 
 export async function designProjectStatus(
@@ -421,9 +558,12 @@ export async function designProjectStatus(
 	const bridgedFileIsLinked =
 		link && status.connected ? status.linkId === link.linkId : null;
 	let unpulledChanges: string[] | null = null;
+	let unpulledTokens: string[] | null = null;
 	if (bridgedFileIsLinked) {
-		const baselines = await readBaselines(project);
 		try {
+			const linked = await readLinkedDesignSystem(project, bridge);
+			unpulledTokens = linked?.changes ?? [];
+			const baselines = linkedBaselines(await readBaselines(project), linked);
 			const frames = await readFrames(bridge, project.screens, baselines);
 			unpulledChanges = screensWithUnpulledChanges(
 				project,
@@ -433,6 +573,7 @@ export async function designProjectStatus(
 			).map((screen) => screen.name);
 		} catch {
 			unpulledChanges = null;
+			unpulledTokens = null;
 		}
 	}
 	return {
@@ -442,5 +583,11 @@ export async function designProjectStatus(
 		bridgedFileIsLinked,
 		unpulledChanges,
 		syncConflicts,
+		designSystem: {
+			unpulledChanges: unpulledTokens,
+			syncConflicts: errors.some(
+				(error) => error.file === "DESIGN.md" && error.rule === "sync-conflict",
+			),
+		},
 	};
 }

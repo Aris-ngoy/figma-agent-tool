@@ -38,6 +38,7 @@ import {
 	readScreens,
 } from "./screens";
 import { serializeNode } from "./serialize";
+import { readDesignSystem } from "./tokens";
 
 type CommandImplementations = {
 	[C in CommandName]: (
@@ -126,6 +127,7 @@ const implementations: CommandImplementations = {
 	set_motion: setMotion,
 	push_screens: pushScreens,
 	read_screens: readScreens,
+	read_design_system: readDesignSystem,
 	link_file: linkFile,
 	get_image: getImage,
 };

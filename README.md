@@ -67,7 +67,7 @@ design/
   DESIGN.md           the Design System (Google Labs' DESIGN.md format)
   screens/login.html  one Screen per file
   assets/             images Screens use
-  sync/               the Linked File and each Screen's Baseline; commit it so teammates share it
+  sync/               the Linked File, each Screen's Baseline and the Design System's; commit it so teammates share it
 ```
 
 Every tool has a CLI command doing the same thing (`bun packages/mcp-server/src/cli.ts <command>`, or the `figma-agent-tool` bin once built):
@@ -75,11 +75,11 @@ Every tool has a CLI command doing the same thing (`bun packages/mcp-server/src/
 | MCP tool | CLI | |
 | --- | --- | --- |
 | `init_design_project` | `init [--size 393x852]` | Create the folder above. |
-| `check_design_project` | `check` | Check Screens and DESIGN.md; each error names the file, line, element and rule. |
+| `check_design_project` | `check` | Check Screens and DESIGN.md (the DESIGN.md spec's own linter, WCAG contrast included); each finding names the file, line, element or token and rule. Warnings don't fail it. |
 | `render_screen` | `render <screen> [--out file.png]` | A PNG of the Screen exactly as the Preview shows it. |
 | `open_preview` | `preview [--port 4321]` | Every Screen at its Screen Size, reloading as files change. |
-| `push` | `push [<screen>…] [--yes]` | Screens → frames on the Screens Page, updated in place. |
-| `pull` | `pull` | Designers' edits → the Screens, merged against the Baseline. |
+| `push` | `push [<screen>…] [--yes]` | Screens → frames on the Screens Page, DESIGN.md → variables and text styles, all updated in place. |
+| `pull` | `pull` | Designers' edits → the Screens and DESIGN.md, merged against the Baseline. |
 | `relink_file` | `relink [--yes]` | Link the Bridged File instead of the Linked File. |
 
 The CLI's `push`, `pull` and `relink` host the plugin bridge while they run, so they can't run while the MCP server holds its port; use the MCP tools then.
@@ -121,7 +121,15 @@ A Screen is one `<body>` element in the basic **Screen Subset**, where everythin
   ```
 
 - Layers the basic subset can't express (vectors, effects, strokes, frames without auto layout, …) stay in Figma untouched and are listed by Pull; Figma-owned Elements for them come later.
-- `get_status` reports the Design Project, its Linked File, and Screens with Unpulled Changes or Sync Conflicts.
+- `get_status` reports the Design Project, its Linked File, Screens with Unpulled Changes or Sync Conflicts, and the Design System's (`designSystem`).
+
+### The Design System
+
+- Push sends DESIGN.md with the Screens: `colors`, `spacing` and `rounded` tokens become variables in a “Design System” collection, named by path (`colors/primary`, `spacing/md`), references (`"{colors.text}"`) become aliases, and each `typography` token becomes a text style (font family, size, weight, line height, letter spacing). Later Pushes update them in place, keeping their IDs, and remove those DESIGN.md dropped.
+- Screen elements written with a token's variable are bound to it: `background`/`color` (fill), `gap`, `padding` and `border-radius` to the variable; text whose `font-size` is a typography token's, and whose family and weight match it, gets that text style.
+- Pull reads those variables and styles back and writes what designers changed into DESIGN.md, merged against its Baseline: only the changed values are edited, so the file stays as written and passes `npx @google/design.md lint`. Where both sides changed a token, the line gets the same Sync Conflict markers. Screens bound to a token Figma changed aren't rewritten: they keep `var(--…)`.
+- Push is refused while the Design System has Unpulled Changes, naming the tokens. A variable or style deleted in Figma isn't a change: the next Push makes it again.
+- Check warns about tokens Figma can't hold (colors other than hex, lengths in units other than px or rem); Push leaves them out. Modes (light/dark) don't sync yet.
 
 ## Devices (Yoqa)
 

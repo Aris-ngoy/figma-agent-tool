@@ -4,7 +4,9 @@
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { parseDesignMd, type Tokens } from "./design-md";
+import { parseDesignMd, type TokenFields, type Tokens } from "./design-md";
+import { designSystemPush } from "./design-system";
+import { lineOf, lintDesignMd } from "./lint";
 import { type CheckError, type Element, parseScreen } from "./screen";
 
 /** Relative to the working directory. */
@@ -34,7 +36,11 @@ export type ScreenFile = {
 export type DesignProject = {
 	dir: string;
 	config: ProjectConfig;
+	/** DESIGN.md's source; "" when there is none. */
+	designMd: string;
 	tokens: Tokens;
+	/** DESIGN.md's token fields as written. */
+	fields: TokenFields;
 	designMdErrors: CheckError[];
 	screens: ScreenFile[];
 };
@@ -60,7 +66,7 @@ export async function loadProject(dir: string): Promise<DesignProject> {
 	const designMd = existsSync(designMdPath)
 		? await readFile(designMdPath, "utf8")
 		: "";
-	const { tokens, errors } = parseDesignMd(designMd);
+	const { tokens, fields, errors } = parseDesignMd(designMd);
 	const screensDir = join(root, "screens");
 	const names = existsSync(screensDir)
 		? (await readdir(screensDir))
@@ -81,12 +87,14 @@ export async function loadProject(dir: string): Promise<DesignProject> {
 	return {
 		dir: root,
 		config,
+		designMd,
 		tokens,
-		designMdErrors: errors.map(({ line, message }) => ({
+		fields,
+		designMdErrors: errors.map(({ line, rule, message }) => ({
 			file: "DESIGN.md",
 			line,
 			element: "",
-			rule: "design-md",
+			rule,
 			message,
 		})),
 		screens,
@@ -173,18 +181,45 @@ export type ParsedScreen = ScreenFile & {
 	errors: CheckError[];
 };
 
-/** Checks DESIGN.md and every Screen against the Screen Subset. */
-export async function checkProject(
-	project: DesignProject,
-): Promise<{ errors: CheckError[]; screens: ParsedScreen[] }> {
+/**
+ * Checks every Screen against the Screen Subset and DESIGN.md against the
+ * spec. Warnings (low contrast, tokens Figma can't hold) don't stop a Push.
+ */
+export async function checkProject(project: DesignProject): Promise<{
+	errors: CheckError[];
+	warnings: CheckError[];
+	screens: ParsedScreen[];
+}> {
 	const screens = project.screens.map((screen) => checkScreen(project, screen));
+	const designMd = checkDesignMd(project);
 	return {
-		errors: [
-			...project.designMdErrors,
-			...screens.flatMap((screen) => screen.errors),
-		],
+		errors: [...designMd.errors, ...screens.flatMap((screen) => screen.errors)],
+		warnings: designMd.warnings,
 		screens,
 	};
+}
+
+/** DESIGN.md's errors and warnings: it must parse before the spec's linter runs. */
+export function checkDesignMd(project: DesignProject): {
+	errors: CheckError[];
+	warnings: CheckError[];
+} {
+	if (project.designMdErrors.length > 0 || !project.designMd) {
+		return { errors: project.designMdErrors, warnings: [] };
+	}
+	const { errors, warnings } = lintDesignMd(project.designMd);
+	// A token the spec already rejects needn't be reported twice.
+	const invalid = new Set(errors.map((error) => error.element));
+	const unpushable = designSystemPush(project.fields)
+		.warnings.filter(({ path }) => !invalid.has(path))
+		.map(({ path, message }) => ({
+			file: "DESIGN.md",
+			line: lineOf(project.designMd, path),
+			element: path,
+			rule: "figma-unsupported",
+			message,
+		}));
+	return { errors, warnings: [...warnings, ...unpushable] };
 }
 
 export function checkScreen(

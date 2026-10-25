@@ -3,7 +3,10 @@ import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeFixtureProject } from "@figma-agent-tool/design-project/fixtures";
+import {
+	designMd,
+	writeFixtureProject,
+} from "@figma-agent-tool/design-project/fixtures";
 import { handshake } from "@figma-agent-tool/protocol/fixtures";
 import { type CliIo, runCli } from "../src/cli";
 import { connectFakePlugin } from "./harness";
@@ -83,7 +86,24 @@ describe("figma-agent-tool CLI", () => {
 		expect(
 			await runCli(["check", "--dir", await writeFixtureProject()], cli),
 		).toBe(0);
-		expect(out).toEqual(["1 Screen checked: no errors."]);
+		expect(out).toEqual(["1 Screen and DESIGN.md checked: no errors."]);
+	});
+
+	test("check prints DESIGN.md warnings, which don't fail it", async () => {
+		const dir = await writeFixtureProject({
+			"DESIGN.md": designMd.replace(
+				"rounded:",
+				'components:\n  button:\n    backgroundColor: "#ffffff"\n    textColor: "#eeeeee"\nrounded:',
+			),
+		});
+		const { cli, out } = io();
+		expect(await runCli(["check", "--dir", dir], cli)).toBe(0);
+		expect(out).toContainEqual(
+			expect.stringMatching(
+				/^warning: DESIGN\.md:15 components\.button \[contrast-ratio\] .*below WCAG AA/,
+			),
+		);
+		expect(out.at(-1)).toMatch(/checked: no errors, \d+ warnings\.$/);
 	});
 
 	test("push asks before linking the Bridged File, and links it once confirmed", async () => {
@@ -124,7 +144,7 @@ describe("figma-agent-tool CLI", () => {
 		);
 		// This fake plugin has no frames, so the Screen's frame reads as deleted.
 		expect(code).toBe(0);
-		expect(pulled.out).toEqual(["login: missing"]);
+		expect(pulled.out).toEqual(["DESIGN.md: unchanged", "login: missing"]);
 		expect(await readFile(join(dir, "screens/login.html"), "utf8")).toBe(
 			before,
 		);

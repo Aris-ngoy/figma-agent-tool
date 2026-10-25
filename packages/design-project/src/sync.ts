@@ -12,14 +12,15 @@ import type {
 	SyncedNode,
 } from "@figma-agent-tool/protocol";
 import type { Tokens } from "./design-md";
+import type { DesignSystemBaseline, TokenBindings } from "./design-system";
 import { assignElementKeys, elementKeys } from "./keys";
 import { mergeScreen } from "./merge";
 import { fromSyncedNode, toScreenNode, type UnsupportedLayer } from "./nodes";
 import { printScreen } from "./print";
 import { type DesignProject, imagePath, type ScreenFile } from "./project";
-import { type ResolveContext, sameElement } from "./resolve";
+import { type ResolveContext, resolveProp, sameElement } from "./resolve";
 import { type Element, parseScreen } from "./screen";
-import type { Kind } from "./subset";
+import { type Kind, PROP_NAMES, variableName } from "./subset";
 
 /** The Linked File, as the first Push (or a re-link) recorded it. */
 export type Link = {
@@ -47,6 +48,21 @@ const linkPath = (project: { dir: string }) =>
 	join(project.dir, "sync", "link.json");
 const baselinePath = (project: { dir: string }, name: string) =>
 	join(project.dir, "sync", "screens", `${name}.json`);
+const designSystemPath = (project: { dir: string }) =>
+	join(project.dir, "sync", "design-system.json");
+
+export async function readDesignSystemBaseline(project: {
+	dir: string;
+}): Promise<DesignSystemBaseline | undefined> {
+	return readJson(designSystemPath(project));
+}
+
+export async function writeDesignSystemBaseline(
+	project: { dir: string },
+	baseline: DesignSystemBaseline,
+) {
+	await writeJson(designSystemPath(project), baseline);
+}
 
 export async function readLink(project: {
 	dir: string;
@@ -91,12 +107,24 @@ export async function readBaselines(project: {
 	return new Map(entries);
 }
 
-/** Forgets every Screen's frame, as a re-link to another file does. */
+/** Forgets every Screen's frame and the Design System's variables, as a re-link to another file does. */
 export async function clearBaselines(project: { dir: string }) {
 	await rm(join(project.dir, "sync", "screens"), {
 		recursive: true,
 		force: true,
 	});
+	await rm(designSystemPath(project), { force: true });
+}
+
+/**
+ * The Baseline as the Linked File shows it now: layers bound to the Design
+ * System take its current values, which Figma's token edits change.
+ */
+export function withTokens(baseline: Baseline, tokens: Tokens): Baseline {
+	return {
+		...baseline,
+		tokens: { ...baseline.tokens, ...tokenRecord(tokens) },
+	};
 }
 
 async function readJson<T>(path: string): Promise<T | undefined> {
@@ -167,6 +195,7 @@ export async function screenPush(
 	screen: ScreenFile,
 	root: Element,
 	baseline: Baseline | undefined,
+	bindings?: TokenBindings,
 ): Promise<{
 	tree: ScreenNode;
 	/** Image bytes (base64) to send, by name. */
@@ -199,6 +228,7 @@ export async function screenPush(
 	const tree = toScreenNode(root, {
 		...resolveContext(project, screen),
 		nodeIds: baseline?.nodes ?? {},
+		bindings,
 		imageFill: (src, scaleMode) => {
 			const { sha256: _, ...fill } = sources[src] as PushedImage;
 			return { type: "IMAGE", scaleMode, ...fill } as ScreenFill;
@@ -474,7 +504,7 @@ export function pullScreen(
 		source: printScreen(merged.root),
 		baseline: {
 			frameId: frame.id,
-			source: printScreen(figma),
+			source: printScreen(keepTokens(figma, local, contexts.local)),
 			tokens: tokenRecord(project.tokens),
 			nodes: elementNodeMap(figma, baseline.nodes),
 			images,
@@ -482,6 +512,39 @@ export function pullScreen(
 		conflicts: merged.conflicts,
 		unsupported,
 	};
+}
+
+/**
+ * Figma's version with the Design Project's tokens wherever they mean the
+ * same value, so the Baseline follows later changes to them in Figma
+ * (whose layers are bound to them) instead of holding the values.
+ */
+function keepTokens(
+	figma: Element,
+	local: Element,
+	context: ResolveContext,
+): Element {
+	const copy = structuredClone(figma);
+	const localByKey = elementsByKey(local);
+	const walk = (element: Element) => {
+		const mine = element.key ? localByKey.get(element.key) : undefined;
+		if (mine?.kind === element.kind) {
+			for (const prop of PROP_NAMES) {
+				const raw = mine.props[prop];
+				if (
+					variableName(raw) &&
+					element.props[prop] !== undefined &&
+					resolveProp(mine, prop, context.tokens) ===
+						resolveProp(element, prop, context.tokens)
+				) {
+					element.props[prop] = raw;
+				}
+			}
+		}
+		element.children.forEach(walk);
+	};
+	walk(copy);
+	return copy;
 }
 
 /** Element key → node ID; elements kept from the Baseline keep their old IDs. */

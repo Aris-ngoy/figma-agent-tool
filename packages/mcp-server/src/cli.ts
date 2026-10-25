@@ -162,14 +162,21 @@ async function init(
 
 async function check(dir: string, io: CliIo): Promise<number> {
 	const project = await loadProject(dir);
-	const { errors } = await checkProject(project);
+	const { errors, warnings } = await checkProject(project);
 	for (const error of errors) {
 		io.out(formatCheckError(error));
 	}
+	for (const warning of warnings) {
+		io.out(`warning: ${formatCheckError(warning)}`);
+	}
+	const warned =
+		warnings.length > 0
+			? `, ${warnings.length} warning${warnings.length === 1 ? "" : "s"}`
+			: "";
 	io.out(
 		errors.length === 0
-			? `${project.screens.length} Screen${project.screens.length === 1 ? "" : "s"} checked: no errors.`
-			: `${errors.length} error${errors.length === 1 ? "" : "s"}.`,
+			? `${project.screens.length} Screen${project.screens.length === 1 ? "" : "s"} and DESIGN.md checked: no errors${warned}.`
+			: `${errors.length} error${errors.length === 1 ? "" : "s"}${warned}.`,
 	);
 	return errors.length === 0 ? 0 : 1;
 }
@@ -283,6 +290,18 @@ async function push(
 
 async function pull(dir: string, bridge: Bridge, io: CliIo): Promise<number> {
 	const result = await pullDesignProject(dir, bridge);
+	const { designSystem } = result;
+	if (designSystem.status !== "not_pushed") {
+		const conflicts =
+			designSystem.conflicts > 0
+				? `, ${designSystem.conflicts} Sync Conflict${designSystem.conflicts === 1 ? "" : "s"}`
+				: "";
+		const changed =
+			designSystem.changed.length > 0
+				? ` (${designSystem.changed.join(", ")})`
+				: "";
+		io.out(`DESIGN.md: ${designSystem.status}${changed}${conflicts}`);
+	}
 	for (const screen of result.screens) {
 		const conflicts =
 			screen.conflicts > 0

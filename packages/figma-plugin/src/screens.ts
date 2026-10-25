@@ -7,6 +7,7 @@
 import {
 	type CommandParams,
 	type CommandResult,
+	FLOAT_BINDINGS,
 	type Paint as PaintInfo,
 	type ScreenFill,
 	type ScreenNode,
@@ -22,6 +23,11 @@ import {
 	NO_DEADLINE,
 } from "./errors";
 import { cornerRadius, paint, round, text } from "./serialize";
+import {
+	type AppliedDesignSystem,
+	applyDesignSystem,
+	loadDesignSystem,
+} from "./tokens";
 
 type Container = BaseNode & ChildrenMixin;
 type Layer = FrameNode | TextNode | RectangleNode;
@@ -45,7 +51,12 @@ export function linkFile({
 }
 
 export async function pushScreens(
-	{ page: pageRef, screens, images }: CommandParams<"push_screens">,
+	{
+		page: pageRef,
+		screens,
+		images,
+		designSystem: tokens,
+	}: CommandParams<"push_screens">,
 	deadline: Deadline = NO_DEADLINE,
 ): Promise<CommandResult<"push_screens">> {
 	const found = new Map<string, BaseNode>();
@@ -53,15 +64,19 @@ export async function pushScreens(
 		...(frameId ? [frameId] : []),
 		...treeIds(tree),
 	]);
-	const [page] = await Promise.all([
+	const [page, loadedTokens] = await Promise.all([
 		findPage(pageRef),
+		tokens && loadDesignSystem(tokens),
 		...ids.map(async (id) => {
 			const node = await figma.getNodeByIdAsync(id);
 			if (node) found.set(id, node);
 		}),
 	]);
 	if (page) await page.loadAsync();
-	const fonts = screens.flatMap(({ tree }) => treeFonts(tree, found));
+	const fonts = [
+		...(loadedTokens?.fonts ?? []),
+		...screens.flatMap(({ tree }) => treeFonts(tree, found)),
+	];
 	const failed = await loadFonts(fonts);
 	const missing = fonts.find((font) => failed.has(fontKey(font)));
 	if (missing) {
@@ -73,6 +88,7 @@ export async function pushScreens(
 	checkDeadline(deadline);
 
 	// Synchronous from here on: the document changes all at once.
+	const designSystem = loadedTokens && applyDesignSystem(loadedTokens);
 	const screensPage = page ?? createPage(pageRef.name);
 	const hashes = Object.fromEntries(
 		Object.entries(images).map(([name, bytes]) => [
@@ -80,6 +96,7 @@ export async function pushScreens(
 			figma.createImage(figma.base64Decode(bytes)).hash,
 		]),
 	);
+	const applier = new Applier(found, hashes, designSystem);
 	const frames = screens.map(({ screen, frameId, tree }) => {
 		const existing = frameId ? found.get(frameId) : undefined;
 		const frame =
@@ -87,13 +104,16 @@ export async function pushScreens(
 				? existing
 				: placeNewFrame(screensPage);
 		frame.setSharedPluginData(SYNC_NAMESPACE, SYNC_KEYS.screen, screen);
-		new Applier(found, hashes).apply(frame, tree, true);
+		applier.apply(frame, tree, true);
 		return { screen, frame };
 	});
+	// Only styles are set asynchronously, once the layers are in place.
+	await applier.applyTextStyles();
 	figma.commitUndo();
 	return {
 		page: { id: screensPage.id, name: screensPage.name },
 		images: hashes,
+		...(designSystem && { designSystem: designSystem.result }),
 		screens: frames.map(({ screen, frame }) => ({
 			screen,
 			frame: readNode(frame),
@@ -196,14 +216,44 @@ function treeFonts(tree: ScreenNode, found: Map<string, BaseNode>): FontName[] {
 	];
 }
 
+/** A layer field FLOAT_BINDINGS names, as the Plugin API binds it. */
+const FLOAT_FIELDS = {
+	itemSpacing: ["itemSpacing"],
+	paddingTop: ["paddingTop"],
+	paddingRight: ["paddingRight"],
+	paddingBottom: ["paddingBottom"],
+	paddingLeft: ["paddingLeft"],
+	cornerRadius: [
+		"topLeftRadius",
+		"topRightRadius",
+		"bottomRightRadius",
+		"bottomLeftRadius",
+	],
+} as const satisfies Record<
+	(typeof FLOAT_BINDINGS)[number],
+	readonly VariableBindableNodeField[]
+>;
+
 class Applier {
+	private readonly textStyles: [TextNode, TextStyle | undefined][] = [];
+
 	constructor(
 		private readonly found: Map<string, BaseNode>,
 		private readonly hashes: Record<string, string>,
+		private readonly designSystem?: AppliedDesignSystem,
 	) {}
+
+	/** Applies each text layer's text style, or detaches the one it had. */
+	async applyTextStyles() {
+		for (const [node, style] of this.textStyles) {
+			if (style) await node.setTextStyleIdAsync(style.id);
+			else if (node.textStyleId) await node.setTextStyleIdAsync("");
+		}
+	}
 
 	apply(node: Layer, spec: ScreenNode, isRoot: boolean) {
 		node.setSharedPluginData(SYNC_NAMESPACE, SYNC_KEYS.element, spec.key);
+		this.unbind(node, spec);
 		if (spec.name !== undefined) node.name = spec.name;
 		else if (node.type === "TEXT") node.autoRename = true;
 		if (node.type === "TEXT" && spec.text) {
@@ -224,7 +274,9 @@ class Applier {
 			node.counterAxisAlignItems = layout.counterAxisAlignItems;
 			node.layoutWrap = layout.wrap ? "WRAP" : "NO_WRAP";
 		}
-		node.fills = spec.fills.map((fill) => this.paint(fill));
+		node.fills = spec.fills.map((fill, index) =>
+			this.paint(fill, index === 0 ? spec.bindings?.fill : undefined),
+		);
 		if (node.type !== "TEXT") {
 			const radius = spec.cornerRadius ?? 0;
 			if (typeof radius === "number") node.cornerRadius = radius;
@@ -247,7 +299,43 @@ class Applier {
 			node.layoutSizingHorizontal = spec.sizing.horizontal;
 			node.layoutSizingVertical = spec.sizing.vertical;
 		}
+		this.bind(node, spec);
 		if (node.type === "FRAME") this.children(node, spec.children ?? []);
+	}
+
+	private variable(token: string | undefined): Variable | undefined {
+		return token ? this.designSystem?.variables.get(token) : undefined;
+	}
+
+	/** Frees fields the tree no longer binds, so their values can be set. */
+	private unbind(node: Layer, spec: ScreenNode) {
+		if (node.type === "TEXT") return;
+		for (const binding of FLOAT_BINDINGS) {
+			if (this.variable(spec.bindings?.[binding])) continue;
+			for (const field of FLOAT_FIELDS[binding]) {
+				if (node.boundVariables?.[field]) node.setBoundVariable(field, null);
+			}
+		}
+	}
+
+	/** Binds spacing and radii to their variables; text styles come last. */
+	private bind(node: Layer, spec: ScreenNode) {
+		if (node.type === "TEXT") {
+			const token = spec.bindings?.textStyle;
+			this.textStyles.push([
+				node,
+				token ? this.designSystem?.textStyles.get(token) : undefined,
+			]);
+			return;
+		}
+		for (const binding of FLOAT_BINDINGS) {
+			const variable = this.variable(spec.bindings?.[binding]);
+			if (!variable) continue;
+			if (binding !== "cornerRadius" && node.type !== "FRAME") continue;
+			for (const field of FLOAT_FIELDS[binding]) {
+				node.setBoundVariable(field, variable);
+			}
+		}
 	}
 
 	/**
@@ -283,14 +371,18 @@ class Applier {
 		}
 	}
 
-	private paint(fill: ScreenFill): Paint {
+	private paint(fill: ScreenFill, token?: string): Paint {
 		if (fill.type === "SOLID") {
 			const { r, g, b } = rgb(fill.color);
-			return {
+			const solid: SolidPaint = {
 				type: "SOLID",
 				color: { r, g, b },
 				opacity: fill.opacity ?? 1,
 			};
+			const variable = this.variable(token);
+			return variable
+				? figma.variables.setBoundVariableForPaint(solid, "color", variable)
+				: solid;
 		}
 		const imageHash =
 			"imageHash" in fill
@@ -346,12 +438,32 @@ export function readNode(node: SceneNode): SyncedNode {
 			textAlignHorizontal: node.textAlignHorizontal,
 		};
 	}
+	const bindings = readBindings(node);
+	if (bindings) out.bindings = bindings;
 	if ("children" in node) {
 		out.children = (node as Container).children.map((child) =>
 			readNode(child as SceneNode),
 		);
 	}
 	return out;
+}
+
+/** The variables and text style a layer is bound to, by ID. */
+function readBindings(node: SceneNode): SyncedNode["bindings"] {
+	const bindings: NonNullable<SyncedNode["bindings"]> = {};
+	const bound = ("boundVariables" in node && node.boundVariables) || {};
+	for (const binding of FLOAT_BINDINGS) {
+		const ids = FLOAT_FIELDS[binding].map(
+			(field) =>
+				(bound as Record<string, VariableAlias | undefined>)[field]?.id,
+		);
+		// Corners count only when all four share one variable.
+		if (ids[0] && ids.every((id) => id === ids[0])) bindings[binding] = ids[0];
+	}
+	if (node.type === "TEXT" && typeof node.textStyleId === "string") {
+		if (node.textStyleId) bindings.textStyle = node.textStyleId;
+	}
+	return Object.keys(bindings).length > 0 ? bindings : undefined;
 }
 
 function fills(node: SceneNode): PaintInfo[] | "mixed" {

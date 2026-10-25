@@ -73,6 +73,10 @@ export function createMcpServer({
 						bridgedFileIsLinked: z.boolean().nullable(),
 						unpulledChanges: z.array(z.string()).nullable(),
 						syncConflicts: z.array(z.string()),
+						designSystem: z.object({
+							unpulledChanges: z.array(z.string()).nullable(),
+							syncConflicts: z.boolean(),
+						}),
 					})
 					.nullable(),
 			},

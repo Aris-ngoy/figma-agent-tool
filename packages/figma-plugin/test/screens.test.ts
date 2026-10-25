@@ -4,17 +4,26 @@ import {
 	type Baseline,
 	baselineAfterPush,
 	checkScreen,
+	type DesignSystemBaseline,
+	designSystemPush,
 	hasUnpulledChanges,
 	loadProject,
+	parseDesignMd,
 	pushedImageRecords,
 	type ScreenFile,
 	screenPush,
+	tokenBindings,
 } from "@figma-agent-tool/design-project";
 import {
+	designMd,
 	logoPng,
 	writeFixtureProject,
 } from "@figma-agent-tool/design-project/fixtures";
-import type { CommandName, SyncedNode } from "@figma-agent-tool/protocol";
+import type {
+	CommandName,
+	SyncedDesignSystem,
+	SyncedNode,
+} from "@figma-agent-tool/protocol";
 import { document, handshake } from "@figma-agent-tool/protocol/fixtures";
 import { createCommandHandler } from "../src/handler";
 import { installMockFigma } from "./mock-figma";
@@ -328,6 +337,238 @@ describe("get_image", () => {
 		installMockFigma(document);
 		expect(await send("get_image", { imageHash: "nope" })).toMatchObject({
 			error: { code: "image_not_found" },
+		});
+	});
+});
+
+/** Pushes the login Screen with the fixture's Design System, as Push does. */
+async function pushWithDesignSystem(
+	login: Awaited<ReturnType<typeof loginScreen>>,
+	previous?: { baseline: Baseline; designSystem: DesignSystemBaseline },
+) {
+	const { push: designSystem } = designSystemPush(
+		login.project.fields,
+		previous?.designSystem,
+	);
+	const { tree, images, sources } = await screenPush(
+		login.project,
+		login.screen,
+		login.root,
+		previous?.baseline,
+		tokenBindings(designSystem),
+	);
+	const result = await send<
+		PushResult & { designSystem: DesignSystemBaseline }
+	>("push_screens", {
+		page: { name: "Screens" },
+		screens: [{ screen: "login", frameId: previous?.baseline.frameId, tree }],
+		images,
+		designSystem,
+	});
+	const frame = result.screens[0]?.frame as SyncedNode;
+	return {
+		result,
+		frame,
+		baseline: baselineAfterPush(
+			login.project,
+			login.screen.source,
+			frame,
+			pushedImageRecords(sources, result.images),
+		),
+		designSystem: {
+			...result.designSystem,
+			source: login.project.designMd,
+		} as DesignSystemBaseline,
+	};
+}
+
+type MockFigma = ReturnType<typeof installMockFigma>;
+
+async function variableNamed(figma: MockFigma, name: string) {
+	const variables = await figma.variables.getLocalVariablesAsync();
+	const variable = variables.find((v) => v.name === name);
+	if (!variable) throw new Error(`No variable ${name}`);
+	return variable;
+}
+
+describe("push_screens with the Design System", () => {
+	test("creates variables and text styles, and binds the layers using them, in one undo step", async () => {
+		const figma = installMockFigma(document);
+		const { result, frame } = await pushWithDesignSystem(await loginScreen());
+		const tokens = result.designSystem;
+		const collection = await figma.variables.getVariableCollectionByIdAsync(
+			tokens.collectionId,
+		);
+		expect(collection?.name).toBe("Design System");
+		const primary = await variableNamed(figma, "colors/primary");
+		expect(primary.id).toBe(tokens.variables["colors.primary"] as string);
+		expect(primary.valuesByMode[collection?.defaultModeId as string]).toEqual({
+			r: 0.2,
+			g: 0.4,
+			b: 1,
+			a: 1,
+		});
+		const heading = await variableNamed(figma, "colors/heading");
+		expect(heading.valuesByMode[collection?.defaultModeId as string]).toEqual({
+			type: "VARIABLE_ALIAS",
+			id: tokens.variables["colors.text"],
+		});
+		const title = (await figma.getStyleByIdAsync(
+			tokens.textStyles["typography.title"] as string,
+		)) as unknown as Record<string, unknown>;
+		expect(title).toMatchObject({
+			name: "title",
+			fontName: { family: "Inter", style: "Bold" },
+			fontSize: 28,
+		});
+
+		expect(frame.fills).toEqual([
+			{
+				type: "SOLID",
+				color: "#ffffff",
+				variable: tokens.variables["colors.surface"],
+			},
+		]);
+		expect(frame.bindings).toEqual({
+			itemSpacing: tokens.variables["spacing.md"],
+			paddingRight: tokens.variables["spacing.lg"],
+			paddingLeft: tokens.variables["spacing.lg"],
+		});
+		expect(child(frame, 0).bindings).toEqual({
+			cornerRadius: tokens.variables["rounded.md"],
+		});
+		expect(child(frame, 1).bindings).toEqual({
+			textStyle: tokens.textStyles["typography.title"],
+		});
+		expect(child(frame, 1).fills).toEqual([
+			{
+				type: "SOLID",
+				color: "#111111",
+				variable: tokens.variables["colors.heading"],
+			},
+		]);
+		expect(child(frame, 2).bindings).toBeUndefined();
+		expect(figma.undoCommits).toBe(1);
+	});
+
+	test("reads back as exactly the Screen it was pushed from", async () => {
+		installMockFigma(document);
+		const login = await loginScreen();
+		const { baseline } = await pushWithDesignSystem(login);
+		const { screens } = await send<{ screens: { frame: SyncedNode }[] }>(
+			"read_screens",
+			{ screens: [{ screen: "login", frameId: baseline.frameId }] },
+		);
+		expect(
+			hasUnpulledChanges(
+				login.project,
+				login.screen,
+				baseline,
+				screens[0]?.frame as SyncedNode,
+			),
+		).toBe(false);
+	});
+
+	test("pushing again updates the variables and styles in place, and unbinds what the Screen no longer binds", async () => {
+		const figma = installMockFigma(document);
+		const first = await pushWithDesignSystem(await loginScreen());
+		const project = await loadProject(
+			await writeFixtureProject({
+				"DESIGN.md": designMd.replace("#3366FF", "#0055ff"),
+			}),
+		);
+		const original = project.screens[0] as ScreenFile;
+		const screen = {
+			...original,
+			source: assignKeys(original.source).source.replace(
+				"gap:var(--spacing-md)",
+				"gap:10px",
+			),
+		};
+		const { root } = checkScreen(project, screen);
+		const second = await pushWithDesignSystem(
+			{ project, screen, root: root as NonNullable<typeof root> },
+			first,
+		);
+		expect(second.result.designSystem).toEqual(first.result.designSystem);
+		const primary = await variableNamed(figma, "colors/primary");
+		expect(Object.values(primary.valuesByMode)).toEqual([
+			{ r: 0, g: 1 / 3, b: 1, a: 1 },
+		]);
+		expect(second.frame.bindings).toEqual({
+			paddingRight: first.designSystem.variables["spacing.lg"],
+			paddingLeft: first.designSystem.variables["spacing.lg"],
+		});
+		expect(second.frame.layout?.itemSpacing).toBe(10);
+	});
+
+	test("removes the variables of tokens DESIGN.md dropped", async () => {
+		const figma = installMockFigma(document);
+		const first = await pushWithDesignSystem(await loginScreen());
+		const { push } = designSystemPush(
+			parseDesignMd(designMd.replace('  surface: "#ffffff"\n', "")).fields,
+			first.designSystem,
+		);
+		const login = await loginScreen((source) =>
+			source.replace("background:var(--colors-surface)", "background:#ffffff"),
+		);
+		const { tree } = await screenPush(
+			login.project,
+			login.screen,
+			login.root,
+			first.baseline,
+			tokenBindings(push),
+		);
+		await send("push_screens", {
+			page: { name: "Screens" },
+			screens: [{ screen: "login", frameId: first.baseline.frameId, tree }],
+			designSystem: push,
+		});
+		expect(
+			await figma.variables.getVariableByIdAsync(
+				first.designSystem.variables["colors.surface"] as string,
+			),
+		).toBeNull();
+	});
+});
+
+describe("read_design_system", () => {
+	test("reads the variables' default values, aliases resolved, and the text styles", async () => {
+		const figma = installMockFigma(document);
+		const { designSystem } = await pushWithDesignSystem(await loginScreen());
+		const heading = designSystem.variables["colors.heading"] as string;
+		const text = designSystem.variables["colors.text"] as string;
+		const gone = designSystem.variables["colors.primary"] as string;
+		(await figma.variables.getVariableByIdAsync(gone))?.remove();
+		const read = await send<SyncedDesignSystem>("read_design_system", {
+			variables: [heading, gone, designSystem.variables["spacing.md"]],
+			textStyles: Object.values(designSystem.textStyles),
+		});
+		expect(read).toEqual({
+			variables: [
+				{
+					id: heading,
+					name: "colors/heading",
+					type: "COLOR",
+					value: { alias: text },
+					resolved: { color: "#111111" },
+				},
+				{
+					id: designSystem.variables["spacing.md"] as string,
+					name: "spacing/md",
+					type: "FLOAT",
+					value: 16,
+					resolved: 16,
+				},
+			],
+			textStyles: [
+				{
+					id: designSystem.textStyles["typography.title"] as string,
+					name: "title",
+					fontName: { family: "Inter", style: "Bold" },
+					fontSize: 28,
+				},
+			],
 		});
 	});
 });

@@ -9,6 +9,7 @@ import {
 } from "@figma-agent-tool/design-project/fixtures";
 import type { SyncedNode } from "@figma-agent-tool/protocol";
 import { handshake } from "@figma-agent-tool/protocol/fixtures";
+import { lint } from "@google/design.md/linter";
 import { startHarness } from "./harness";
 
 type Result = Awaited<
@@ -68,7 +69,7 @@ describe("init_design_project", () => {
 		).toStartWith("---\nversion: alpha");
 		expect(existsSync(join(harness.designDir, "screens"))).toBe(true);
 		const check = await harness.callTool("check_design_project");
-		expect(structured(check)).toEqual({ ok: true, errors: [] });
+		expect(structured(check)).toEqual({ ok: true, errors: [], warnings: [] });
 	});
 
 	test("refuses a folder that already holds a Design Project", async () => {
@@ -100,6 +101,7 @@ describe("check_design_project", () => {
 					message: expect.stringContaining("<section>"),
 				},
 			],
+			warnings: [],
 		});
 	});
 
@@ -451,5 +453,220 @@ describe("get_status", () => {
 		const harness = await startHarness();
 		const result = await harness.callTool("get_status");
 		expect(structured(result)).toMatchObject({ designProject: null });
+	});
+});
+
+describe("Design System", () => {
+	const designMdPath = (designDir: string) => join(designDir, "DESIGN.md");
+
+	test("Push creates variables and text styles from DESIGN.md, keeping their IDs across Pushes", async () => {
+		const { harness, plugin, designDir } = await pushed();
+		const tokens = plugin.screens.designSystem;
+		const text = tokens.variable("colors/text");
+		expect(tokens.variable("colors/primary")).toMatchObject({
+			type: "COLOR",
+			value: { color: "#3366ff" },
+		});
+		expect(tokens.variable("colors/heading").value).toEqual({
+			alias: text.id,
+		});
+		expect(tokens.variable("spacing/md")).toMatchObject({
+			type: "FLOAT",
+			value: 16,
+		});
+		expect(tokens.textStyle("title")).toMatchObject({
+			fontName: { family: "Inter", style: "Bold" },
+			fontSize: 28,
+		});
+		const before = [...tokens.variables.keys(), ...tokens.textStyles.keys()];
+
+		const path = designMdPath(designDir);
+		await writeFile(
+			path,
+			(await readFile(path, "utf8"))
+				.replace("#3366FF", "#0055ff")
+				.replace("fontSize: 28px", "fontSize: 30px"),
+		);
+		const again = await harness.callTool("push");
+		expect(again.isError).toBeFalsy();
+		expect([...tokens.variables.keys(), ...tokens.textStyles.keys()]).toEqual(
+			before,
+		);
+		expect(tokens.variable("colors/primary").value).toEqual({
+			color: "#0055ff",
+		});
+		expect(tokens.textStyle("title").fontSize).toBe(30);
+	});
+
+	test("Screen elements using token variables are pushed bound to them", async () => {
+		const { plugin, frame } = await pushed();
+		const tokens = plugin.screens.designSystem;
+		const id = (name: string) => tokens.variable(name).id;
+		const root = frame();
+		expect(root.fills).toEqual([
+			{ type: "SOLID", color: "#ffffff", variable: id("colors/surface") },
+		]);
+		expect(root.bindings).toEqual({
+			itemSpacing: id("spacing/md"),
+			paddingRight: id("spacing/lg"),
+			paddingLeft: id("spacing/lg"),
+		});
+		expect(layerByKey(root, "e2").bindings).toEqual({
+			cornerRadius: id("rounded/md"),
+		});
+		const title = layerByKey(root, "e3");
+		expect(title.bindings).toEqual({
+			textStyle: tokens.textStyle("title").id,
+		});
+		expect(title.fills).toEqual([
+			{ type: "SOLID", color: "#111111", variable: id("colors/heading") },
+		]);
+		// Literal values stay literal.
+		expect(layerByKey(root, "e4").fills).toEqual([
+			{ type: "SOLID", color: "#666666" },
+		]);
+	});
+
+	test("Pull writes a designer's token edits into DESIGN.md, which stays spec-pure, and leaves bound Screens alone", async () => {
+		const { harness, plugin, designDir, read } = await pushed();
+		const screen = await read();
+		const tokens = plugin.screens.designSystem;
+		tokens.variable("colors/primary").value = { color: "#ff0000" };
+		tokens.textStyle("title").fontSize = 32;
+		const path = designMdPath(designDir);
+		const before = await readFile(path, "utf8");
+
+		const status = await harness.callTool("get_status");
+		expect(structured(status)).toMatchObject({
+			designProject: {
+				unpulledChanges: [],
+				designSystem: {
+					unpulledChanges: ["colors.primary", "typography.title.fontSize"],
+					syncConflicts: false,
+				},
+			},
+		});
+
+		const result = await harness.callTool("pull");
+		expect(structured(result)).toMatchObject({
+			designSystem: {
+				status: "merged",
+				changed: ["colors.primary", "typography.title.fontSize"],
+				conflicts: 0,
+			},
+			screens: [{ screen: "login", status: "unchanged" }],
+			conflicts: 0,
+		});
+		const after = await readFile(path, "utf8");
+		expect(after).toBe(
+			before
+				.replace('primary: "#3366FF"', 'primary: "#ff0000"')
+				.replace("fontSize: 28px", "fontSize: 32px"),
+		);
+		expect(lint(after).summary.errors).toBe(0);
+		expect(await read()).toBe(screen);
+
+		const again = await harness.callTool("push");
+		expect(again.isError).toBeFalsy();
+		const check = await harness.callTool("pull");
+		expect(structured(check)).toMatchObject({
+			designSystem: { status: "unchanged" },
+			screens: [{ status: "unchanged" }],
+		});
+	});
+
+	test("Pull marks a token both sides changed, and Push refuses until it's resolved", async () => {
+		const { harness, plugin, designDir } = await pushed();
+		plugin.screens.designSystem.variable("spacing/md").value = 20;
+		const path = designMdPath(designDir);
+		await writeFile(
+			path,
+			(await readFile(path, "utf8")).replace("md: 16px", "md: 12px"),
+		);
+
+		const result = await harness.callTool("pull");
+		expect(structured(result)).toMatchObject({
+			designSystem: { status: "merged", conflicts: 1 },
+			conflicts: 1,
+		});
+		const marked = await readFile(path, "utf8");
+		expect(marked).toContain(
+			"<<<<<<< Design Project\n  md: 12px\n=======\n  md: 20px\n>>>>>>> Figma\n",
+		);
+		const status = await harness.callTool("get_status");
+		expect(structured(status)).toMatchObject({
+			designProject: { designSystem: { syncConflicts: true } },
+		});
+		const refused = await harness.callTool("push");
+		expect(refused.isError).toBe(true);
+		expect(text(refused)).toContain("DESIGN.md still has Sync Conflicts");
+
+		// The Agent keeps Figma's side.
+		await writeFile(
+			path,
+			marked.replace(
+				/<<<<<<< Design Project\n.*\n=======\n(.*)\n>>>>>>> Figma\n/,
+				"$1\n",
+			),
+		);
+		const pushedAgain = await harness.callTool("push");
+		expect(pushedAgain.isError).toBeFalsy();
+		expect(plugin.screens.designSystem.variable("spacing/md").value).toBe(20);
+	});
+
+	test("Unpulled Design System changes refuse Push, naming the tokens", async () => {
+		const { harness, plugin } = await pushed();
+		plugin.screens.designSystem.variable("rounded/md").value = 4;
+		const result = await harness.callTool("push");
+		expect(result.isError).toBe(true);
+		expect(text(result)).toContain(
+			"the Design System has Unpulled Changes: a designer edited rounded.md in Figma",
+		);
+	});
+
+	test("check reports DESIGN.md spec errors and contrast warnings", async () => {
+		const designDir = await writeFixtureProject({
+			"DESIGN.md": `---
+version: alpha
+name: Sample App
+colors:
+  primary: "#3366FF"
+  muted: "#eeeeee"
+components:
+  button:
+    backgroundColor: "#ffffff"
+    textColor: "{colors.muted}"
+  link:
+    textColor: "{colors.missing}"
+---
+
+# Sample App
+`,
+			"screens/login.html": null,
+		});
+		const harness = await startHarness({ designDir });
+		const result = await harness.callTool("check_design_project");
+		const { ok, errors, warnings } = structured<{
+			ok: boolean;
+			errors: { rule: string; line: number }[];
+			warnings: { rule: string; line: number; element: string }[];
+		}>(result);
+		expect(ok).toBe(false);
+		expect(errors).toEqual([
+			expect.objectContaining({
+				file: "DESIGN.md",
+				rule: "broken-ref",
+				element: "components.link",
+				line: 11,
+			}),
+		]);
+		expect(warnings).toContainEqual(
+			expect.objectContaining({
+				file: "DESIGN.md",
+				rule: "contrast-ratio",
+				element: "components.button",
+				line: 8,
+			}),
+		);
 	});
 });
