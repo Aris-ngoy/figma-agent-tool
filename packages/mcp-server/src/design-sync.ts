@@ -214,6 +214,7 @@ export async function pushDesignProject(
 		figmaOwned: string[];
 	}[] = [];
 	const images: Record<string, string> = {};
+	const pushedNames = new Set(screens.map((screen) => screen.name));
 	for (const original of screens) {
 		const { source, added } = assignKeys(original.source);
 		if (added > 0) await writeFile(original.path, source);
@@ -235,8 +236,7 @@ export async function pushDesignProject(
 			);
 		}
 		const unpushed = screenLinks(root).filter(
-			(target) =>
-				!screens.some((s) => s.name === target) && !frames.has(target),
+			(target) => !pushedNames.has(target) && !frames.has(target),
 		);
 		if (unpushed.length > 0) {
 			throw new DesignSyncError(
@@ -268,7 +268,7 @@ export async function pushDesignProject(
 		designSystem,
 		frames: Object.fromEntries(
 			[...frames]
-				.filter(([name]) => !screens.some((s) => s.name === name))
+				.filter(([name]) => !pushedNames.has(name))
 				.map(([name, frame]) => [name, frame.id]),
 		),
 		screenFrames: Object.keys(screenFrames),

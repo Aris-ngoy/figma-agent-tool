@@ -165,8 +165,8 @@ export function applyPrototypeLinks(
 				throw new Error(`No frame for Screen ${link.screen}`);
 			const reactions = withPrototypeLink(
 				node.reactions ?? [],
-				destination
-					? linkReaction(destination, link?.transition ?? null)
+				link && destination
+					? linkReaction(destination, link.transition)
 					: undefined,
 				frames,
 			);
