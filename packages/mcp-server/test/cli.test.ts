@@ -202,6 +202,19 @@ describe("figma-agent-tool CLI", () => {
 		);
 	});
 
+	test("skill installs the agent skill into a skills folder", async () => {
+		const into = await mkdtemp(join(tmpdir(), "cli-skills-"));
+		const { cli, out } = io();
+		expect(await runCli(["skill", "--into", into], cli)).toBe(0);
+		const skill = await readFile(
+			join(into, "figma-agent-tool", "SKILL.md"),
+			"utf8",
+		);
+		expect(skill).toStartWith("---\nname: figma-agent-tool\n");
+		expect(out[0]).toContain(join(into, "figma-agent-tool", "SKILL.md"));
+		await rm(into, { recursive: true, force: true });
+	});
+
 	test("prints usage for an unknown command", async () => {
 		const { cli, err } = io();
 		expect(await runCli(["frobnicate"], cli)).toBe(1);

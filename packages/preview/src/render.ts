@@ -2,6 +2,7 @@
 // without a browser. It screenshots the same document the Preview serves in
 // headless Chromium (Chrome for Testing's headless shell), downloaded into
 // the user's cache on first use unless FIGMA_AGENT_CHROME names a browser.
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import {
 	chmod,
@@ -84,23 +85,19 @@ export const chromeScreenshot: Screenshotter = async (
 	{ width, height },
 ) => {
 	const chrome = await findChrome();
-	const run = Bun.spawn(
-		[
-			chrome,
-			"--headless",
-			"--no-sandbox",
-			"--disable-gpu",
-			"--hide-scrollbars",
-			"--force-device-scale-factor=1",
-			`--window-size=${width},${height}`,
-			`--screenshot=${pngPath}`,
-			pathToFileURL(htmlPath).href,
-		],
-		{ stdout: "ignore", stderr: "pipe" },
-	);
-	const code = await run.exited;
+	const { code, stderr } = await run(chrome, [
+		"--headless",
+		"--no-sandbox",
+		"--disable-gpu",
+		"--hide-scrollbars",
+		"--force-device-scale-factor=1",
+		`--window-size=${width},${height}`,
+		`--screenshot=${pngPath}`,
+		pathToFileURL(htmlPath).href,
+	]).catch((error: Error) => {
+		throw new RenderError(`Couldn't run ${chrome}: ${error.message}`);
+	});
 	if (code !== 0) {
-		const stderr = await new Response(run.stderr).text();
 		throw new RenderError(
 			`Headless Chromium (${chrome}) failed with exit code ${code}: ${stderr.trim().split("\n").slice(-3).join(" ")}`,
 		);
@@ -167,17 +164,32 @@ async function downloadChrome(platform: string, into: string) {
 		await mkdir(into, { recursive: true });
 		const zipPath = join(into, "chrome-headless-shell.zip");
 		await writeFile(zipPath, zip);
-		const unzip =
+		const [unzip, ...args] =
 			process.platform === "win32"
 				? ["tar", "-xf", zipPath, "-C", into]
 				: ["unzip", "-q", "-o", zipPath, "-d", into];
-		const code = await Bun.spawn(unzip, { stdout: "ignore", stderr: "ignore" })
-			.exited;
+		const { code } = await run(unzip as string, args);
 		await rm(zipPath, { force: true });
-		if (code !== 0) throw new Error(`${unzip[0]} exited with ${code}`);
+		if (code !== 0) throw new Error(`${unzip} exited with ${code}`);
 	} catch (error) {
 		throw new RenderError(
 			`Couldn't download headless Chromium for Render (${(error as Error).message}). Set FIGMA_AGENT_CHROME to a Chrome or Chromium binary.`,
 		);
 	}
+}
+
+/** Runs a program to its end: its exit code and what it wrote to stderr. */
+function run(
+	command: string,
+	args: string[],
+): Promise<{ code: number; stderr: string }> {
+	return new Promise((resolve, reject) => {
+		const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
+		let stderr = "";
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk;
+		});
+		child.on("error", reject);
+		child.on("close", (code) => resolve({ code: code ?? 1, stderr }));
+	});
 }

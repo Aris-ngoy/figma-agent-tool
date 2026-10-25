@@ -1,57 +1,46 @@
 # Figma Agent Tool
 
-An MCP server plus a Figma development plugin that lets any MCP client work on the live Figma document.
-
-## Packages
-
-- `packages/protocol`: runtime-validated (zod) bridge messages and the shared test fixtures.
-- `packages/design-project`: pure: reads and writes a Design Project, checks Screens against the Screen Subset, converts Screens to and from the node trees the plugin applies, and does Pull's three-way merge. No Figma, network or browser knowledge.
-- `packages/preview`: the local Preview server and the one renderer that both the Preview and Render use.
-- `packages/mcp-server`: the MCP server (stdio), the localhost WebSocket bridge the plugin connects to, and the `figma-agent-tool` CLI.
-- `packages/figma-plugin`: the Figma plugin (sandbox command handler + UI iframe that owns the connection).
-- `packages/handoff`: pure rendering of the prototype graph, screen layers and design system as handoff Markdown.
-- `packages/visual-diff`: pure image comparison (align, mask, pixel-diff, cluster mismatches), with no Figma or device knowledge. Its PNG fixtures are regenerated with `bun run fixtures` in that package.
-
-## Development
-
-```sh
-bun install
-bun run build      # turbo: build every package
-bun run test       # turbo: bun test in every package
-bun run typecheck
-bun run check      # Biome lint + format
-```
+Lets any coding agent design UI as files in your repo, see it in a local Preview, and work on it with designers in Figma. Push sends Screens into Figma as real auto-layout frames, and Pull brings designers' edits back. It runs as an MCP server, or as a CLI for harnesses without MCP. The Figma plugin does every read and write, so any Figma seat works. A v1 toolset also edits live Figma files and covers prototypes, handoff Markdown and visual QA.
 
 ## Setup
 
-1. Build: `bun run build`.
-2. Add the server to your MCP client:
+You need Node 20 or later and Figma desktop.
 
-   ```json
-   {
-     "mcpServers": {
-       "figma-agent-tool": {
-         "command": "bun",
-         "args": ["/path/to/figma-agent-tool/packages/mcp-server/dist/main.js"]
-       }
-     }
-   }
+1. **Add the MCP server** to your Agent:
+
+   ```sh
+   claude mcp add figma-agent-tool -- npx -y figma-agent-tool mcp
    ```
 
-   The bridge listens on `ws://127.0.0.1:3055` and `ws://[::1]:3055` (localhost only); the plugin connects to it as `ws://localhost:3055`, since Figma's manifest accepts host names but not IP addresses, and `localhost` may resolve to either loopback (macOS tries `::1` first). Configure it with environment variables in the server entry (`"env": { ... }`):
+   Other MCP clients take `{ "command": "npx", "args": ["-y", "figma-agent-tool", "mcp"] }`. Without MCP, the Agent runs the same steps as `npx figma-agent-tool <command>` (see the table under Design Projects).
+2. **Install the agent skill**, which teaches the Agent the Screen Subset, DESIGN.md and how to work alongside designers: `npx figma-agent-tool skill`. It writes `.claude/skills/figma-agent-tool/SKILL.md`; pass `--into <folder>` for another harness's skills folder. MCP clients that don't load skills get a short version as the server's instructions.
+3. **Install the Figma plugin.** It isn't on the Figma Community yet, so build it from this repo (`bun install && bun run build`). Then, in Figma desktop, choose Plugins → Development → Import plugin from manifest… and pick `packages/figma-plugin/manifest.json`.
+4. **Open the plugin** in the Figma file you want to design in. Its panel shows when it's connected.
+5. **Ask your Agent** for a screen ("design a login screen for this app"). It creates `design/`, writes the Screen, checks and renders it, and Pushes it when you ask. The first Push asks you to confirm the Figma file.
 
-   - `FIGMA_AGENT_BRIDGE_PORT`: bridge port (default `3055`). Set the same port in the plugin panel's **Bridge port** field, and add `ws://localhost:<port>` to `devAllowedDomains` in `packages/figma-plugin/manifest.json`, since Figma only lets the plugin reach listed origins.
-   - `FIGMA_AGENT_REQUEST_TIMEOUT_MS`: how long a command may wait for the plugin before the tool returns a timeout error (default `30000`).
-   - `FIGMA_AGENT_YOQA_URL`: base URL of the Yoqa runner (default `http://127.0.0.1:7420`, Yoqa's own default port).
-   - `FIGMA_AGENT_DESIGN_DIR`: the Design Project's folder (default `design`, relative to the working directory).
-   - `FIGMA_AGENT_CHROME`: a Chrome or Chromium binary for Render; otherwise Render downloads Chrome for Testing's headless shell into `~/.cache/figma-agent-tool` on first use.
+## The workflow
 
-3. In Figma desktop: Plugins → Development → Import plugin from manifest… and pick `packages/figma-plugin/manifest.json`. Run it in the file you want to bridge; the panel shows whether it's connected, which file is bridged and the last command it ran.
+1. **Design in the repo.** The Agent runs `init` once. It then writes `design/DESIGN.md`, the Design System's tokens (it can derive them from your codebase), and one HTML file per Screen in `design/screens/`. Check validates everything, and Render gives the Agent a PNG of its work.
+2. **Look and compare.** `npx figma-agent-tool preview` (or the `open_preview` tool) shows every Screen at its Screen Size and reloads as the Agent edits. Ask for Directions to see alternatives side by side, then choose one.
+3. **Push.** Screens become frames on the Screens Page of the Linked File, and DESIGN.md becomes variables and text styles. Components become component sets, and `href`s become prototype links. Later Pushes update everything in place.
+4. **Designers edit in Figma**, adding what Screens can't express: hover states, shadows, Motion.
+5. **Pull.** Their edits merge into the files against the last sync. What the Screen Subset can't express stays in Figma as a Figma-owned Element. Where both sides changed the same element, the file gets Sync Conflict markers for the Agent to resolve. Push is refused until designers' edits are Pulled, so their work is never overwritten.
 
-   The plugin reconnects on its own (with backoff) if the MCP server restarts, and the server accepts it again after Figma reloads the plugin. Only one plugin window is bridged at a time: opening the plugin in another file replaces the older connection (the server logs a warning, and the older panel offers **Reconnect** to take the bridge back).
-4. Ask your agent to call `get_status` to check the connection.
+Commit `design/`, `design/sync/` included, so teammates share the Linked File and the Baselines. To start from a file designers already made, Adopt it instead of running `init` (see below).
 
-### The official Figma MCP
+### Configuration
+
+The bridge listens on `ws://127.0.0.1:3055` and `ws://[::1]:3055` (localhost only); the plugin connects to it as `ws://localhost:3055`, since Figma's manifest accepts host names but not IP addresses, and `localhost` may resolve to either loopback (macOS tries `::1` first). Configure it with environment variables in the server entry (`"env": { ... }`):
+
+- `FIGMA_AGENT_BRIDGE_PORT`: bridge port (default `3055`). Set the same port in the plugin panel's **Bridge port** field, and add `ws://localhost:<port>` to `devAllowedDomains` in `packages/figma-plugin/manifest.json`, since Figma only lets the plugin reach listed origins.
+- `FIGMA_AGENT_REQUEST_TIMEOUT_MS`: how long a command may wait for the plugin before the tool returns a timeout error (default `30000`).
+- `FIGMA_AGENT_YOQA_URL`: base URL of the Yoqa runner (default `http://127.0.0.1:7420`, Yoqa's own default port).
+- `FIGMA_AGENT_DESIGN_DIR`: the Design Project's folder (default `design`, relative to the working directory).
+- `FIGMA_AGENT_CHROME`: a Chrome or Chromium binary for Render; otherwise Render downloads Chrome for Testing's headless shell into `~/.cache/figma-agent-tool` on first use.
+
+The plugin reconnects on its own (with backoff) if the MCP server restarts, and the server accepts it again after Figma reloads the plugin. Only one plugin window is bridged at a time: opening the plugin in another file replaces the older connection (the server logs a warning, and the older panel offers **Reconnect** to take the bridge back). `get_status` reports the connection.
+
+## The official Figma MCP
 
 Every read and write goes through the plugin and the Plugin API, so this tool works on any Figma seat (free included), without the official Figma MCP server and without the REST API's rate limits. It doesn't proxy or wrap the official server. With a Full or Dev seat you can run both side by side; they don't share state.
 
@@ -77,7 +66,7 @@ design/
   sync/               the Linked File, each Screen's, Component's and the Design System's Baseline; commit it so teammates share it
 ```
 
-Every tool has a CLI command doing the same thing (`bun packages/mcp-server/src/cli.ts <command>`, or the `figma-agent-tool` bin once built):
+Every tool has a CLI command doing the same thing (`npx figma-agent-tool <command>`):
 
 | MCP tool | CLI | |
 | --- | --- | --- |
@@ -90,6 +79,8 @@ Every tool has a CLI command doing the same thing (`bun packages/mcp-server/src/
 | `pull` | `pull` | Designers' edits → the Screens and DESIGN.md, merged against the Baseline. |
 | `relink_file` | `relink [--yes]` | Link the Bridged File instead of the Linked File. |
 | `adopt_file` | `adopt [<frame>…] [--yes]` | Start the Design Project from an existing Figma file: its variables and text styles, and the frames chosen. |
+| | `skill [--into .claude/skills]` | Install the agent skill. |
+| | `mcp` | Run the MCP server on stdio. |
 
 The CLI's `push`, `pull`, `relink` and `adopt` host the plugin bridge while they run, so they can't run while the MCP server holds its port; use the MCP tools then.
 
@@ -290,3 +281,26 @@ Each mismatched region lists the visible Figma layers drawn there. A region over
 Each run writes `figma.png`, `device.png`, `diff.png` and `report.md` to its own timestamped folder (`.figma-agent/qa-<timestamp>-<id>/`) and returns their paths. `report.md` covers screen, device, mismatch %, pass/fail, the regions with their layers and the three images, ready to paste into a PR. If the frame and the capture don't share an aspect ratio, the error says so and gives the paths of both images.
 
 Before a release, run the manual [visual QA smoke test](docs/visual-qa-smoke-test.md) against real Figma and devices.
+
+## Packages
+
+- `packages/protocol`: runtime-validated (zod) bridge messages and the shared test fixtures.
+- `packages/design-project`: pure: reads and writes a Design Project, checks Screens against the Screen Subset, converts Screens to and from the node trees the plugin applies, and does Pull's three-way merge. No Figma, network or browser knowledge.
+- `packages/preview`: the local Preview server and the one renderer that both the Preview and Render use.
+- `packages/mcp-server`: the published `figma-agent-tool` npm package: the MCP server (stdio), the localhost WebSocket bridge the plugin connects to, the CLI, and the agent skill (`skill/SKILL.md`, which the server's instructions summarize in `src/instructions.ts`). Its build bundles it and the Preview into one file for Node.
+- `packages/figma-plugin`: the Figma plugin (sandbox command handler + UI iframe that owns the connection).
+- `packages/handoff`: pure rendering of the prototype graph, screen layers and design system as handoff Markdown.
+- `packages/visual-diff`: pure image comparison (align, mask, pixel-diff, cluster mismatches), with no Figma or device knowledge. Its PNG fixtures are regenerated with `bun run fixtures` in that package.
+
+## Development
+
+```sh
+bun install
+bun run build      # turbo: build every package
+bun run test       # turbo: bun test in every package
+bun run typecheck
+bun run check      # Biome lint + format
+bun packages/mcp-server/src/bin.ts <command>   # the CLI from source
+```
+
+CI also packs the npm package and runs it with `npx` on Node, without Bun (`packages/mcp-server/scripts/npx-smoke.mjs`).

@@ -3,8 +3,13 @@
 // Project changes, each Screen's Directions side by side with it, and the
 // Defined Components' variants. It only views, and chooses Directions;
 // editing happens in the files.
-import { type FSWatcher, watch } from "node:fs";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { existsSync, type FSWatcher, watch } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { createServer, type IncomingMessage } from "node:http";
+import type { AddressInfo } from "node:net";
+import { dirname, extname, join, relative, resolve, sep } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import {
 	type CheckError,
 	checkProject,
@@ -46,9 +51,23 @@ document.addEventListener("click", (event) => {
 const FIT =
 	"this.style.width = this.contentDocument.body.scrollWidth + 'px'; this.style.height = this.contentDocument.body.scrollHeight + 'px';";
 
+/** Content types of the files Screens use, by extension. */
+const CONTENT_TYPES: Record<string, string> = {
+	".png": "image/png",
+	".jpg": "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif": "image/gif",
+	".webp": "image/webp",
+	".svg": "image/svg+xml",
+	".css": "text/css; charset=utf-8",
+	".html": "text/html; charset=utf-8",
+	".json": "application/json",
+};
+
 export type Preview = { url: string; port: number; stop(): void };
 
-export function startPreview({
+/** Starts the Preview; rejects when it can't listen, the port being taken say. */
+export async function startPreview({
 	dir,
 	port = DEFAULT_PREVIEW_PORT,
 	hostname = "127.0.0.1",
@@ -56,123 +75,160 @@ export function startPreview({
 	dir: string;
 	port?: number;
 	hostname?: string;
-}): Preview {
+}): Promise<Preview> {
 	const root = resolve(dir);
-	const clients = new Set<ReadableStreamDefaultController<string>>();
+	const clients = new Set<ReadableStreamDefaultController<Uint8Array>>();
+	const reload = new TextEncoder().encode("data: reload\n\n");
 	let watcher: FSWatcher | undefined;
 	let debounce: ReturnType<typeof setTimeout> | undefined;
 	try {
 		watcher = watch(root, { recursive: true }, () => {
 			clearTimeout(debounce);
 			debounce = setTimeout(() => {
-				for (const client of clients) client.enqueue("data: reload\n\n");
+				for (const client of clients) client.enqueue(reload);
 			}, 50);
 		});
 	} catch {
 		// No recursive watching on this platform: the Preview won't live-reload.
 	}
 
-	const server = Bun.serve({
-		hostname,
-		port,
-		idleTimeout: 0,
-		async fetch(request) {
-			const { pathname, searchParams } = new URL(request.url);
-			if (pathname === "/events") {
-				let controller: ReadableStreamDefaultController<string>;
-				const stream = new ReadableStream<string>({
-					start(c) {
-						controller = c;
-						clients.add(c);
-						c.enqueue(": connected\n\n");
-					},
-					cancel() {
-						clients.delete(controller);
-					},
-				});
-				return new Response(stream, {
-					headers: {
-						"Content-Type": "text/event-stream",
-						"Cache-Control": "no-cache",
-					},
-				});
+	async function respond(request: Request): Promise<Response> {
+		const { pathname, searchParams } = new URL(request.url);
+		if (pathname === "/events") {
+			let controller: ReadableStreamDefaultController<Uint8Array>;
+			const stream = new ReadableStream<Uint8Array>({
+				start(c) {
+					controller = c;
+					clients.add(c);
+					c.enqueue(new TextEncoder().encode(": connected\n\n"));
+				},
+				cancel() {
+					clients.delete(controller);
+				},
+			});
+			return new Response(stream, {
+				headers: {
+					"Content-Type": "text/event-stream",
+					"Cache-Control": "no-cache",
+				},
+			});
+		}
+		const project = await loadProject(root);
+		const mode = searchParams.get("mode") ?? undefined;
+		try {
+			modeTokens(project, mode);
+		} catch (error) {
+			if (!(error instanceof DesignProjectError)) throw error;
+			return new Response(error.message, { status: 404 });
+		}
+		if (pathname === "/") return html(await indexPage(project, mode));
+		if (pathname === "/choose" && request.method === "POST") {
+			const form = await request.formData();
+			const direction = directionOf(
+				project,
+				String(form.get("screen")),
+				String(form.get("direction")),
+			);
+			if (!direction) return new Response("No such Direction", { status: 404 });
+			await chooseDirection(project, direction);
+			return new Response(null, { status: 303, headers: { Location: "/" } });
+		}
+		const componentMatch = /^\/components\/([^/]+)$/.exec(pathname);
+		if (componentMatch) {
+			const name = decodeURIComponent(componentMatch[1] as string);
+			const component = project.components.find((c) => c.name === name);
+			if (!component) return new Response("No such Component", { status: 404 });
+			return html(
+				componentDocument(project, component, {
+					baseUrl: "/files/components/",
+					head: LIVE_RELOAD,
+					mode,
+				}),
+			);
+		}
+		const route = screenRoute(project, pathname);
+		if (route) {
+			const { screen } = route;
+			if (!screen) return new Response("No such Screen", { status: 404 });
+			return html(
+				screenDocument(project, screen, {
+					baseUrl: `/files/${dirname(screen.file)}/`,
+					head: `${LIVE_RELOAD}\n${PROTOTYPE_LINKS}`,
+					figmaOwned: await figmaOwnedOf(project, screen),
+					mode,
+				}),
+			);
+		}
+		if (pathname.startsWith("/files/")) {
+			const path = resolve(
+				root,
+				decodeURIComponent(pathname.slice("/files/".length)),
+			);
+			const inside = relative(root, path);
+			if (inside.startsWith("..") || inside.startsWith(sep)) {
+				return new Response("Outside the Design Project", { status: 403 });
 			}
-			const project = await loadProject(root);
-			const mode = searchParams.get("mode") ?? undefined;
-			try {
-				modeTokens(project, mode);
-			} catch (error) {
-				if (!(error instanceof DesignProjectError)) throw error;
-				return new Response(error.message, { status: 404 });
-			}
-			if (pathname === "/") return html(await indexPage(project, mode));
-			if (pathname === "/choose" && request.method === "POST") {
-				const form = await request.formData();
-				const direction = directionOf(
-					project,
-					String(form.get("screen")),
-					String(form.get("direction")),
-				);
-				if (!direction)
-					return new Response("No such Direction", { status: 404 });
-				await chooseDirection(project, direction);
-				return new Response(null, { status: 303, headers: { Location: "/" } });
-			}
-			const componentMatch = /^\/components\/([^/]+)$/.exec(pathname);
-			if (componentMatch) {
-				const name = decodeURIComponent(componentMatch[1] as string);
-				const component = project.components.find((c) => c.name === name);
-				if (!component)
-					return new Response("No such Component", { status: 404 });
-				return html(
-					componentDocument(project, component, {
-						baseUrl: "/files/components/",
-						head: LIVE_RELOAD,
-						mode,
-					}),
-				);
-			}
-			const route = screenRoute(project, pathname);
-			if (route) {
-				const { screen } = route;
-				if (!screen) return new Response("No such Screen", { status: 404 });
-				return html(
-					screenDocument(project, screen, {
-						baseUrl: `/files/${dirname(screen.file)}/`,
-						head: `${LIVE_RELOAD}\n${PROTOTYPE_LINKS}`,
-						figmaOwned: await figmaOwnedOf(project, screen),
-						mode,
-					}),
-				);
-			}
-			if (pathname.startsWith("/files/")) {
-				const path = resolve(
-					root,
-					decodeURIComponent(pathname.slice("/files/".length)),
-				);
-				const inside = relative(root, path);
-				if (inside.startsWith("..") || inside.startsWith(sep)) {
-					return new Response("Outside the Design Project", { status: 403 });
-				}
-				const file = Bun.file(path);
-				return (await file.exists())
-					? new Response(file)
-					: new Response("Not found", { status: 404 });
-			}
-			return new Response("Not found", { status: 404 });
-		},
+			if (!existsSync(path)) return new Response("Not found", { status: 404 });
+			const type =
+				CONTENT_TYPES[extname(path).toLowerCase()] ??
+				"application/octet-stream";
+			return new Response(await readFile(path), {
+				headers: { "Content-Type": type },
+			});
+		}
+		return new Response("Not found", { status: 404 });
+	}
+
+	const server = createServer(async (incoming, outgoing) => {
+		let response: Response;
+		try {
+			response = await respond(await toRequest(incoming));
+		} catch (error) {
+			response = new Response(String(error), { status: 500 });
+		}
+		outgoing.writeHead(response.status, Object.fromEntries(response.headers));
+		if (!response.body) return outgoing.end();
+		// A closed page cancels its live-reload stream.
+		pipeline(Readable.fromWeb(response.body), outgoing).catch(() => {});
 	});
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(port, hostname, () => {
+			server.off("error", reject);
+			resolve();
+		});
+	});
+	const bound = (server.address() as AddressInfo).port;
 
 	return {
-		url: `http://${hostname}:${server.port}/`,
-		port: server.port ?? port,
+		url: `http://${hostname}:${bound}/`,
+		port: bound,
 		stop() {
 			clearTimeout(debounce);
 			watcher?.close();
 			for (const client of clients) client.close();
-			server.stop(true);
+			server.close();
+			server.closeAllConnections();
 		},
 	};
+}
+
+/** The web Request for a Node one; its body is read whole (forms only). */
+async function toRequest(incoming: IncomingMessage): Promise<Request> {
+	const { href: url } = new URL(incoming.url ?? "/", "http://localhost");
+	const headers = new Headers();
+	for (const [name, value] of Object.entries(incoming.headers)) {
+		if (typeof value === "string") headers.set(name, value);
+	}
+	if (incoming.method === "GET" || incoming.method === "HEAD")
+		return new Request(url, { method: incoming.method, headers });
+	const chunks: Buffer[] = [];
+	for await (const chunk of incoming) chunks.push(chunk as Buffer);
+	return new Request(url, {
+		method: incoming.method,
+		headers,
+		body: Buffer.concat(chunks),
+	});
 }
 
 function html(body: string): Response {

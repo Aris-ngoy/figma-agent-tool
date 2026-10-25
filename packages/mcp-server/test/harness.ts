@@ -67,7 +67,7 @@ export async function startHarness({
 	yoqaRunning?: boolean;
 } = {}) {
 	const logs: string[] = [];
-	const bridge = startBridge({
+	const bridge = await startBridge({
 		port: 0,
 		requestTimeoutMs,
 		log: (message) => logs.push(message),

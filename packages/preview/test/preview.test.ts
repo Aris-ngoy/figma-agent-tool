@@ -39,7 +39,7 @@ afterEach(() => {
 
 async function preview(overrides: Record<string, string | null> = {}) {
 	const dir = await writeFixtureProject(overrides);
-	const server = startPreview({ dir, port: 0 });
+	const server = await startPreview({ dir, port: 0 });
 	stops.push(() => server.stop());
 	return { dir, server };
 }
@@ -176,7 +176,7 @@ async function withFigmaOwned() {
 describe("Figma-owned Elements", () => {
 	test("the Preview shows one as the export Pull cached", async () => {
 		const dir = await withFigmaOwned();
-		const server = startPreview({ dir, port: 0 });
+		const server = await startPreview({ dir, port: 0 });
 		stops.push(() => server.stop());
 		const html = await (await fetch(`${server.url}screens/login`)).text();
 		expect(html).toContain(
@@ -194,7 +194,7 @@ describe("Figma-owned Elements", () => {
 			login,
 			(await readFile(login, "utf8")).replace("width:40px", "width:80px"),
 		);
-		const server = startPreview({ dir, port: 0 });
+		const server = await startPreview({ dir, port: 0 });
 		stops.push(() => server.stop());
 		const stale = await (await fetch(`${server.url}screens/login`)).text();
 		expect(stale).toContain("export is stale");

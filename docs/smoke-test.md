@@ -4,7 +4,7 @@ Automated tests drive the MCP server with a fake plugin and a fake Yoqa runner, 
 
 ## Setup
 
-- [ ] `bun install` and `bun run build`, then register the MCP server in your client (see the README's Setup). Do it on a free Figma seat, without the official Figma MCP running: nothing below needs it.
+- [ ] `bun install` and `bun run build`, then register the MCP server in your client (see the README's Setup; `bun packages/mcp-server/src/bin.ts mcp` runs it from source). Do it on a free Figma seat, without the official Figma MCP running: nothing below needs it.
 - [ ] Figma desktop with a sample file: two or three screen frames, a component set with variants, a few local variables (one aliased) and styles.
 - [ ] The plugin imported from `packages/figma-plugin/manifest.json` and running in that file.
 
@@ -53,6 +53,17 @@ Automated tests drive the MCP server with a fake plugin and a fake Yoqa runner, 
 - [ ] `export_flow_markdown` with a `path` in a repo: one section per screen, Figma links that open the right frame, the interactions as set above, and the tokens and component variants used.
 - [ ] Export again without changes: the file is byte-identical (`git diff` is empty). Change one color and export: only that line changes.
 - [ ] `export_screen_markdown` on one screen and `export_flow_json` on the flow match what the flow export says.
+
+## Fresh repo, end to end (v2)
+
+On a machine with Node LTS and no Bun, using the packed package (`bun run build`, then `bun pm pack` in `packages/mcp-server`; use `figma-agent-tool@<version>` once it's published):
+
+- [ ] In a new, empty git repo: `claude mcp add figma-agent-tool -- npx -y /path/to/figma-agent-tool-<version>.tgz mcp` (or the same command and args in another MCP client), then `npx -y /path/to/figma-agent-tool-<version>.tgz skill`. `.claude/skills/figma-agent-tool/SKILL.md` exists, and the client lists the server's tools and shows its instructions.
+- [ ] Open the plugin in a fresh Figma file. Ask the Agent, with nothing else said: "design a login screen for this app". Without help, it creates `design/`, writes `DESIGN.md` and `design/screens/login.html` in the Screen Subset using tokens, runs Check until it passes and looks at a Render. Note anything it got wrong: the skill should have prevented it.
+- [ ] Ask it to push: it asks you to confirm the file before linking it, then pushes. The frame is on the Screens Page.
+- [ ] In Figma, change the title's text. Ask the Agent to change the button's label: it Pulls first (or Push refuses and it Pulls then), keeps the designer's title, and pushes its own change. `git diff` shows both edits.
+- [ ] Change the same text in Figma and ask the Agent for a different one: it resolves the Sync Conflict by keeping the designer's side unless you say otherwise, and doesn't push with markers left.
+- [ ] Ask it to "derive the Design System from this codebase" in a repo with a Tailwind config or CSS variables: DESIGN.md's tokens match the code's, and Check passes.
 
 ## Design Project loop (v2)
 

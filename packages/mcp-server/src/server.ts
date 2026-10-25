@@ -16,6 +16,7 @@ import { registerEditTools } from "./edit-tools";
 import { registerFigmaTool } from "./figma-tool";
 import { registerFlowTools } from "./flow-tools";
 import { registerHandoffTools } from "./handoff-tools";
+import { INSTRUCTIONS } from "./instructions";
 import { registerMotionTools } from "./motion-tools";
 import { registerReactionTools } from "./reaction-tools";
 import { registerReadTools } from "./read-tools";
@@ -38,10 +39,10 @@ export function createMcpServer({
 	/** How Render takes screenshots; headless Chromium by default. */
 	screenshot?: Screenshotter;
 }): McpServer {
-	const server = new McpServer({
-		name: "figma-agent-tool",
-		version: packageJson.version,
-	});
+	const server = new McpServer(
+		{ name: "figma-agent-tool", version: packageJson.version },
+		{ instructions: INSTRUCTIONS },
+	);
 
 	server.registerTool(
 		"get_status",

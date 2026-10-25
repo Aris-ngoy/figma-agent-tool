@@ -263,13 +263,13 @@ export function registerDesignTools(
 			await loadProject(designDir);
 			if (!preview) {
 				try {
-					preview = startPreview({
+					preview = await startPreview({
 						dir: designDir,
 						port: DEFAULT_PREVIEW_PORT,
 					});
 				} catch {
 					// The default port is taken: any free one will do.
-					preview = startPreview({ dir: designDir, port: 0 });
+					preview = await startPreview({ dir: designDir, port: 0 });
 				}
 			}
 			return jsonResult({ url: preview.url });

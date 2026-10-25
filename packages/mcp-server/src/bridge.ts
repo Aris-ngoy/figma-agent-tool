@@ -1,5 +1,7 @@
 // Localhost WebSocket bridge to the Figma plugin. The plugin's UI iframe
 // connects as a client, handshakes, then answers correlated requests.
+
+import { createServer, type Server } from "node:http";
 import {
 	type BridgeError,
 	type Capabilities,
@@ -14,7 +16,7 @@ import {
 	parsePluginMessage,
 	type Request,
 } from "@figma-agent-tool/protocol";
-import type { ServerWebSocket } from "bun";
+import { type WebSocket, WebSocketServer } from "ws";
 import packageJson from "../package.json" with { type: "json" };
 
 // The plugin dials ws://localhost, which may resolve to either loopback
@@ -37,7 +39,7 @@ export type BridgeStatus =
 			linkId: string | null;
 	  };
 
-export type Bridge = ReturnType<typeof startBridge>;
+export type Bridge = Awaited<ReturnType<typeof startBridge>>;
 
 /** Base class for bridge failures the agent should see as tool errors. */
 export class BridgeRequestError extends Error {}
@@ -94,7 +96,7 @@ export class PluginCommandError extends BridgeRequestError {
 }
 
 type Session = {
-	socket: ServerWebSocket<unknown>;
+	socket: WebSocket;
 	file: FileInfo;
 	pluginVersion: string;
 	capabilities: Capabilities;
@@ -107,7 +109,7 @@ type Pending = {
 	reject: (error: Error) => void;
 };
 
-export function startBridge({
+export async function startBridge({
 	port,
 	requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
 	log = console.error,
@@ -128,73 +130,89 @@ export function startBridge({
 		pending.clear();
 	}
 
-	const serve = (hostname: string, port: number) =>
-		Bun.serve({
-			hostname,
-			port,
-			fetch(request, server) {
-				if (server.upgrade(request, { data: undefined })) return;
-				return new Response("Figma Agent Tool bridge: WebSocket only", {
-					status: 426,
-				});
-			},
-			websocket: {
-				message(socket, data) {
-					let message: ReturnType<typeof parsePluginMessage>;
-					try {
-						message = parsePluginMessage(JSON.parse(String(data)));
-					} catch (error) {
-						log(`[bridge] dropped invalid plugin message: ${error}`);
-						return;
-					}
-					if (message.type === "handshake") {
-						const replaced = session?.socket !== socket ? session : undefined;
-						session = {
-							socket,
-							file: message.file,
-							pluginVersion: message.pluginVersion,
-							capabilities: message.capabilities,
-							linkId: message.linkId ?? null,
-						};
-						const ack: HandshakeAck = {
-							type: "handshake_ack",
-							serverVersion: packageJson.version,
-						};
-						socket.send(JSON.stringify(ack));
-						if (replaced) {
-							// One bridged file at a time: the newest plugin instance wins.
-							log(
-								`[bridge] warning: a newer plugin connection (“${message.file.name}”) ` +
-									`replaced the one for “${replaced.file.name}”`,
-							);
-							rejectPending("was replaced by a newer one");
-							replaced.socket.close(
-								CLOSE_CODE_REPLACED,
-								"Replaced by a newer plugin connection",
-							);
-						}
-						log(`[bridge] plugin connected: ${message.file.name}`);
-						return;
-					}
-					const request = pending.get(message.id);
-					if (!request) return;
-					pending.delete(message.id);
-					if (message.ok) request.resolve(message.result);
-					else request.reject(new PluginCommandError(message.error));
-				},
-				close(socket) {
-					if (session?.socket !== socket) return;
-					session = undefined;
-					rejectPending("closed");
-					log("[bridge] plugin disconnected");
-				},
-			},
+	function onMessage(socket: WebSocket, data: unknown) {
+		let message: ReturnType<typeof parsePluginMessage>;
+		try {
+			message = parsePluginMessage(JSON.parse(String(data)));
+		} catch (error) {
+			log(`[bridge] dropped invalid plugin message: ${error}`);
+			return;
+		}
+		if (message.type === "handshake") {
+			const replaced = session?.socket !== socket ? session : undefined;
+			session = {
+				socket,
+				file: message.file,
+				pluginVersion: message.pluginVersion,
+				capabilities: message.capabilities,
+				linkId: message.linkId ?? null,
+			};
+			const ack: HandshakeAck = {
+				type: "handshake_ack",
+				serverVersion: packageJson.version,
+			};
+			socket.send(JSON.stringify(ack));
+			if (replaced) {
+				// One bridged file at a time: the newest plugin instance wins.
+				log(
+					`[bridge] warning: a newer plugin connection (“${message.file.name}”) ` +
+						`replaced the one for “${replaced.file.name}”`,
+				);
+				rejectPending("was replaced by a newer one");
+				replaced.socket.close(
+					CLOSE_CODE_REPLACED,
+					"Replaced by a newer plugin connection",
+				);
+			}
+			log(`[bridge] plugin connected: ${message.file.name}`);
+			return;
+		}
+		const request = pending.get(message.id);
+		if (!request) return;
+		pending.delete(message.id);
+		if (message.ok) request.resolve(message.result);
+		else request.reject(new PluginCommandError(message.error));
+	}
+
+	function onClose(socket: WebSocket) {
+		if (session?.socket !== socket) return;
+		session = undefined;
+		rejectPending("closed");
+		log("[bridge] plugin disconnected");
+	}
+
+	const sockets = new WebSocketServer({ noServer: true });
+	sockets.on("connection", (socket) => {
+		socket.on("message", (data) => onMessage(socket, data));
+		socket.on("close", () => onClose(socket));
+	});
+
+	/** Listens on `hostname`; rejects when it can't, the port being taken say. */
+	async function serve(hostname: string, port: number): Promise<Server> {
+		const server = createServer((_, response) => {
+			response.writeHead(426).end("Figma Agent Tool bridge: WebSocket only");
 		});
-	const server = serve(BRIDGE_HOSTNAME, port);
-	const boundPort = server.port ?? port;
-	let serverIpv6: typeof server | undefined;
+		server.on("upgrade", (request, socket, head) => {
+			sockets.handleUpgrade(request, socket, head, (ws) =>
+				sockets.emit("connection", ws, request),
+			);
+		});
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(port, hostname, () => {
+				server.off("error", reject);
+				resolve();
+			});
+		});
+		return server;
+	}
+	const server = await serve(BRIDGE_HOSTNAME, port);
+	const address = server.address();
+	const boundPort =
+		typeof address === "object" && address ? address.port : port;
+	let serverIpv6: Server | undefined;
 	try {
-		serverIpv6 = serve(BRIDGE_HOSTNAME_IPV6, boundPort);
+		serverIpv6 = await serve(BRIDGE_HOSTNAME_IPV6, boundPort);
 	} catch (error) {
 		// No IPv6 loopback on this machine: localhost resolves to 127.0.0.1.
 		log(`[bridge] not listening on [${BRIDGE_HOSTNAME_IPV6}]: ${error}`);
@@ -247,11 +265,12 @@ export function startBridge({
 
 		stop() {
 			rejectPending("closed");
-			// Not awaited: in Bun 1.2 the returned promise never settles once the
-			// server has closed a socket itself (connection replacement), although
-			// the server does stop.
-			void server.stop(true);
-			void serverIpv6?.stop(true);
+			for (const socket of sockets.clients) socket.terminate();
+			sockets.close();
+			for (const http of [server, serverIpv6]) {
+				http?.close();
+				http?.closeAllConnections();
+			}
 		},
 	};
 }

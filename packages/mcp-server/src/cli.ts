@@ -1,11 +1,11 @@
-#!/usr/bin/env bun
 // The CLI: the same Design Project workflow as the MCP tools, for harnesses
 // without MCP, scripts and CI. Push, Pull and relink host the plugin bridge
 // themselves for the length of the command, so the MCP server mustn't be
 // holding its port at the same time.
-import { writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
-import { createInterface } from "node:readline/promises";
+import { copyFile, mkdir, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import {
 	checkProject,
 	chooseDirection,
@@ -63,6 +63,9 @@ Commands:
   adopt [<frame>...] [--yes]
                             Start the Design Project from the Bridged File's
                             frames (by name or ID); lists them without any
+  skill [--into .claude/skills]
+                            Install the agent skill (figma-agent-tool/SKILL.md)
+                            into a harness's skills folder
   mcp                       Run the MCP server on stdio
 
 Options:
@@ -140,6 +143,8 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
 				return await withBridge(flags, env, io, (bridge) =>
 					adopt(dir, bridge, rest, flags.has("yes"), io),
 				);
+			case "skill":
+				return await installSkill(flags, io);
 			case "mcp":
 				await import("./main");
 				return await new Promise<number>(() => {});
@@ -179,6 +184,22 @@ async function init(
 		screenSize,
 	});
 	io.out(`Created a Design Project in ${created}: ${files.join(", ")}`);
+	return 0;
+}
+
+/** The agent skill, next to src/ and dist/ alike. */
+const SKILL = fileURLToPath(new URL("../skill/SKILL.md", import.meta.url));
+
+async function installSkill(flags: Args["flags"], io: CliIo): Promise<number> {
+	const into = flags.get("into") ?? join(".claude", "skills");
+	if (into === true) {
+		io.err("--into takes the skills folder, like .claude/skills.");
+		return 1;
+	}
+	const file = resolve(into, "figma-agent-tool", "SKILL.md");
+	await mkdir(dirname(file), { recursive: true });
+	await copyFile(SKILL, file);
+	io.out(`Installed the agent skill to ${file}`);
 	return 0;
 }
 
@@ -259,7 +280,7 @@ async function preview(
 ): Promise<number> {
 	await loadProject(dir);
 	const port = flags.has("port") ? Number(flags.get("port")) : undefined;
-	const server = startPreview({ dir, port });
+	const server = await startPreview({ dir, port });
 	io.out(`Preview of ${resolve(dir)} at ${server.url} (Ctrl+C to stop)`);
 	return new Promise<number>(() => {});
 }
@@ -300,7 +321,7 @@ async function withBridge(
 	const waitMs = Number(flags.get("wait") ?? 60) * 1000;
 	let bridge: Bridge;
 	try {
-		bridge = startBridge({ port, log: () => {} });
+		bridge = await startBridge({ port, log: () => {} });
 	} catch (error) {
 		io.err(
 			`Can't host the plugin bridge on port ${port} (${(error as Error).message}). If the MCP server is running, it holds that port: use its push and pull tools, or stop it first.`,
@@ -318,7 +339,7 @@ async function withBridge(
 					io.err(`The Figma plugin didn't connect within ${waitMs / 1000} s.`);
 					return 1;
 				}
-				await Bun.sleep(100);
+				await sleep(100);
 			}
 		}
 		return await run(bridge);
@@ -509,24 +530,4 @@ async function adopt(
 		`Adopted “${result.linkedFile.name}”: it's the Linked File, page “${result.screensPage.name}” the Screens Page.`,
 	);
 	return 0;
-}
-
-if (import.meta.main) {
-	const confirm = process.stdin.isTTY
-		? async (question: string) => {
-				const prompt = createInterface({
-					input: process.stdin,
-					output: process.stderr,
-				});
-				const answer = await prompt.question(`${question} [y/N] `);
-				prompt.close();
-				return /^y(es)?$/i.test(answer.trim());
-			}
-		: undefined;
-	const code = await runCli(process.argv.slice(2), {
-		out: (line) => console.log(line),
-		err: (line) => console.error(line),
-		confirm,
-	});
-	process.exit(code);
 }
