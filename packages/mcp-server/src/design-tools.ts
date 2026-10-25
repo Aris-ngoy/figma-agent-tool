@@ -287,11 +287,15 @@ export function registerDesignTools(
 				"styles), updated in place too, with a variable mode per Mode in modes.yaml. Fills, spacing, radii and text written with a token's " +
 				"var(--…) are bound to its variable or style. Prototype Links (href) become on-click " +
 				"NAVIGATEs to their Screen's frame; other interactions designers made stay as they are. " +
+				"Every Defined Component (components/<name>.html) becomes (or updates) a component set " +
+				"of its variants on the Screens Page, Linked ones (components/<name>.json) are found in " +
+				"the file or its libraries (refused if one isn't), and Screens' custom elements become " +
+				"instances with their properties. " +
 				"One undo step. Writes a data-key into " +
 				"every element. The first Push asks to confirm the Bridged File before linking it " +
 				"(status confirm_link): ask the user, then call again with confirmLink. Refused " +
 				"while the Bridged File isn't the Linked File, a Screen or DESIGN.md fails Check or " +
-				"has Sync Conflicts, or a frame or the Design System has Unpulled Changes (Pull first). " +
+				"has Sync Conflicts, or a frame, Component or the Design System has Unpulled Changes (Pull first). " +
 				"A Screen's Directions are never pushed to the Screens Page: with `directions`, Push " +
 				"instead copies them, labelled “<screen> / <direction>”, side by side on the " +
 				"Explorations Page (replacing earlier copies), which Pull never reads.",
@@ -335,7 +339,10 @@ export function registerDesignTools(
 				"against the Baseline (the last Push or Pull). Where both sides changed the same " +
 				"element or token, the file gets Sync Conflict markers (<<<<<<< Design Project / " +
 				"======= / >>>>>>> Figma): keep one side, delete the markers, then Push. Layers the " +
-				"Screen Subset can't express stay in Figma and are listed as `unsupported`.",
+				"Screen Subset can't express stay in Figma and are listed as `unsupported`. Instance " +
+				"overrides of Component properties become the instance's attributes, a detached " +
+				"instance becomes plain elements, and edits to a Defined Component's main component " +
+				"merge into components/; Linked Components' own design is never pulled.",
 		},
 		async () => jsonResult(await pullDesignProject(designDir, bridge)),
 		EXPECTED,

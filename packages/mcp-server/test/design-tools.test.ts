@@ -3,6 +3,9 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
+	avatarComponent,
+	componentFiles,
+	detachInstance,
 	layerByKey,
 	linkedScreens,
 	loginScreen,
@@ -1494,5 +1497,199 @@ describe("Directions", () => {
 		expect(plugin.screens.frame("login").children?.[1]?.text?.characters).toBe(
 			"Welcome back!",
 		);
+	});
+});
+
+describe("Components", () => {
+	const files = { "screens/login.html": null, ...componentFiles };
+
+	/** The fixture's Components and start Screen, with the avatar in the plugin's library. */
+	async function withComponents(overrides: Record<string, string | null> = {}) {
+		const setup = await withProject({ ...files, ...overrides });
+		setup.plugin.screens.components.addLibraryComponent(avatarComponent);
+		const start = join(setup.designDir, "screens/start.html");
+		const button = join(setup.designDir, "components/app-button.html");
+		return {
+			...setup,
+			readStart: () => readFile(start, "utf8"),
+			readButton: () => readFile(button, "utf8"),
+			startFrame: () => setup.plugin.screens.frame("start"),
+			buttonNode: () =>
+				setup.plugin.screens.components.defined.get("app-button") as SyncedNode,
+		};
+	}
+
+	async function pushedComponents(
+		overrides: Record<string, string | null> = {},
+	) {
+		const setup = await withComponents(overrides);
+		const result = await setup.harness.callTool("push", { confirmLink: true });
+		expect(result.isError).toBeFalsy();
+		return { ...setup, result };
+	}
+
+	test("Push creates a component set per Defined Component, and the Screens use instances of it", async () => {
+		const { result, buttonNode, startFrame, designDir } =
+			await pushedComponents();
+		expect(structured(result)).toMatchObject({
+			status: "pushed",
+			components: [
+				{ component: "app-button", nodeId: buttonNode().id, created: true },
+			],
+		});
+		expect(buttonNode()).toMatchObject({
+			type: "COMPONENT_SET",
+			name: "app-button",
+			children: [
+				{ type: "COMPONENT", name: "kind=primary" },
+				{ type: "COMPONENT", name: "kind=secondary" },
+			],
+		});
+		const [, primary, secondary, avatar] = startFrame().children ?? [];
+		expect(primary).toMatchObject({
+			type: "INSTANCE",
+			instance: {
+				mainId: buttonNode().children?.[0]?.id,
+				setId: buttonNode().id,
+				properties: { kind: "primary", label: "Get started" },
+			},
+		});
+		expect(secondary?.instance?.mainId).toBe(
+			buttonNode().children?.[1]?.id as string,
+		);
+		expect(avatar).toMatchObject({
+			type: "INSTANCE",
+			instance: { setId: "5:1", properties: { size: "large", initials: "AB" } },
+		});
+		// Keys were written into the Component's file, as into Screens.
+		expect(
+			await readFile(join(designDir, "components/app-button.html"), "utf8"),
+		).toContain('<component data-key="e1" data-variant="kind=primary"');
+		// What Push found of the Linked Component is recorded.
+		const record = JSON.parse(
+			await readFile(join(designDir, "sync/linked/app-avatar.json"), "utf8"),
+		);
+		expect(record).toEqual({
+			componentId: "5:1",
+			key: "avatar-key",
+			properties: avatarComponent.properties,
+			variants: avatarComponent.variants,
+		});
+	});
+
+	test("Pushing again keeps the Components' and instances' node IDs, and Pull finds nothing new", async () => {
+		const { harness, buttonNode, startFrame, readStart, readButton } =
+			await pushedComponents();
+		const before = [ids(buttonNode()), ids(startFrame())];
+		const [start, button] = [await readStart(), await readButton()];
+		const again = await harness.callTool("push");
+		expect(again.isError).toBeFalsy();
+		expect([ids(buttonNode()), ids(startFrame())]).toEqual(before);
+		expect(structured(await harness.callTool("pull"))).toMatchObject({
+			components: [{ component: "app-button", status: "unchanged" }],
+			screens: [{ screen: "start", status: "unchanged" }],
+		});
+		expect([await readStart(), await readButton()]).toEqual([start, button]);
+	});
+
+	test("check and Push reject an instance of a Component the Design Project doesn't have", async () => {
+		const { harness } = await withComponents({
+			"screens/start.html": `<body style="display:flex">\n  <app-card></app-card>\n</body>\n`,
+		});
+		const check = await harness.callTool("check_design_project");
+		expect(text(check)).toContain("unknown-component");
+		const push = await harness.callTool("push", { confirmLink: true });
+		expect(push.isError).toBe(true);
+		expect(text(push)).toContain(
+			"screens/start.html:2 body > app-card [unknown-component]",
+		);
+	});
+
+	test("Push fails, naming it, when a Linked Component isn't in the file or its libraries", async () => {
+		const { harness, plugin } = await withComponents({
+			"components/app-avatar.json": `{ "key": "gone" }\n`,
+		});
+		const push = await harness.callTool("push", { confirmLink: true });
+		expect(push.isError).toBe(true);
+		expect(text(push)).toContain(
+			'Linked Component app-avatar: no component with key "gone"',
+		);
+		expect(plugin.screens.frames.size).toBe(0);
+	});
+
+	test("Pull writes a designer's instance overrides as attributes, and a detached instance as plain elements", async () => {
+		const { harness, startFrame, buttonNode, readStart } =
+			await pushedComponents();
+		const secondary = layerByKey(startFrame(), "e4");
+		Object.assign(secondary.instance ?? {}, {
+			properties: { kind: "primary", label: "Create account" },
+		});
+		detachInstance(
+			startFrame(),
+			"e3",
+			buttonNode().children?.[0] as SyncedNode,
+			(() => {
+				let id = 0;
+				return () => `8:${++id}`;
+			})(),
+		);
+		expect(structured(await harness.callTool("get_status"))).toMatchObject({
+			designProject: { unpulledChanges: ["start"] },
+		});
+		const result = await harness.callTool("pull");
+		expect(structured(result)).toMatchObject({
+			screens: [{ screen: "start", status: "merged", conflicts: 0 }],
+		});
+		const start = await readStart();
+		expect(start).toContain(
+			'<app-button data-key="e4" label="Create account"></app-button>',
+		);
+		expect(start).toContain(
+			'<div data-key="e3" data-name="app-button" style="display:flex; justify-content:center; padding:12px 16px; align-self:stretch; background-color:#3366ff; border-radius:12px">\n    <p data-key="e6" style="color:#ffffff; font-weight:600">Sign in</p>\n  </div>',
+		);
+		const again = await harness.callTool("push");
+		expect(again.isError).toBeFalsy();
+	});
+
+	test("Pull merges a designer's edits to a Defined Component's main component into its file; Push refuses until then", async () => {
+		const { harness, buttonNode, readButton } = await pushedComponents();
+		const secondary = buttonNode().children?.[1] as SyncedNode;
+		secondary.cornerRadius = 20;
+		const refused = await harness.callTool("push");
+		expect(refused.isError).toBe(true);
+		expect(text(refused)).toContain(
+			"the Component app-button has Unpulled Changes",
+		);
+		const result = await harness.callTool("pull");
+		expect(structured(result)).toMatchObject({
+			components: [{ component: "app-button", status: "merged", conflicts: 0 }],
+		});
+		expect(await readButton()).toContain(
+			'<component data-key="e3" data-variant="kind=secondary" style="display:flex; justify-content:center; padding:12px 16px; border-radius:20px; border-width:1px; border-color:var(--colors-primary)">',
+		);
+		const again = await harness.callTool("push");
+		expect(again.isError).toBeFalsy();
+	});
+
+	test("edits to a Linked Component in its library are never Pulled", async () => {
+		const { harness, plugin, designDir } = await pushedComponents();
+		plugin.screens.components.addLibraryComponent({
+			...avatarComponent,
+			properties: {
+				...avatarComponent.properties,
+				initials: { type: "TEXT", default: "ZZ" },
+			},
+		});
+		const result = await harness.callTool("pull");
+		expect(structured(result)).toMatchObject({
+			components: [{ component: "app-button" }],
+			screens: [{ screen: "start", status: "unchanged" }],
+		});
+		expect(existsSync(join(designDir, "components/app-avatar.html"))).toBe(
+			false,
+		);
+		expect(
+			await readFile(join(designDir, "components/app-avatar.json"), "utf8"),
+		).toBe(`{ "key": "avatar-key" }\n`);
 	});
 });

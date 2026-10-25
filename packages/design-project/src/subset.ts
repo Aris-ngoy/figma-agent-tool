@@ -5,12 +5,36 @@ import type { Tokens } from "./design-md";
 
 /**
  * What an element becomes in Figma: a frame, text, a rectangle, an image or
- * a vector; or a Figma-owned Element, which stands for a layer the Screen
- * Subset can't express.
+ * a vector; an instance of a Component; or a Figma-owned Element, which
+ * stands for a layer the Screen Subset can't express.
  */
-export type Kind = "frame" | "text" | "rect" | "image" | "vector" | "owned";
+export type Kind =
+	| "frame"
+	| "text"
+	| "rect"
+	| "image"
+	| "vector"
+	| "instance"
+	| "owned";
 
 export const FIGMA_OWNED_TAG = "figma-owned";
+
+/** A Defined Component's root, one per variant: its component in Figma. */
+export const COMPONENT_TAG = "component";
+
+/** The stand-in root holding a Component's variants: its component set. */
+export const COMPONENT_SET_TAG = "component-set";
+
+/**
+ * A Component's name, which is the custom element Screens use it as: lower
+ * case, with a hyphen, as HTML's custom elements are.
+ */
+export const COMPONENT_NAME = /^[a-z][a-z0-9]*(-[a-z0-9]+)+$/;
+
+/** Whether a tag is a custom element: an instance of a Component. */
+export function isComponentTag(tag: string): boolean {
+	return COMPONENT_NAME.test(tag) && tag !== FIGMA_OWNED_TAG;
+}
 
 export const TEXT_TAGS = new Set([
 	"p",
@@ -30,6 +54,8 @@ export const DEFAULT_TAGS: Record<Kind, string> = {
 	rect: "div",
 	image: "img",
 	vector: "svg",
+	// An instance's tag is its Component's name.
+	instance: "",
 	owned: FIGMA_OWNED_TAG,
 };
 
@@ -39,6 +65,8 @@ export const DEFAULT_NAMES: Record<Exclude<Kind, "text">, string> = {
 	rect: "Rectangle",
 	image: "Image",
 	vector: "Vector",
+	// Named after its Component.
+	instance: "",
 	// Its layer's name is always written.
 	owned: "",
 };
@@ -59,12 +87,21 @@ type PropSpec = { kinds: Kind[]; type: ValueType; default?: string };
 
 const LAYOUT: Kind[] = ["frame"];
 const BOXES: Kind[] = ["frame", "rect", "image"];
-/** Figma-owned Elements take only these: their place and size. */
-const SIZED: Kind[] = [...BOXES, "vector", "owned"];
+/** Instances and Figma-owned Elements take only these: their place and size. */
+const SIZED: Kind[] = [...BOXES, "vector", "instance", "owned"];
 const PLACED: Kind[] = [...SIZED, "text"];
-const ALL: Kind[] = PLACED.filter((kind) => kind !== "owned");
+const ALL: Kind[] = PLACED.filter(
+	(kind) => kind !== "owned" && kind !== "instance",
+);
 /** Vectors can't fill their parent: Figma would scale their paths. */
-const STRETCHY: Kind[] = ["frame", "text", "rect", "image", "owned"];
+const STRETCHY: Kind[] = [
+	"frame",
+	"text",
+	"rect",
+	"image",
+	"instance",
+	"owned",
+];
 
 /**
  * Longhand properties in the order Screens are printed. `display: flex` is

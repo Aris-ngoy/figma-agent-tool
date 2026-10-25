@@ -1572,7 +1572,24 @@ export const SYNC_KEYS = {
 	link: "link",
 	// On a copy of a Direction on the Explorations Page: its Screen's name.
 	exploration: "exploration",
+	// On a Defined Component's component set (or lone component): its name.
+	component: "component",
 } as const;
+
+/**
+ * A Component property as Screens set it: values are strings (booleans as
+ * "true" and "false"), and names are Figma's without their `#id` suffix.
+ */
+export const ScreenComponentProperty = z.discriminatedUnion("type", [
+	z.object({
+		type: z.literal("VARIANT"),
+		default: z.string(),
+		options: z.array(z.string()),
+	}),
+	z.object({ type: z.literal("TEXT"), default: z.string() }),
+	z.object({ type: z.literal("BOOLEAN"), default: z.string() }),
+]);
+export type ScreenComponentProperty = z.infer<typeof ScreenComponentProperty>;
 
 const ScreenSizing = z.object({ horizontal: Sizing, vertical: Sizing });
 
@@ -1765,6 +1782,17 @@ const ScreenStroke = z.object({
 	join: z.enum(["MITER", "ROUND", "BEVEL"]).optional(),
 });
 
+const SCREEN_NODE_TYPES = [
+	"FRAME",
+	"TEXT",
+	"RECTANGLE",
+	"VECTOR",
+	"OWNED",
+	"INSTANCE",
+	"COMPONENT",
+	"COMPONENT_SET",
+] as const;
+
 export type ScreenNode = {
 	// The layer to update in place; absent to create one.
 	id?: string;
@@ -1773,7 +1801,11 @@ export type ScreenNode = {
 	// OWNED: a Figma-owned Element's layer `id`, of any type, which Push
 	// leaves as it is apart from placing it in the tree and, with `place`,
 	// naming, sizing and positioning it like any layer.
-	type: "FRAME" | "TEXT" | "RECTANGLE" | "VECTOR" | "OWNED";
+	// COMPONENT_SET and COMPONENT: a Defined Component's tree, laid out like
+	// a FRAME; a COMPONENT_SET holds one COMPONENT per variant.
+	// INSTANCE: an instance of `component`, of which Push sets only the
+	// properties, name, place and size.
+	type: (typeof SCREEN_NODE_TYPES)[number];
 	place?: boolean;
 	// Absent on TEXT: Figma names it after its characters.
 	name?: string;
@@ -1804,6 +1836,11 @@ export type ScreenNode = {
 	// Its Prototype Link: an on-click NAVIGATE to this Screen's frame. Without
 	// one, Push removes the layer's Prototype Link; other reactions stay.
 	link?: ScreenLink;
+	// INSTANCE: the Component's name, and every property's value.
+	component?: string;
+	properties?: Record<string, string>;
+	// TEXT in a Component: the text property its characters show.
+	property?: string;
 	children?: ScreenNode[];
 };
 
@@ -1819,7 +1856,7 @@ export const ScreenNode: z.ZodType<ScreenNode> = z
 	.object({
 		id: z.string().min(1).optional(),
 		key: z.string().min(1),
-		type: z.enum(["FRAME", "TEXT", "RECTANGLE", "VECTOR", "OWNED"]),
+		type: z.enum(SCREEN_NODE_TYPES),
 		place: z.boolean().optional(),
 		name: z.string().optional(),
 		width: z.number().positive(),
@@ -1843,6 +1880,9 @@ export const ScreenNode: z.ZodType<ScreenNode> = z
 			.optional(),
 		bindings: ScreenBindings.optional(),
 		link: ScreenLink.optional(),
+		component: z.string().min(1).optional(),
+		properties: z.record(z.string(), z.string()).optional(),
+		property: z.string().min(1).optional(),
 		get children() {
 			return z.array(ScreenNode).optional();
 		},
@@ -1850,6 +1890,10 @@ export const ScreenNode: z.ZodType<ScreenNode> = z
 	.refine(
 		(node) => node.type !== "OWNED" || node.id !== undefined,
 		"An OWNED node names the layer it keeps by `id`.",
+	)
+	.refine(
+		(node) => node.type !== "INSTANCE" || node.component !== undefined,
+		"An INSTANCE node names its `component`.",
 	);
 
 const SyncedStroke = z.object({
@@ -1903,8 +1947,23 @@ export type SyncedNode = {
 	bindings?: Omit<ScreenBindings, "fill">;
 	// Its prototype reactions, when it has any.
 	reactions?: Reaction[];
+	// An INSTANCE's main component (and its component set, for a variant)
+	// and its property values; an instance's own layers aren't read.
+	instance?: z.infer<typeof SyncedInstance>;
+	// TEXT in a component: the text property its characters show.
+	property?: string;
 	children?: SyncedNode[];
 };
+
+const SyncedInstance = z.object({
+	mainId: z.string(),
+	mainKey: z.string().nullable(),
+	setId: z.string().optional(),
+	setKey: z.string().nullable().optional(),
+	// As ScreenComponentProperty names and writes them; instance-swap
+	// properties are left out.
+	properties: z.record(z.string(), z.string()),
+});
 
 /**
  * A layer as Pull reads it, at full depth: everything a Screen element can
@@ -1943,10 +2002,23 @@ export const SyncedNode: z.ZodType<SyncedNode> = z.object({
 	text: TextInfo.optional(),
 	bindings: ScreenBindings.omit({ fill: true }).optional(),
 	reactions: z.array(Reaction).optional(),
+	instance: SyncedInstance.optional(),
+	property: z.string().optional(),
 	get children() {
 		return z.array(SyncedNode).optional();
 	},
 });
+
+/** A Linked Component as Push found it: the node its instances come from, and its properties. */
+export const LinkedComponentInfo = z.object({
+	component: z.string(),
+	componentId: z.string(),
+	key: z.string().optional(),
+	properties: z.record(z.string(), ScreenComponentProperty),
+	// Its variants' names, when it's a component set.
+	variants: z.array(z.string()).optional(),
+});
+export type LinkedComponentInfo = z.infer<typeof LinkedComponentInfo>;
 
 /** How many levels of children to include below each returned node. */
 export const Depth = z.number().int().min(0).max(100);
@@ -2143,6 +2215,30 @@ export const commands = {
 			screenFrames: z.array(z.string().min(1)).default([]),
 			// Applied first, so the trees' bindings can refer to its tokens.
 			designSystem: DesignSystemPush.optional(),
+			// Defined Components, applied before the Screens (whose INSTANCEs
+			// use them) like Screens' trees: to their node (a component set,
+			// or a lone component) on the Screens Page, else to a new one.
+			components: z
+				.array(
+					z.object({
+						component: z.string().min(1),
+						nodeId: z.string().min(1).optional(),
+						tree: ScreenNode,
+						remove: z.array(z.string().min(1)).default([]),
+					}),
+				)
+				.default([]),
+			// Linked Components: found by node ID in the file, or imported
+			// from a library by key; nothing is pushed if one isn't found.
+			linked: z
+				.array(
+					z.object({
+						component: z.string().min(1),
+						key: z.string().min(1).optional(),
+						id: z.string().min(1).optional(),
+					}),
+				)
+				.default([]),
 		}),
 		result: z.object({
 			page: PageRef,
@@ -2150,6 +2246,11 @@ export const commands = {
 			images: z.record(z.string(), z.string()),
 			screens: z.array(z.object({ screen: z.string(), frame: SyncedNode })),
 			designSystem: PushedDesignSystem.optional(),
+			components: z
+				.array(z.object({ component: z.string(), node: SyncedNode }))
+				.default([]),
+			// What each Linked Component is in this file.
+			linked: z.array(LinkedComponentInfo).default([]),
 		}),
 	},
 	// Pushing Directions: replaces each Screen's copies of its Directions on
@@ -2176,6 +2277,8 @@ export const commands = {
 				)
 				.min(1),
 			images: z.record(z.string(), z.base64()).default({}),
+			// The node (component set or component) each INSTANCE's Component is.
+			components: z.record(z.string(), z.string().min(1)).default({}),
 		}),
 		result: z.object({
 			page: PageRef,
@@ -2204,11 +2307,24 @@ export const commands = {
 			screens: z.array(
 				z.object({ screen: z.string().min(1), frameId: z.string().min(1) }),
 			),
+			// Defined Components' nodes, found by ID or else by the Component
+			// in their shared plugin data.
+			components: z
+				.array(
+					z.object({
+						component: z.string().min(1),
+						nodeId: z.string().min(1),
+					}),
+				)
+				.default([]),
 		}),
 		result: z.object({
 			screens: z.array(
 				z.object({ screen: z.string(), frame: SyncedNode.nullable() }),
 			),
+			components: z
+				.array(z.object({ component: z.string(), node: SyncedNode.nullable() }))
+				.default([]),
 		}),
 	},
 	// Stores a Design Project's Link ID in the file.

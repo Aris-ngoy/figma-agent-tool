@@ -6,9 +6,11 @@
 import {
 	type DesignSystemPush,
 	FLOAT_BINDINGS,
+	type LinkedComponentInfo,
 	linkReaction,
 	type Paint,
 	type PushedDesignSystem,
+	type ScreenComponentProperty,
 	type ScreenFill,
 	type ScreenNode,
 	type SyncedDesignSystem,
@@ -26,6 +28,7 @@ export function applyScreenTree(
 		imageHash,
 		designSystem,
 		remove = [],
+		components,
 	}: {
 		nextId: () => string;
 		imageHash: (name: string) => string;
@@ -33,6 +36,8 @@ export function applyScreenTree(
 		designSystem?: FakeDesignSystem;
 		/** Layers to delete. */
 		remove?: string[];
+		/** What INSTANCE nodes are instances of. */
+		components?: FakeComponents;
 	},
 ): SyncedNode {
 	const old = new Map<string, SyncedNode>();
@@ -65,7 +70,44 @@ export function applyScreenTree(
 		return node;
 	};
 
+	/** An instance: Push sets its properties, name, place and size only. */
+	const instance = (spec: ScreenNode): SyncedNode => {
+		const existing = spec.id ? old.get(spec.id) : undefined;
+		const reuse = existing?.type === "INSTANCE" ? existing : undefined;
+		if (!components) throw new Error("No components to make instances of");
+		const node: SyncedNode = {
+			...(reuse
+				? structuredClone(reuse)
+				: {
+						id: nextId(),
+						type: "INSTANCE",
+						visible: true,
+						rotation: 0,
+						opacity: 1,
+						fills: [],
+						strokes: 0,
+						effects: 0,
+						cornerRadius: 0,
+					}),
+			key: spec.key,
+			name: spec.name ?? (spec.component as string),
+			x: spec.position?.x ?? reuse?.x ?? 0,
+			y: spec.position?.y ?? reuse?.y ?? 0,
+			width: spec.width,
+			height: spec.height,
+			sizing: spec.sizing,
+			instance: components.instance(
+				spec.component as string,
+				spec.properties ?? {},
+			),
+		};
+		if (spec.position) node.absolute = { horizontal: "MIN", vertical: "MIN" };
+		else delete node.absolute;
+		return node;
+	};
+
 	const apply = (spec: ScreenNode, isRoot: boolean): SyncedNode => {
+		if (spec.type === "INSTANCE") return instance(spec);
 		const existing = spec.id ? old.get(spec.id) : undefined;
 		const reuse = existing?.type === spec.type ? existing : undefined;
 		const node: SyncedNode = {
@@ -104,6 +146,7 @@ export function applyScreenTree(
 		if (spec.vector) node.vector = structuredClone(spec.vector);
 		if (spec.position) node.absolute = { horizontal: "MIN", vertical: "MIN" };
 		if (spec.layout) node.layout = structuredClone(spec.layout);
+		if (spec.property) node.property = spec.property;
 		if (designSystem && spec.bindings) bind(node, spec.bindings, designSystem);
 		if (spec.text) {
 			const { characters, fontName, fontSize, textAlignHorizontal } = spec.text;
@@ -114,7 +157,7 @@ export function applyScreenTree(
 				textAlignHorizontal,
 			};
 		}
-		if (spec.type === "FRAME") {
+		if (spec.layout) {
 			const children = (spec.children ?? []).flatMap(
 				(child) =>
 					(child.type === "OWNED" ? keep(child) : apply(child, false)) ?? [],
@@ -176,6 +219,170 @@ export function applyPrototypeLinks(
 		spec.children?.forEach(walk);
 	};
 	tree.children?.forEach(walk);
+}
+
+export type FakeComponents = ReturnType<typeof createFakeComponents>;
+
+/** A component in the file or a library, for a Linked Component to find. */
+export type FakeLibraryComponent = Omit<LinkedComponentInfo, "component">;
+
+/**
+ * A file's Defined Components, as Push makes them and designers edit them,
+ * and the components Linked Components find: by node ID in the file, or by
+ * key in a library.
+ */
+export function createFakeComponents(nextId: () => string) {
+	/** Defined Components' nodes (component sets, or lone components), by name. */
+	const defined = new Map<string, SyncedNode>();
+	const library = new Map<string, FakeLibraryComponent>();
+	/** Linked Components, by name, as the last push found them. */
+	const linked = new Map<string, FakeLibraryComponent>();
+
+	const variantId = (componentId: string, variant: string) =>
+		`${componentId}/${variant}`;
+
+	return {
+		defined,
+		/** Adds a component to the file or a library, for Linked Components. */
+		addLibraryComponent(component: FakeLibraryComponent) {
+			library.set(component.componentId, component);
+			if (component.key) library.set(component.key, component);
+		},
+
+		/** Applies a Defined Component's tree, as push_screens does. */
+		apply(
+			{
+				component,
+				nodeId,
+				tree,
+				remove,
+			}: {
+				component: string;
+				nodeId?: string;
+				tree: ScreenNode;
+				remove: string[];
+			},
+			options: Omit<Parameters<typeof applyScreenTree>[2], "remove">,
+		): SyncedNode {
+			const previous = defined.get(component);
+			const node = applyScreenTree(
+				tree,
+				previous && previous.id === nodeId ? previous : undefined,
+				{ ...options, remove },
+			);
+			defined.set(component, node);
+			return node;
+		},
+
+		/** Finds a Linked Component's component; undefined when it isn't there. */
+		resolve({
+			component,
+			key,
+			id,
+		}: {
+			component: string;
+			key?: string;
+			id?: string;
+		}): LinkedComponentInfo | undefined {
+			const found = library.get(key ?? id ?? "");
+			if (!found) return undefined;
+			linked.set(component, found);
+			return { component, ...structuredClone(found) };
+		},
+
+		/** What an instance of a Component with these properties reads as. */
+		instance(
+			component: string,
+			properties: Record<string, string>,
+		): NonNullable<SyncedNode["instance"]> {
+			const link = linked.get(component);
+			if (link) {
+				const values = Object.fromEntries(
+					Object.entries(link.properties).map(([name, property]) => [
+						name,
+						properties[name] ?? property.default,
+					]),
+				);
+				const unknown = Object.keys(properties).find(
+					(name) => !(name in link.properties),
+				);
+				if (unknown) throw new Error(`${component} has no property ${unknown}`);
+				const variant = variantName(link.properties, values);
+				return {
+					mainId: variant
+						? variantId(link.componentId, variant)
+						: link.componentId,
+					mainKey: link.key ?? null,
+					...(variant && { setId: link.componentId, setKey: link.key ?? null }),
+					properties: values,
+				};
+			}
+			const node = defined.get(component);
+			if (!node) throw new Error(`No component ${component}`);
+			if (node.type !== "COMPONENT_SET")
+				return {
+					mainId: node.id,
+					mainKey: null,
+					properties: { ...properties },
+				};
+			const main = (node.children ?? []).find((variant) =>
+				variant.name.split(", ").every((pair) => {
+					const [name = "", value] = pair.split("=");
+					return properties[name] === value;
+				}),
+			);
+			if (!main) throw new Error(`${component} has no such variant`);
+			return {
+				mainId: main.id,
+				mainKey: null,
+				setId: node.id,
+				setKey: null,
+				properties: { ...properties },
+			};
+		},
+
+		nextId,
+	};
+}
+
+/** The variant properties' values as a variant name, or "" without any. */
+function variantName(
+	properties: Record<string, ScreenComponentProperty>,
+	values: Record<string, string>,
+): string {
+	return Object.entries(properties)
+		.filter(([, property]) => property.type === "VARIANT")
+		.map(([name]) => `${name}=${values[name]}`)
+		.join(", ");
+}
+
+/**
+ * Detaches an instance, as a designer would: it becomes a frame (keeping
+ * its ID and key) holding copies of its main component's layers, which
+ * carry no keys.
+ */
+export function detachInstance(
+	frame: SyncedNode,
+	key: string,
+	main: SyncedNode,
+	nextId: () => string,
+) {
+	const node = layerByKey(frame, key);
+	const copy = (layer: SyncedNode): SyncedNode => {
+		const { property: _, children, ...rest } = structuredClone(layer);
+		return {
+			...rest,
+			id: nextId(),
+			key: null,
+			...(children && { children: children.map(copy) }),
+		};
+	};
+	const { id, name, x, y, sizing, absolute } = node;
+	const detached = { ...copy(main), id, key, name, x, y, sizing, absolute };
+	detached.type = "FRAME";
+	if (!absolute) delete detached.absolute;
+	for (const field of Object.keys(node)) delete node[field as keyof SyncedNode];
+	Object.assign(node, detached);
 }
 
 /** Records a pushed layer's bindings by variable and style ID, as Figma reads them. */

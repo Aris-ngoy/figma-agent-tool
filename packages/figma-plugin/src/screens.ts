@@ -1,5 +1,5 @@
-// Push and Pull: applies Screens' node trees to their frames in place and
-// reads frames back. Layers are matched by node ID, which the server keeps;
+// Push and Pull: applies Screens' node trees to their frames in place (and
+// Defined Components' to their component sets) and reads them back. Layers are matched by node ID, which the server keeps;
 // each layer's element key and each frame's Screen are stored in shared
 // plugin data, so a frame that is renamed, moved or cut and pasted stays
 // linked. Like create_nodes, a push does its async work first and edits the
@@ -8,6 +8,7 @@ import {
 	type CommandParams,
 	type CommandResult,
 	FLOAT_BINDINGS,
+	type LinkedComponentInfo,
 	linkReaction,
 	type Paint as PaintInfo,
 	type ScreenFill,
@@ -33,7 +34,27 @@ import {
 } from "./tokens";
 
 type Container = BaseNode & ChildrenMixin;
-type Layer = FrameNode | TextNode | RectangleNode | VectorNode;
+/** Frames, and Defined Components' component sets and components, which are laid out like them. */
+type FrameLike = FrameNode | ComponentNode | ComponentSetNode;
+type Layer = FrameLike | TextNode | RectangleNode | VectorNode;
+/** What a Component's instances come from: a component set, or a lone component. */
+type ComponentRoot = ComponentNode | ComponentSetNode;
+
+const isFrameLike = (node: BaseNode): node is FrameLike =>
+	node.type === "FRAME" ||
+	node.type === "COMPONENT" ||
+	node.type === "COMPONENT_SET";
+
+const isComponentRoot = (node: BaseNode | null | undefined) =>
+	(node?.type === "COMPONENT" || node?.type === "COMPONENT_SET") &&
+	!node.removed;
+
+/**
+ * A component property's name as an instance's attribute: without the `#id`
+ * Figma gives text and boolean ones, lower case, spaces as hyphens.
+ */
+const propertyName = (key: string) =>
+	(key.split("#")[0] as string).trim().toLowerCase().replace(/\s+/g, "-");
 
 const shared = (node: BaseNode, key: string) =>
 	node.getSharedPluginData(SYNC_NAMESPACE, key);
@@ -61,30 +82,40 @@ export async function pushScreens(
 		designSystem: tokens,
 		frames: linkedFrames,
 		screenFrames,
+		components,
+		linked,
 	}: CommandParams<"push_screens">,
 	deadline: Deadline = NO_DEADLINE,
 ): Promise<CommandResult<"push_screens">> {
 	const found = new Map<string, BaseNode>();
 	const ids = [
-		...screens.flatMap(({ frameId, tree, remove }) => [
-			...(frameId ? [frameId] : []),
-			...treeIds(tree),
-			...remove,
+		...[...components, ...screens].flatMap((item) => [
+			...("frameId" in item && item.frameId ? [item.frameId] : []),
+			...("nodeId" in item && item.nodeId ? [item.nodeId] : []),
+			...treeIds(item.tree),
+			...item.remove,
 		]),
 		...Object.values(linkedFrames),
 	];
-	const [page, loadedTokens] = await Promise.all([
+	const [page, loadedTokens, linkedComponents] = await Promise.all([
 		findPage(pageRef),
 		tokens && loadDesignSystem(tokens),
+		Promise.all(linked.map(findLinkedComponent)),
 		...ids.map(async (id) => {
 			const node = await figma.getNodeByIdAsync(id);
 			if (node) found.set(id, node);
 		}),
 	]);
 	if (page) await page.loadAsync();
+	const mains = await instanceMains(
+		screens.map(({ tree }) => tree),
+		found,
+	);
 	const fonts = [
 		...(loadedTokens?.fonts ?? []),
-		...screens.flatMap(({ tree }) => treeFonts(tree, found)),
+		...[...components, ...screens].flatMap(({ tree }) =>
+			treeFonts(tree, found),
+		),
 	];
 	const failed = await loadFonts(fonts);
 	const missing = fonts.find((font) => failed.has(fontKey(font)));
@@ -95,6 +126,11 @@ export async function pushScreens(
 		);
 	}
 	checkLinks(screens, linkedFrames, found);
+	checkInstances(
+		screens.map(({ tree }) => tree),
+		new Set(components.map(({ component }) => component)),
+		linkedComponents,
+	);
 	checkDeadline(deadline);
 
 	// Synchronous from here on: the document changes all at once.
@@ -107,6 +143,20 @@ export async function pushScreens(
 		]),
 	);
 	const applier = new Applier(found, hashes, designSystem);
+	for (const { component, root } of linkedComponents)
+		applier.components.set(component, root);
+	for (const [id, main] of mains) applier.mains.set(id, main);
+	// Components first, so the Screens' instances find them.
+	const pushedComponents = components.map((component) => ({
+		component: component.component,
+		root: applier.applyComponent(screensPage, component),
+	}));
+	for (const { remove } of components) {
+		for (const id of remove) {
+			const layer = found.get(id);
+			if (layer && !layer.removed && layer.type !== "PAGE") layer.remove();
+		}
+	}
 	const frames = screens.map(({ screen, frameId, tree, remove }) => {
 		for (const id of remove) {
 			const layer = found.get(id);
@@ -136,26 +186,171 @@ export async function pushScreens(
 		page: { id: screensPage.id, name: screensPage.name },
 		images: hashes,
 		...(designSystem && { designSystem: designSystem.result }),
-		screens: frames.map(({ screen, frame }) => ({
-			screen,
-			frame: readNode(frame),
-		})),
+		screens: await Promise.all(
+			frames.map(async ({ screen, frame }) => ({
+				screen,
+				frame: await readNode(frame),
+			})),
+		),
+		components: await Promise.all(
+			pushedComponents.map(async ({ component, root }) => ({
+				component,
+				node: await readNode(root),
+			})),
+		),
+		linked: linkedComponents.map(({ info }) => info),
 	};
+}
+
+/** A Linked Component's component set (or lone component), found by ID or imported by key. */
+async function findLinkedComponent({
+	component,
+	key,
+	id,
+}: CommandParams<"push_screens">["linked"][number]): Promise<{
+	component: string;
+	root: ComponentRoot;
+	info: LinkedComponentInfo;
+}> {
+	let node: BaseNode | null = null;
+	if (id) node = await figma.getNodeByIdAsync(id);
+	else if (key) {
+		node = await figma.importComponentSetByKeyAsync(key).catch(() => null);
+		node ??= await figma.importComponentByKeyAsync(key).catch(() => null);
+	}
+	if (!node || !isComponentRoot(node)) {
+		throw new CommandError(
+			"component_not_found",
+			`Linked Component ${component}: no component with ${key ? `key "${key}" in this file or its enabled libraries` : `ID ${id} in this file`}, so nothing was pushed. Fix components/${component}.json (a published component's or component set's key, or the node ID of one in this file).`,
+		);
+	}
+	// A variant stands for its component set.
+	const root = (
+		node.parent?.type === "COMPONENT_SET" ? node.parent : node
+	) as ComponentRoot;
+	return {
+		component,
+		root,
+		info: {
+			component,
+			componentId: root.id,
+			...(root.key && { key: root.key }),
+			...componentDefinitions(root),
+		},
+	};
+}
+
+/** A component set's (or lone component's) properties, as Screens set them. */
+function componentDefinitions(
+	root: ComponentRoot,
+): Pick<LinkedComponentInfo, "properties" | "variants"> {
+	const properties: LinkedComponentInfo["properties"] = {};
+	for (const [key, definition] of Object.entries(
+		root.componentPropertyDefinitions,
+	)) {
+		const name = propertyName(key);
+		const value = String(definition.defaultValue);
+		if (definition.type === "VARIANT")
+			properties[name] = {
+				type: "VARIANT",
+				default: value,
+				options: definition.variantOptions ?? [],
+			};
+		else if (definition.type === "TEXT" || definition.type === "BOOLEAN")
+			properties[name] = { type: definition.type, default: value };
+	}
+	if (root.type !== "COMPONENT_SET") return { properties };
+	const variants = root.children.map((child) =>
+		Object.entries((child as ComponentNode).variantProperties ?? {})
+			.map(([name, value]) => `${propertyName(name)}=${value}`)
+			.join(", "),
+	);
+	return { properties, variants };
+}
+
+/** The main components of the instances the trees update, which decide whether each can stay. */
+async function instanceMains(
+	trees: ScreenNode[],
+	found: Map<string, BaseNode>,
+): Promise<Map<string, ComponentNode>> {
+	const mains = new Map<string, ComponentNode>();
+	const walk = async (spec: ScreenNode) => {
+		const existing = spec.id ? found.get(spec.id) : undefined;
+		if (spec.type === "INSTANCE" && existing?.type === "INSTANCE") {
+			const main = await existing.getMainComponentAsync();
+			if (main) mains.set(existing.id, main);
+		}
+		await Promise.all((spec.children ?? []).map(walk));
+	};
+	await Promise.all(trees.map(walk));
+	return mains;
+}
+
+/**
+ * Every instance is of a Component of this push, and sets only properties
+ * a Linked Component has, to values it takes.
+ */
+function checkInstances(
+	trees: ScreenNode[],
+	defined: Set<string>,
+	linked: { component: string; info: LinkedComponentInfo }[],
+) {
+	const walk = (spec: ScreenNode) => {
+		const name = spec.component;
+		if (spec.type === "INSTANCE" && name !== undefined) {
+			const link = linked.find(({ component }) => component === name);
+			if (!link && !defined.has(name)) {
+				throw new CommandError(
+					"component_not_found",
+					`Layer ${spec.key} is an instance of ${name}, which this push doesn't send or link, so nothing was pushed.`,
+				);
+			}
+			for (const [property, value] of Object.entries(spec.properties ?? {})) {
+				const definition = link?.info.properties[property];
+				if (
+					!link ||
+					(definition &&
+						(definition.type !== "VARIANT" ||
+							definition.options.includes(value)))
+				)
+					continue;
+				const names = Object.keys(link.info.properties).join(", ");
+				throw new CommandError(
+					"invalid_property",
+					definition
+						? `Layer ${spec.key} sets ${property}="${value}" on ${name}, whose ${property} is one of ${(definition as { options: string[] }).options.join(", ")}, so nothing was pushed.`
+						: `Layer ${spec.key} sets ${property} on ${name}, which has no such property (${names ? `it has ${names}` : "it has none"}), so nothing was pushed.`,
+				);
+			}
+		}
+		spec.children?.forEach(walk);
+	};
+	trees.forEach(walk);
 }
 
 /** Room between frames on the Explorations Page. */
 const GAP = 100;
 
 export async function pushExplorations(
-	{ page: pageRef, screens, images }: CommandParams<"push_explorations">,
+	{
+		page: pageRef,
+		screens,
+		images,
+		components,
+	}: CommandParams<"push_explorations">,
 	deadline: Deadline = NO_DEADLINE,
 ): Promise<CommandResult<"push_explorations">> {
 	const found = new Map<string, BaseNode>();
+	const roots = new Map<string, ComponentRoot>();
 	const trees = screens.flatMap(({ directions }) =>
 		directions.map(({ tree }) => tree),
 	);
 	const [page] = await Promise.all([
 		findPage(pageRef),
+		...Object.entries(components).map(async ([component, id]) => {
+			const node = await figma.getNodeByIdAsync(id);
+			if (isComponentRoot(node)) roots.set(component, node as ComponentRoot);
+		}),
 		...trees.flatMap(treeIds).map(async (id) => {
 			const node = await figma.getNodeByIdAsync(id);
 			if (node) found.set(id, node);
@@ -181,6 +376,7 @@ export async function pushExplorations(
 			}
 		}
 	}
+	checkInstances(trees, new Set(roots.keys()), []);
 	checkDeadline(deadline);
 
 	// Synchronous from here on: the document changes all at once.
@@ -192,6 +388,8 @@ export async function pushExplorations(
 		]),
 	);
 	const applier = new Applier(found, hashes, undefined, true);
+	for (const [component, root] of roots)
+		applier.components.set(component, root);
 	const result = screens.map(({ screen, directions }) => {
 		// A Screen's copies go in a row: where its last copies were, else below the rest.
 		const old = explorations.children.filter(
@@ -226,16 +424,26 @@ export async function pushExplorations(
 
 export async function readScreens({
 	screens,
+	components,
 }: CommandParams<"read_screens">): Promise<CommandResult<"read_screens">> {
 	const frames = await Promise.all(
 		screens.map(async ({ screen, frameId }) => {
 			const node = await figma.getNodeByIdAsync(frameId);
 			const frame =
 				node?.type === "FRAME" ? node : await findFrameOfScreen(screen);
-			return { screen, frame: frame ? readNode(frame) : null };
+			return { screen, frame: frame ? await readNode(frame) : null };
 		}),
 	);
-	return { screens: frames };
+	const roots = await Promise.all(
+		components.map(async ({ component, nodeId }) => {
+			const node = await figma.getNodeByIdAsync(nodeId);
+			const root = isComponentRoot(node)
+				? (node as ComponentRoot)
+				: await findTopLevel(SYNC_KEYS.component, component);
+			return { component, node: root ? await readNode(root) : null };
+		}),
+	);
+	return { screens: frames, components: roots };
 }
 
 export async function getImage({
@@ -253,12 +461,19 @@ export async function getImage({
 
 /** A frame that was cut and pasted has a new ID but keeps its plugin data. */
 async function findFrameOfScreen(screen: string): Promise<FrameNode | null> {
+	const node = await findTopLevel(SYNC_KEYS.screen, screen);
+	return node?.type === "FRAME" ? node : null;
+}
+
+/** The top-level node of any page whose plugin data says it's this Screen's (or Component's). */
+async function findTopLevel(
+	key: string,
+	value: string,
+): Promise<SceneNode | null> {
 	await figma.loadAllPagesAsync();
 	for (const page of figma.root.children) {
 		for (const node of page.children) {
-			if (node.type === "FRAME" && shared(node, SYNC_KEYS.screen) === screen) {
-				return node;
-			}
+			if (shared(node, key) === value) return node;
 		}
 	}
 	return null;
@@ -364,6 +579,14 @@ class Applier {
 	private readonly textStyles: [TextNode, TextStyle | undefined][] = [];
 	/** Pushed layers below their frames, and the Prototype Link each should have. */
 	private readonly links: [ReactiveNode, ScreenNode["link"]][] = [];
+	/** The component set (or lone component) each Component's instances come from. */
+	readonly components = new Map<string, ComponentRoot>();
+	/** Existing instances' main components, by instance ID. */
+	readonly mains = new Map<string, ComponentNode>();
+	/** Layers made for keys before their tree is applied (a new set's variants). */
+	private readonly made = new Map<string, SceneNode>();
+	/** While applying a Component: its text layers, and the text property each shows. */
+	private texts: [TextNode, string | undefined][] | undefined;
 
 	constructor(
 		private readonly found: Map<string, BaseNode>,
@@ -405,9 +628,152 @@ class Applier {
 		}
 	}
 
+	/**
+	 * Applies a Defined Component's tree to its component set (or lone
+	 * component), made on the page below everything else when it has none.
+	 */
+	applyComponent(
+		page: PageNode,
+		{
+			component,
+			nodeId,
+			tree,
+		}: CommandParams<"push_screens">["components"][number],
+	): ComponentRoot {
+		const existing = nodeId ? this.found.get(nodeId) : undefined;
+		let root: ComponentRoot;
+		if (tree.type === "COMPONENT_SET") {
+			if (existing?.type === "COMPONENT_SET" && !existing.removed) {
+				root = existing;
+			} else {
+				const variants = (tree.children ?? []).map((spec) => {
+					const variant = this.layerFor(spec) as ComponentNode;
+					this.made.set(spec.key, variant);
+					return variant;
+				});
+				root = figma.combineAsVariants(variants, page);
+			}
+		} else {
+			root = this.layerFor(tree) as ComponentNode;
+			if (root.parent !== page) page.appendChild(root);
+		}
+		const isNew = !isComponentRoot(existing);
+		root.setSharedPluginData(SYNC_NAMESPACE, SYNC_KEYS.component, component);
+		this.texts = [];
+		this.apply(root, tree, true);
+		this.applyTextProperties(root, this.texts);
+		this.texts = undefined;
+		this.made.clear();
+		if (isNew) {
+			const others = page.children.filter((node) => node !== root);
+			root.x = 0;
+			root.y = Math.max(0, ...others.map((node) => node.y + node.height + GAP));
+		}
+		this.components.set(component, root);
+		return root;
+	}
+
+	/**
+	 * Gives the Component (its set, for variants) a text property per name
+	 * its text layers show, defaulting to the first one's characters, and
+	 * points the layers at them; it drops the text properties it no longer has.
+	 */
+	private applyTextProperties(
+		root: ComponentRoot,
+		texts: [TextNode, string | undefined][],
+	) {
+		const definitions = root.componentPropertyDefinitions;
+		const wanted = new Map<string, string>();
+		for (const [node, property] of texts) {
+			if (property && !wanted.has(property))
+				wanted.set(property, node.characters);
+		}
+		const existing = new Map(
+			Object.entries(definitions)
+				.filter(([, definition]) => definition.type === "TEXT")
+				.map(([key]) => [propertyName(key), key]),
+		);
+		for (const [name, key] of existing) {
+			if (!wanted.has(name)) root.deleteComponentProperty(key);
+		}
+		const keys = new Map<string, string>();
+		for (const [name, defaultValue] of wanted) {
+			const key = existing.get(name);
+			if (!key) {
+				keys.set(name, root.addComponentProperty(name, "TEXT", defaultValue));
+				continue;
+			}
+			if (definitions[key]?.defaultValue !== defaultValue)
+				root.editComponentProperty(key, { defaultValue });
+			keys.set(name, key);
+		}
+		for (const [node, property] of texts) {
+			const key = property && keys.get(property);
+			node.componentPropertyReferences = key ? { characters: key } : {};
+		}
+	}
+
+	/** An instance: only its properties, name, place and size are the Screen's. */
+	private instance(node: InstanceNode, spec: ScreenNode) {
+		node.setSharedPluginData(SYNC_NAMESPACE, SYNC_KEYS.element, spec.key);
+		this.links.push([node, spec.link]);
+		if (spec.name !== undefined) node.name = spec.name;
+		const main = this.mainFor(spec);
+		const root = (
+			main.parent?.type === "COMPONENT_SET" ? main.parent : main
+		) as ComponentRoot;
+		const properties: Record<string, string | boolean> = {};
+		for (const [key, definition] of Object.entries(
+			root.componentPropertyDefinitions,
+		)) {
+			const value = spec.properties?.[propertyName(key)];
+			if (value === undefined) continue;
+			properties[key] =
+				definition.type === "BOOLEAN" ? value === "true" : value;
+		}
+		if (Object.keys(properties).length > 0) node.setProperties(properties);
+		place(node, hugsAsMain(main, node, spec), false);
+	}
+
+	/** The component an instance's Component and variant properties name. */
+	private mainFor(spec: ScreenNode): ComponentNode {
+		const root = this.components.get(spec.component ?? "");
+		if (!root) {
+			throw new CommandError(
+				"component_not_found",
+				`Layer ${spec.key} is an instance of ${spec.component}, which isn't in this file.`,
+			);
+		}
+		if (root.type === "COMPONENT") return root;
+		const definitions = root.componentPropertyDefinitions;
+		const wanted = Object.entries(definitions)
+			.filter(([, definition]) => definition.type === "VARIANT")
+			.map(([name, definition]) => [
+				name,
+				spec.properties?.[propertyName(name)] ??
+					String(definition.defaultValue),
+			]);
+		const main = root.children.find((variant) =>
+			wanted.every(
+				([name, value]) =>
+					(variant as ComponentNode).variantProperties?.[name as string] ===
+					value,
+			),
+		);
+		if (!main) {
+			throw new CommandError(
+				"invalid_property",
+				`Layer ${spec.key}: ${spec.component} has no variant ${wanted.map(([n, v]) => `${n}=${v}`).join(", ")}.`,
+			);
+		}
+		return main as ComponentNode;
+	}
+
 	apply(node: Layer, spec: ScreenNode, isRoot: boolean) {
 		node.setSharedPluginData(SYNC_NAMESPACE, SYNC_KEYS.element, spec.key);
-		if (!isRoot) this.links.push([node, spec.link]);
+		// Only a top-level node can be a component set.
+		if (!isRoot) this.links.push([node as ReactiveNode, spec.link]);
+		if (node.type === "TEXT") this.texts?.push([node, spec.property]);
 		this.unbind(node, spec);
 		if (spec.name !== undefined) node.name = spec.name;
 		else if (node.type === "TEXT") node.autoRename = true;
@@ -417,7 +783,7 @@ class Applier {
 			node.characters = spec.text.characters;
 			node.textAlignHorizontal = spec.text.textAlignHorizontal;
 		}
-		if (node.type === "FRAME" && spec.layout) {
+		if (isFrameLike(node) && spec.layout) {
 			const { layout } = spec;
 			node.layoutMode = layout.mode;
 			node.itemSpacing = layout.itemSpacing;
@@ -433,7 +799,7 @@ class Applier {
 			this.paint(fill, index === 0 ? spec.bindings?.fill : undefined),
 		);
 		applyStroke(node, spec);
-		if (node.type === "FRAME") node.clipsContent = spec.clips ?? false;
+		if (isFrameLike(node)) node.clipsContent = spec.clips ?? false;
 		if (node.type === "VECTOR" && spec.vector) {
 			// Sized first: resizing a vector scales its paths.
 			place(node, spec, isRoot);
@@ -452,7 +818,7 @@ class Applier {
 		node.opacity = spec.opacity ?? 1;
 		if (node.type !== "VECTOR") place(node, spec, isRoot);
 		this.bind(node, spec);
-		if (node.type === "FRAME") this.children(node, spec.children ?? []);
+		if (isFrameLike(node)) this.children(node, spec.children ?? []);
 	}
 
 	private variable(token: string | undefined): Variable | undefined {
@@ -483,7 +849,7 @@ class Applier {
 		for (const binding of FLOAT_BINDINGS) {
 			const variable = this.variable(spec.bindings?.[binding]);
 			if (!variable) continue;
-			if (binding !== "cornerRadius" && node.type !== "FRAME") continue;
+			if (binding !== "cornerRadius" && !isFrameLike(node)) continue;
 			for (const field of FLOAT_FIELDS[binding]) {
 				node.setBoundVariable(field, variable);
 			}
@@ -495,13 +861,16 @@ class Applier {
 	 * removes pushed layers the tree no longer has. Layers without a key are
 	 * the designers' and stay, after the pushed ones.
 	 */
-	private children(parent: FrameNode, specs: ScreenNode[]) {
+	private children(parent: FrameLike, specs: ScreenNode[]) {
 		const kept = new Set<BaseNode>();
 		specs.forEach((spec, index) => {
 			const child = this.layerFor(spec);
-			if (parent.children[index] !== child) parent.insertChild(index, child);
+			if (parent.children[index] !== child)
+				(parent as FrameNode).insertChild(index, child);
 			kept.add(child);
 			if (spec.type === "OWNED") this.keep(child, spec);
+			else if (spec.type === "INSTANCE")
+				this.instance(child as InstanceNode, spec);
 			else this.apply(child as Layer, spec, false);
 		});
 		for (const child of [...parent.children]) {
@@ -523,7 +892,20 @@ class Applier {
 	}
 
 	private layerFor(spec: ScreenNode): SceneNode {
+		const made = this.made.get(spec.key);
+		if (made) return made;
 		const existing = spec.id ? this.found.get(spec.id) : undefined;
+		if (spec.type === "INSTANCE") {
+			const main = this.mainFor(spec);
+			const current = existing && this.mains.get(existing.id);
+			const sameComponent =
+				current === main ||
+				(current?.parent?.type === "COMPONENT_SET" &&
+					current.parent === main.parent);
+			if (existing?.type === "INSTANCE" && !existing.removed && sameComponent)
+				return existing;
+			return main.createInstance();
+		}
 		if (spec.type === "OWNED") {
 			if (existing && !existing.removed) {
 				return this.copyOwned
@@ -547,6 +929,10 @@ class Applier {
 				return figma.createRectangle();
 			case "VECTOR":
 				return figma.createVector();
+			case "COMPONENT":
+				return figma.createComponent();
+			default:
+				throw new Error(`A ${spec.type} isn't made on its own.`);
 		}
 	}
 
@@ -576,17 +962,22 @@ type Placeable = SceneNode &
 		resize(width: number, height: number): void;
 	};
 
-/** Sizes a layer, and places it in or out of its parent's auto layout. */
+/**
+ * Sizes a layer, and places it in or out of its parent's auto layout. A
+ * Screen's frame is fixed at its size; a Component's set or lone component
+ * hugs its content unless it has a size.
+ */
 function place(node: Placeable, spec: ScreenNode, isRoot: boolean) {
-	const { horizontal, vertical } = isRoot
+	const screenFrame = isRoot && spec.type === "FRAME";
+	const { horizontal, vertical } = screenFrame
 		? { horizontal: "FIXED", vertical: "FIXED" }
 		: spec.sizing;
 	node.resize(
 		horizontal === "FIXED" ? spec.width : node.width,
 		vertical === "FIXED" ? spec.height : node.height,
 	);
-	if (isRoot) return;
-	position(node, spec);
+	if (screenFrame) return;
+	if (!isRoot) position(node, spec);
 	node.layoutSizingHorizontal = spec.sizing.horizontal;
 	node.layoutSizingVertical = spec.sizing.vertical;
 }
@@ -620,11 +1011,11 @@ function applyStroke(node: Layer, spec: ScreenNode) {
 		node.strokeCap = stroke.cap ?? "NONE";
 		node.strokeJoin = stroke.join ?? "MITER";
 	}
-	if (node.type === "FRAME") node.strokesIncludedInLayout = true;
+	if (isFrameLike(node)) node.strokesIncludedInLayout = true;
 }
 
-/** A layer and everything in it, as Pull reads it. */
-export function readNode(node: SceneNode): SyncedNode {
+/** A layer and everything in it (but an instance's own layers), as Pull reads it. */
+export async function readNode(node: SceneNode): Promise<SyncedNode> {
 	const out: SyncedNode = {
 		id: node.id,
 		key: shared(node, SYNC_KEYS.element) || null,
@@ -656,7 +1047,24 @@ export function readNode(node: SceneNode): SyncedNode {
 	}
 	const stroke = readStroke(node);
 	if (stroke) out.stroke = stroke;
-	if (node.type === "FRAME") out.clips = node.clipsContent;
+	if (node.type === "INSTANCE") {
+		const main = await node.getMainComponentAsync();
+		out.instance = readInstance(node, main);
+		if (node.layoutMode === "NONE" && main && out.sizing) {
+			type Sizing = NonNullable<SyncedNode["sizing"]>["horizontal"];
+			const hugs = (axis: "width" | "height", sizing: Sizing): Sizing =>
+				sizing === "FIXED" && round(node[axis]) === round(main[axis])
+					? "HUG"
+					: sizing;
+			out.sizing = {
+				horizontal: hugs("width", out.sizing.horizontal),
+				vertical: hugs("height", out.sizing.vertical),
+			};
+		}
+		if (node.reactions.length > 0) out.reactions = readReactions(node);
+		return out;
+	}
+	if (isFrameLike(node)) out.clips = node.clipsContent;
 	if (node.type === "VECTOR") {
 		out.vector = {
 			paths: node.vectorPaths.map(({ data, windingRule }) => ({
@@ -665,7 +1073,7 @@ export function readNode(node: SceneNode): SyncedNode {
 			})),
 		};
 	}
-	if (node.type === "FRAME") {
+	if (isFrameLike(node)) {
 		out.layout = {
 			mode: node.layoutMode,
 			itemSpacing: round(node.itemSpacing),
@@ -685,17 +1093,63 @@ export function readNode(node: SceneNode): SyncedNode {
 			...text(node),
 			textAlignHorizontal: node.textAlignHorizontal,
 		};
+		const property = node.componentPropertyReferences?.characters;
+		if (property) out.property = propertyName(property);
 	}
 	const bindings = readBindings(node);
 	if (bindings) out.bindings = bindings;
 	if ("reactions" in node && node.reactions.length > 0)
 		out.reactions = readReactions(node);
 	if ("children" in node) {
-		out.children = (node as Container).children.map((child) =>
-			readNode(child as SceneNode),
+		out.children = await Promise.all(
+			(node as Container).children.map((child) => readNode(child as SceneNode)),
 		);
 	}
 	return out;
+}
+
+/**
+ * An instance of a component without auto layout can't hug, so where the
+ * Screen has it hug it keeps its main component's size; readNode reads
+ * that size back as hugging.
+ */
+function hugsAsMain(
+	main: ComponentNode,
+	node: InstanceNode,
+	spec: ScreenNode,
+): ScreenNode {
+	if (node.layoutMode !== "NONE") return spec;
+	const { horizontal, vertical } = spec.sizing;
+	return {
+		...spec,
+		width: horizontal === "HUG" ? main.width : spec.width,
+		height: vertical === "HUG" ? main.height : spec.height,
+		sizing: {
+			horizontal: horizontal === "HUG" ? "FIXED" : horizontal,
+			vertical: vertical === "HUG" ? "FIXED" : vertical,
+		},
+	};
+}
+
+/** An instance's main component (and set) and property values, as Screens write them. */
+function readInstance(
+	node: InstanceNode,
+	main: ComponentNode | null,
+): SyncedNode["instance"] {
+	const set = main?.parent?.type === "COMPONENT_SET" ? main.parent : undefined;
+	const properties: Record<string, string> = {};
+	for (const [key, { type, value }] of Object.entries(
+		node.componentProperties,
+	)) {
+		if (type === "VARIANT" || type === "TEXT" || type === "BOOLEAN")
+			properties[propertyName(key)] = String(value);
+	}
+	return {
+		mainId: main?.id ?? "",
+		mainKey: main?.key || null,
+		...(set && { setId: set.id, setKey: set.key || null }),
+		properties,
+	};
 }
 
 /** How a layer's first stroke is drawn. */
@@ -711,7 +1165,7 @@ function readStroke(node: SceneNode): SyncedNode["stroke"] {
 		cap: ("strokeCap" in node ? mixed(node.strokeCap) : "NONE") as string,
 		join: ("strokeJoin" in node ? mixed(node.strokeJoin) : "MITER") as string,
 		dashed: "dashPattern" in node && node.dashPattern.length > 0,
-		...(node.type === "FRAME" && {
+		...(isFrameLike(node) && {
 			inLayout: node.strokesIncludedInLayout,
 		}),
 	};

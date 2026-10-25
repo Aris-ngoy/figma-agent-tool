@@ -113,6 +113,43 @@ export const linkedScreens: Record<string, string> = {
 `,
 };
 
+/**
+ * Components: a Defined button with two variants and a text property, a
+ * Linked avatar from a library, and a Screen using both.
+ */
+export const componentFiles: Record<string, string> = {
+	"components/app-button.html": `<component data-variant="kind=primary" style="display:flex; justify-content:center; padding:12px 16px; background-color:var(--colors-primary); border-radius:12px">
+  <p data-property="label" style="font-weight:600; color:#ffffff">Sign in</p>
+</component>
+<component data-variant="kind=secondary" style="display:flex; justify-content:center; padding:12px 16px; border:1px solid var(--colors-primary); border-radius:12px">
+  <p data-property="label" style="font-weight:600; color:var(--colors-primary)">Sign in</p>
+</component>
+`,
+	"components/app-avatar.json": `{ "key": "avatar-key" }\n`,
+	"screens/start.html": `<body style="display:flex; flex-direction:column; gap:16px; padding:24px">
+  <h1>Start</h1>
+  <app-button label="Get started" style="align-self:stretch"></app-button>
+  <app-button kind="secondary"></app-button>
+  <app-avatar size="large" style="width:40px; height:40px"></app-avatar>
+</body>
+`,
+};
+
+/** The library component the fixture's Linked avatar uses, as a fake file finds it. */
+export const avatarComponent = {
+	componentId: "5:1",
+	key: "avatar-key",
+	properties: {
+		size: {
+			type: "VARIANT" as const,
+			default: "small",
+			options: ["small", "large"],
+		},
+		initials: { type: "TEXT" as const, default: "AB" },
+	},
+	variants: ["size=small", "size=large"],
+};
+
 export const logoPng = framePng;
 
 export const projectConfig = {

@@ -1,6 +1,7 @@
-// The sync state a Design Project commits in sync/ (the Linked File, and per
-// Screen its Baseline and element ↔ node ID map), and the pure steps of Push
-// and Pull around the Plugin's reads and writes.
+// The sync state a Design Project commits in sync/ (the Linked File, per
+// Screen and Defined Component its Baseline and element ↔ node ID map, and
+// what Push read of Linked Components), and the pure steps of Push and Pull
+// around the Plugin's reads and writes.
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -11,17 +12,31 @@ import type {
 	ScreenNode,
 	SyncedNode,
 } from "@figma-agent-tool/protocol";
+import {
+	type ComponentDefinition,
+	componentDefinition,
+	type LinkedComponentRecord,
+} from "./components";
 import type { Tokens } from "./design-md";
 import type { DesignSystemBaseline, TokenBindings } from "./design-system";
+import { type HtmlNode, parseHtml } from "./html";
 import { assignElementKeys, elementKeys } from "./keys";
 import { mergeScreen } from "./merge";
-import { type FigmaOwnedLayer, fromSyncedNode, toScreenNode } from "./nodes";
+import {
+	type FigmaOwnedLayer,
+	fromComponentNode,
+	fromSyncedNode,
+	toScreenNode,
+} from "./nodes";
 import { printScreen } from "./print";
 import {
 	type DesignProject,
 	type DirectionFile,
 	defaultScreenSize,
+	definitionOf,
 	imagePath,
+	isComponentFile,
+	linkedComponentPath,
 	type ScreenFile,
 } from "./project";
 import {
@@ -30,8 +45,8 @@ import {
 	sameElement,
 	sameOwn,
 } from "./resolve";
-import { type Element, parseScreen } from "./screen";
-import { type Kind, PROP_NAMES, variableName } from "./subset";
+import { type Element, parseComponent, parseScreen } from "./screen";
+import { isComponentTag, type Kind, PROP_NAMES, variableName } from "./subset";
 
 /** The Linked File, as the first Push (or a re-link) recorded it. */
 export type Link = {
@@ -55,12 +70,16 @@ export type Baseline = {
 	nodes: Record<string, string>;
 	/** Image `src` → the Figma image made from it. */
 	images: Record<string, ImageRecord>;
+	/** The properties of the Components a Screen uses, as of the Baseline. */
+	components?: Record<string, ComponentDefinition>;
 };
 
 const linkPath = (project: { dir: string }) =>
 	join(project.dir, "sync", "link.json");
 const baselinePath = (project: { dir: string }, name: string) =>
 	join(project.dir, "sync", "screens", `${name}.json`);
+const componentBaselinePath = (project: { dir: string }, name: string) =>
+	join(project.dir, "sync", "components", `${name}.json`);
 const designSystemPath = (project: { dir: string }) =>
 	join(project.dir, "sync", "design-system.json");
 
@@ -106,7 +125,35 @@ export async function writeBaseline(
 export async function readBaselines(project: {
 	dir: string;
 }): Promise<Map<string, Baseline>> {
-	const dir = join(project.dir, "sync", "screens");
+	return readJsonFiles(join(project.dir, "sync", "screens"));
+}
+
+/** Every Defined Component with a Baseline, by name. */
+export async function readComponentBaselines(project: {
+	dir: string;
+}): Promise<Map<string, Baseline>> {
+	return readJsonFiles(join(project.dir, "sync", "components"));
+}
+
+export async function writeComponentBaseline(
+	project: { dir: string },
+	name: string,
+	baseline: Baseline,
+) {
+	await writeJson(componentBaselinePath(project, name), baseline);
+}
+
+/** Records what Push read of a Linked Component in Figma. */
+export async function writeLinkedComponentRecord(
+	project: { dir: string },
+	name: string,
+	record: LinkedComponentRecord,
+) {
+	await writeJson(linkedComponentPath(project, name), record);
+}
+
+/** The JSON files in a folder, by name without `.json`. */
+async function readJsonFiles<T>(dir: string): Promise<Map<string, T>> {
 	if (!existsSync(dir)) return new Map();
 	const names = (await readdir(dir))
 		.filter((file) => file.endsWith(".json"))
@@ -114,18 +161,70 @@ export async function readBaselines(project: {
 	const entries = await Promise.all(
 		names.map(async (file) => {
 			const name = file.slice(0, -".json".length);
-			return [name, (await readBaseline(project, name)) as Baseline] as const;
+			return [name, (await readJson(join(dir, file))) as T] as const;
 		}),
 	);
 	return new Map(entries);
 }
 
-/** Forgets every Screen's frame (and its exports) and the Design System's variables, as a re-link to another file does. */
+/**
+ * Forgets every Screen's frame (and its exports), every Component's node
+ * and the Design System's variables, as a re-link to another file does.
+ */
 export async function clearBaselines(project: { dir: string }) {
-	for (const dir of ["screens", "exports"]) {
+	for (const dir of ["screens", "exports", "components", "linked"]) {
 		await rm(join(project.dir, "sync", dir), { recursive: true, force: true });
 	}
 	await rm(designSystemPath(project), { force: true });
+}
+
+/** The Components as the Linked File has them: their properties, and which nodes they are. */
+export type FigmaComponents = {
+	definitions: Record<string, ComponentDefinition>;
+	/** A component set's or component's node ID → its Component. */
+	byId: Record<string, string>;
+	/** A published component set's or component's key → its Component. */
+	byKey: Record<string, string>;
+};
+
+/** The Components as their Baselines (Defined) and records (Linked) say Figma has them. */
+export function figmaComponents(
+	project: DesignProject,
+	baselines: Map<string, Baseline>,
+): FigmaComponents {
+	const found: FigmaComponents = { definitions: {}, byId: {}, byKey: {} };
+	for (const component of project.components) {
+		const baseline = baselines.get(component.name);
+		if (!baseline) continue;
+		found.definitions[component.name] = componentDefinition(
+			baselineRoot(component, baseline),
+		);
+		for (const id of [baseline.frameId, ...Object.values(baseline.nodes)])
+			found.byId[id] = component.name;
+	}
+	for (const { name, record } of project.linkedComponents) {
+		if (!record) continue;
+		const { properties, variants } = record;
+		found.definitions[name] = { properties, ...(variants && { variants }) };
+		found.byId[record.componentId] = name;
+		if (record.key) found.byKey[record.key] = name;
+	}
+	return found;
+}
+
+/** Which Component an instance is of, if it's one of the Design Project's. */
+function componentOfInstance(components: FigmaComponents | undefined) {
+	return (instance: NonNullable<SyncedNode["instance"]>) => {
+		if (!components) return undefined;
+		const { byId, byKey } = components;
+		return (
+			(instance.setId && byId[instance.setId]) ||
+			byId[instance.mainId] ||
+			(instance.setKey && byKey[instance.setKey]) ||
+			(instance.mainKey && byKey[instance.mainKey]) ||
+			undefined
+		);
+	};
 }
 
 /**
@@ -165,26 +264,67 @@ export function resolveContext(
 		tokens: project.tokens,
 		screenName: screen.name,
 		screenSize: defaultScreenSize(project, screen),
+		components: (name) => definitionOf(project, name),
 	};
 }
 
+/** How the Baseline resolves: with the tokens and Components' properties it was written against. */
 function baselineContext(
 	project: DesignProject,
 	screen: { name: string },
 	baseline: Baseline,
-) {
+): ResolveContext {
 	return {
 		...resolveContext(project, screen),
 		tokens: tokensFrom(baseline.tokens),
+		components: (name) =>
+			baseline.components?.[name] ?? definitionOf(project, name),
 	};
+}
+
+/** How Figma's version resolves: with the Components' properties as Figma has them. */
+function figmaContext(
+	project: DesignProject,
+	screen: { name: string },
+	baseline: Baseline,
+	components: FigmaComponents | undefined,
+): ResolveContext {
+	return {
+		...resolveContext(project, screen),
+		components: (name) =>
+			components?.definitions[name] ??
+			baseline.components?.[name] ??
+			definitionOf(project, name),
+	};
+}
+
+/** The properties of the Components a Screen's source uses, as `definition` gives them. */
+function usedComponents(
+	source: string,
+	definition: (name: string) => ComponentDefinition | undefined,
+): Record<string, ComponentDefinition> | undefined {
+	const used: Record<string, ComponentDefinition> = {};
+	const walk = (nodes: HtmlNode[]) => {
+		for (const node of nodes) {
+			if (node.type !== "element") continue;
+			const found = isComponentTag(node.tag) && definition(node.tag);
+			if (found) used[node.tag] = found;
+			walk(node.children);
+		}
+	};
+	walk(parseHtml(source).nodes);
+	return Object.keys(used).length > 0 ? used : undefined;
 }
 
 /** Parses a Baseline's source against the tokens it was written with. */
 export function baselineRoot(screen: ScreenFile, baseline: Baseline): Element {
-	const { root } = parseScreen(screen.file, baseline.source, {
+	const parse = isComponentFile(screen) ? parseComponent : parseScreen;
+	const { root } = parse(screen.file, baseline.source, {
 		tokens: tokensFrom(baseline.tokens),
 		imageExists: () => true,
 		screenExists: () => true,
+		// Instances keep the properties they set, whatever their Components are now.
+		component: () => ({ linked: true }),
 	});
 	if (!root) throw new Error(`The Baseline of ${screen.file} doesn't parse.`);
 	return root;
@@ -224,13 +364,18 @@ export async function screenPush(
 		root,
 		baseline,
 	);
-	const tree = toScreenNode(root, {
+	const setTree = toScreenNode(root, {
 		...resolveContext(project, screen),
 		nodeIds: baseline?.nodes ?? {},
 		bindings,
 		imageFill: imageFill(sources),
 		placed: baseline ? placedSince(project, screen, baseline) : () => true,
 	});
+	// A Component without variants is a lone component, not a set.
+	const [only, ...more] = root.children;
+	const lone =
+		isComponentFile(screen) && only && more.length === 0 && !only.name;
+	const tree = lone ? (setTree.children?.[0] as ScreenNode) : setTree;
 	const keys = new Set(elementKeys(root));
 	const remove = Object.entries(baseline?.nodes ?? {}).flatMap(([key, id]) =>
 		keys.has(key) ? [] : [id],
@@ -394,12 +539,16 @@ export function baselineAfterPush(
 	frame: SyncedNode,
 	images: Record<string, ImageRecord>,
 ): Baseline {
+	const components = usedComponents(source, (name) =>
+		definitionOf(project, name),
+	);
 	return {
 		frameId: frame.id,
 		source,
 		tokens: tokenRecord(project.tokens),
 		nodes: nodeMap(frame),
 		images,
+		...(components && { components }),
 	};
 }
 
@@ -492,7 +641,12 @@ export function readFrame(
 	{
 		local,
 		screenFrames = {},
-	}: { local?: Element; screenFrames?: ScreenFrames } = {},
+		components,
+	}: {
+		local?: Element;
+		screenFrames?: ScreenFrames;
+		components?: FigmaComponents;
+	} = {},
 ): { root?: Element; figmaOwned: FigmaOwnedLayer[] } {
 	const base = baselineRoot(screen, baseline);
 	const ids = new Set<string>();
@@ -514,8 +668,10 @@ export function readFrame(
 		]),
 	);
 	const claimed = new Set<string>();
-	return fromSyncedNode(frame, {
-		...resolveContext(project, screen),
+	const read = isComponentFile(screen) ? fromComponentNode : fromSyncedNode;
+	return read(frame, {
+		...figmaContext(project, screen, baseline, components),
+		componentOf: componentOfInstance(components),
 		keyFor: (node) => {
 			const key = layerKey(node, baseline, ids, keysById);
 			// A designer's copy of a layer carries its key too: first one wins.
@@ -576,16 +732,18 @@ export function followFrame(
 	return { ...baseline, frameId: frame.id, nodes: elementNodeMap(root, {}) };
 }
 
-/** Whether a frame was edited in Figma since the Baseline. */
+/** Whether a frame (or a Component's node) was edited in Figma since the Baseline. */
 export function hasUnpulledChanges(
 	project: DesignProject,
 	screen: ScreenFile,
 	baseline: Baseline,
 	frame: SyncedNode,
 	screenFrames: ScreenFrames = {},
+	components?: FigmaComponents,
 ): boolean {
 	const { root } = readFrame(project, screen, baseline, frame, {
 		screenFrames,
+		components,
 	});
 	if (!root) return true;
 	const base = baselineRoot(screen, baseline);
@@ -594,7 +752,7 @@ export function hasUnpulledChanges(
 		root,
 		{
 			a: baselineContext(project, screen, baseline),
-			b: resolveContext(project, screen),
+			b: figmaContext(project, screen, baseline, components),
 		},
 		true,
 	);
@@ -622,6 +780,7 @@ export function pullScreen(
 	frame: SyncedNode,
 	fetchedImages: Record<string, { src: string; record: ImageRecord }> = {},
 	screenFrames: ScreenFrames = {},
+	components?: FigmaComponents,
 ): ScreenPull {
 	const images = { ...baseline.images };
 	for (const { src, record } of Object.values(fetchedImages))
@@ -632,7 +791,7 @@ export function pullScreen(
 		screen,
 		withImages,
 		frame,
-		{ local, screenFrames },
+		{ local, screenFrames, components },
 	);
 	if (!figma) {
 		return { changed: false, baseline, conflicts: 0, figmaOwned };
@@ -653,7 +812,7 @@ export function pullScreen(
 	const contexts = {
 		base: baselineContext(project, screen, baseline),
 		local: resolveContext(project, screen),
-		figma: resolveContext(project, screen),
+		figma: figmaContext(project, screen, baseline, components),
 	};
 	if (sameElement(base, figma, { a: contexts.base, b: contexts.figma }, true)) {
 		return {
@@ -668,15 +827,21 @@ export function pullScreen(
 		...elementKeys(local),
 		...elementKeys(merged.root),
 	]);
+	const source = printScreen(keepTokens(figma, local, contexts.local));
+	const used = usedComponents(
+		source,
+		contexts.figma.components ?? (() => undefined),
+	);
 	return {
 		changed: true,
 		source: printScreen(merged.root),
 		baseline: {
 			frameId: frame.id,
-			source: printScreen(keepTokens(figma, local, contexts.local)),
+			source,
 			tokens: tokenRecord(project.tokens),
 			nodes: elementNodeMap(figma, baseline.nodes),
 			images,
+			...(used && { components: used }),
 		},
 		conflicts: merged.conflicts,
 		figmaOwned: withKeys(),

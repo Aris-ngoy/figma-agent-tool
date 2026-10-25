@@ -84,7 +84,8 @@ describe("create_nodes", () => {
 						type: "INSTANCE",
 						instance: {
 							mainComponent: { id: "2:1", name: "Button" },
-							properties: {},
+							// A new instance has its component's defaults.
+							properties: { "Label#2:0": "Button", "Disabled#2:1": false },
 						},
 					}),
 				],

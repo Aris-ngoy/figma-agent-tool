@@ -1,7 +1,8 @@
 // The local Preview: every Screen at its Screen Size, with Check's errors,
 // in the Mode its switcher picks, reloading whenever a file in the Design
-// Project changes, and each Screen's Directions side by side with it. It only
-// views, and chooses Directions; editing happens in the files.
+// Project changes, each Screen's Directions side by side with it, and the
+// Defined Components' variants. It only views, and chooses Directions;
+// editing happens in the files.
 import { type FSWatcher, watch } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import {
@@ -17,7 +18,12 @@ import {
 	type ScreenFile,
 	screenSizeOf,
 } from "@figma-agent-tool/design-project";
-import { exportNote, figmaOwnedOf, screenDocument } from "./document";
+import {
+	componentDocument,
+	exportNote,
+	figmaOwnedOf,
+	screenDocument,
+} from "./document";
 
 export const DEFAULT_PREVIEW_PORT = 4321;
 
@@ -35,6 +41,10 @@ document.addEventListener("click", (event) => {
   location.href = "/screens/" + encodeURIComponent(screen) + location.search;
 });
 </script>`;
+
+/** Sizes a Component's iframe to its variants. */
+const FIT =
+	"this.style.width = this.contentDocument.body.scrollWidth + 'px'; this.style.height = this.contentDocument.body.scrollHeight + 'px';";
 
 export type Preview = { url: string; port: number; stop(): void };
 
@@ -107,6 +117,20 @@ export function startPreview({
 					return new Response("No such Direction", { status: 404 });
 				await chooseDirection(project, direction);
 				return new Response(null, { status: 303, headers: { Location: "/" } });
+			}
+			const componentMatch = /^\/components\/([^/]+)$/.exec(pathname);
+			if (componentMatch) {
+				const name = decodeURIComponent(componentMatch[1] as string);
+				const component = project.components.find((c) => c.name === name);
+				if (!component)
+					return new Response("No such Component", { status: 404 });
+				return html(
+					componentDocument(project, component, {
+						baseUrl: "/files/components/",
+						head: LIVE_RELOAD,
+						mode,
+					}),
+				);
 			}
 			const route = screenRoute(project, pathname);
 			if (route) {
@@ -202,8 +226,22 @@ ${current}
 ${(await Promise.all(cards)).join("\n")}
 </div>`;
 	});
+	const components = project.components.map((component) => {
+		const componentErrors = errors.filter(
+			(error) => error.file === component.file,
+		);
+		return `<section>
+<h2>${escapeHtml(component.name)} <small>Component</small></h2>
+${errorList(componentErrors)}
+<iframe src="/components/${encodeURIComponent(component.name)}${query}" title="${escapeHtml(component.name)}" onload="${FIT}"></iframe>
+</section>`;
+	});
 	const designSystemErrors = errorList(
-		errors.filter((error) => !error.file.startsWith("screens/")),
+		errors.filter(
+			(error) =>
+				!error.file.startsWith("screens/") &&
+				!project.components.some((c) => c.file === error.file),
+		),
 	);
 	return `<!doctype html>
 <html>
@@ -228,6 +266,7 @@ ${modeSwitcher(project, mode)}
 ${designSystemErrors}
 <main>
 ${(await Promise.all(screens)).join("\n") || "<p>No Screens yet: add HTML files to screens/, and Directions to screens/&lt;Screen&gt;.directions/.</p>"}
+${components.join("\n")}
 </main>
 </body>
 </html>

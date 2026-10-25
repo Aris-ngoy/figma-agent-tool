@@ -1,17 +1,31 @@
 // A Design Project on disk: project.json (the Screen Size and Screens Page),
 // DESIGN.md and its Modes file, Screens in screens/ with their Directions in
-// screens/<Screen>.directions/, images (anywhere, by convention assets/)
-// and the committed sync state in sync/.
+// screens/<Screen>.directions/, Components in components/, images
+// (anywhere, by convention assets/) and the committed sync state in sync/.
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import {
+	type ComponentDefinition,
+	componentDefinition,
+	type LinkedComponentFile,
+	type LinkedComponentRecord,
+	parseLinkedComponent,
+} from "./components";
 import { parseDesignMd, type TokenFields, type Tokens } from "./design-md";
 import { designSystemPush } from "./design-system";
 import { DesignProjectError } from "./errors";
 import { checkModes, lineOf, lintDesignMd } from "./lint";
 import { MODES_FILE, type Modes, parseModes } from "./modes";
 import { resolveProp } from "./resolve";
-import { type CheckError, type Element, parseScreen } from "./screen";
+import {
+	type CheckError,
+	type ComponentInfo,
+	type Element,
+	parseComponent,
+	parseScreen,
+} from "./screen";
+import { COMPONENT_SET_TAG, FIGMA_OWNED_TAG, isComponentTag } from "./subset";
 
 /** Relative to the working directory. */
 export const DEFAULT_DESIGN_DIR = "design";
@@ -62,6 +76,10 @@ export type DesignProject = {
 	screens: ScreenFile[];
 	/** Every Screen's Directions, by Screen and then by name. */
 	directions: DirectionFile[];
+	/** Defined Components' files, named after their custom element. */
+	components: ScreenFile[];
+	/** Linked Components' files. */
+	linkedComponents: LinkedComponentFile[];
 };
 
 export { DesignProjectError };
@@ -71,6 +89,19 @@ const DIRECTIONS = ".directions";
 
 export function screenPath(project: { dir: string }, name: string): string {
 	return join(project.dir, "screens", `${name}.html`);
+}
+
+/** Where Push keeps what it read of a Linked Component in Figma. */
+export function linkedComponentPath(
+	project: { dir: string },
+	name: string,
+): string {
+	return join(project.dir, "sync", "linked", `${name}.json`);
+}
+
+/** Whether a file of the Design Project is a Defined Component's. */
+export function isComponentFile(file: { file: string }): boolean {
+	return file.file.startsWith("components/");
 }
 
 export async function loadProject(dir: string): Promise<DesignProject> {
@@ -123,6 +154,33 @@ export async function loadProject(dir: string): Promise<DesignProject> {
 				}),
 		)
 	).flat();
+	const componentsDir = join(root, "components");
+	const componentNames = existsSync(componentsDir)
+		? (await readdir(componentsDir)).sort()
+		: [];
+	const components = await readFiles(root, "components", componentNames);
+	const linkedComponents = await Promise.all(
+		componentNames
+			.filter((fileName) => fileName.endsWith(".json"))
+			.map(async (fileName): Promise<LinkedComponentFile> => {
+				const name = fileName.slice(0, -".json".length);
+				const path = join(componentsDir, fileName);
+				const source = await readFile(path, "utf8");
+				const parsed = parseLinkedComponent(source);
+				const recordPath = linkedComponentPath({ dir: root }, name);
+				const record: LinkedComponentRecord | undefined = existsSync(recordPath)
+					? JSON.parse(await readFile(recordPath, "utf8"))
+					: undefined;
+				return {
+					name,
+					file: `components/${fileName}`,
+					path,
+					source,
+					...("problem" in parsed ? {} : parsed),
+					...(record && { record }),
+				};
+			}),
+	);
 	return {
 		dir: root,
 		config,
@@ -139,6 +197,8 @@ export async function loadProject(dir: string): Promise<DesignProject> {
 		modes,
 		screens,
 		directions,
+		components,
+		linkedComponents,
 	};
 }
 
@@ -148,7 +208,15 @@ function readScreenFiles(
 	fileNames: string[],
 	folder?: string,
 ): Promise<ScreenFile[]> {
-	const relativeDir = folder ? `screens/${folder}` : "screens";
+	return readFiles(root, folder ? `screens/${folder}` : "screens", fileNames);
+}
+
+/** The HTML files among `fileNames` in a folder of the Design Project, read. */
+function readFiles(
+	root: string,
+	relativeDir: string,
+	fileNames: string[],
+): Promise<ScreenFile[]> {
 	return Promise.all(
 		fileNames
 			.filter((fileName) => fileName.endsWith(".html"))
@@ -273,6 +341,7 @@ export async function checkProject(project: DesignProject): Promise<{
 	const directions = project.directions.map((direction) =>
 		checkScreen(project, direction),
 	);
+	const components = checkComponents(project);
 	const designMd = checkDesignMd(project);
 	// Modes are checked against DESIGN.md's tokens, so it must read first.
 	const modes =
@@ -283,6 +352,7 @@ export async function checkProject(project: DesignProject): Promise<{
 		errors: [
 			...designMd.errors,
 			...modes.errors,
+			...components,
 			...screens.flatMap((screen) => screen.errors),
 			...directions.flatMap((direction) => direction.errors),
 		],
@@ -314,19 +384,114 @@ export function checkDesignMd(project: DesignProject): {
 	return { errors, warnings: [...warnings, ...unpushable] };
 }
 
+/** Checks a Screen, Direction or Defined Component's file. */
 export function checkScreen(
 	project: DesignProject,
 	screen: ScreenFile,
 ): ParsedScreen {
-	const { root, errors } = parseScreen(screen.file, screen.source, {
+	const parse = isComponentFile(screen) ? parseComponent : parseScreen;
+	const { root, errors } = parse(screen.file, screen.source, {
 		tokens: project.tokens,
 		imageExists: (src) => {
 			const path = imagePath(project, screen, src);
 			return path !== undefined && existsSync(path);
 		},
 		screenExists: (name) => project.screens.some((s) => s.name === name),
+		component: (name) => componentInfos(project).get(name),
 	});
 	return { ...screen, root, errors };
+}
+
+const infos = new WeakMap<DesignProject, Map<string, ComponentInfo>>();
+
+/** Every Component by name, with its properties when known. */
+export function componentInfos(
+	project: DesignProject,
+): Map<string, ComponentInfo> {
+	let found = infos.get(project);
+	if (found) return found;
+	found = new Map();
+	for (const linked of project.linkedComponents) {
+		const { record } = linked;
+		found.set(linked.name, {
+			linked: true,
+			...(record && {
+				definition: {
+					properties: record.properties,
+					...(record.variants && { variants: record.variants }),
+				},
+			}),
+		});
+	}
+	for (const component of project.components) {
+		const { root } = parseComponent(component.file, component.source, {
+			tokens: project.tokens,
+			imageExists: () => true,
+			screenExists: () => true,
+		});
+		found.set(component.name, {
+			linked: false,
+			...(root && { definition: componentDefinition(root) }),
+		});
+	}
+	infos.set(project, found);
+	return found;
+}
+
+/** A Component's properties, when known. */
+export function definitionOf(
+	project: DesignProject,
+	name: string,
+): ComponentDefinition | undefined {
+	return componentInfos(project).get(name)?.definition;
+}
+
+/** Errors of the files in components/: their names, Linked Components' JSON, Defined Components' markup. */
+function checkComponents(project: DesignProject): CheckError[] {
+	const error = (file: string, rule: string, message: string) => ({
+		file,
+		line: 1,
+		element: "",
+		rule,
+		message,
+	});
+	const all = [...project.components, ...project.linkedComponents];
+	return all.flatMap((component): CheckError[] => {
+		if (
+			!isComponentTag(component.name) ||
+			component.name === COMPONENT_SET_TAG
+		) {
+			return [
+				error(
+					component.file,
+					"invalid-component-name",
+					`${component.file} isn't a Component name: Screens use a Component as a custom element named after its file, so it's lower case with a hyphen, as in components/app-button.html (not ${FIGMA_OWNED_TAG} or ${COMPONENT_SET_TAG}).`,
+				),
+			];
+		}
+		if (all.filter((c) => c.name === component.name).length > 1) {
+			return [
+				error(
+					component.file,
+					"duplicate-component",
+					`${component.name} is both Defined (components/${component.name}.html) and Linked (components/${component.name}.json): keep one.`,
+				),
+			];
+		}
+		if (component.file.endsWith(".json")) {
+			const parsed = parseLinkedComponent(component.source);
+			return "problem" in parsed
+				? [
+						error(
+							component.file,
+							"invalid-linked-component",
+							`${component.file} ${parsed.problem}.`,
+						),
+					]
+				: [];
+		}
+		return checkScreen(project, component).errors;
+	});
 }
 
 /**

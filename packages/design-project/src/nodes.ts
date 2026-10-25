@@ -8,6 +8,7 @@ import {
 	type ScreenNode,
 	type SyncedNode,
 } from "@figma-agent-tool/protocol";
+import { instanceProperties } from "./components";
 import { elementBindings, type TokenBindings } from "./design-system";
 import {
 	formatTransition,
@@ -24,8 +25,10 @@ import {
 	vectorGeometry,
 	vectorPath,
 } from "./resolve";
-import type { Element } from "./screen";
+import { componentSetRoot, type Element } from "./screen";
 import {
+	COMPONENT_SET_TAG,
+	COMPONENT_TAG,
 	DEFAULT_TAGS,
 	FIGMA_OWNED_TAG,
 	fontStyle,
@@ -74,6 +77,7 @@ const NODE_TYPES = {
 	rect: "RECTANGLE",
 	image: "RECTANGLE",
 	vector: "VECTOR",
+	instance: "INSTANCE",
 	owned: "OWNED",
 } as const;
 
@@ -108,6 +112,8 @@ function convert(
 	const row = parentDirection === "row";
 	const absolute = r.position === "absolute";
 	const sizing = (axis: "width" | "height") => {
+		// A component set hugs its variants.
+		if (isRoot && element.tag === COMPONENT_SET_TAG) return "HUG" as const;
 		if (isRoot) return "FIXED" as const;
 		const main = (axis === "width") === row;
 		if (!absolute && (main ? r.flex === "1" : r["align-self"] === "stretch"))
@@ -136,9 +142,27 @@ function convert(
 		}
 		return owned;
 	}
+	if (element.kind === "instance") {
+		const instance: ScreenNode = {
+			key,
+			type: "INSTANCE",
+			component: element.tag,
+			properties: instanceProperties(
+				context.components?.(element.tag),
+				element.properties,
+			),
+			name: element.name ?? element.tag,
+			fills: [],
+			...geometry,
+		};
+		if (context.nodeIds[key]) instance.id = context.nodeIds[key];
+		const link = screenLink(element);
+		if (link) instance.link = link;
+		return instance;
+	}
 	const node: ScreenNode = {
 		key,
-		type: NODE_TYPES[element.kind],
+		type: componentType(element) ?? NODE_TYPES[element.kind],
 		...geometry,
 		fills: fills(element, r, context),
 		opacity: Number(r.opacity),
@@ -161,6 +185,7 @@ function convert(
 	if (element.kind === "vector") {
 		node.vector = { paths: vectorGeometry(element, r).paths };
 	}
+	if (element.property) node.property = element.property;
 	if (element.kind === "text") {
 		node.text = {
 			characters: element.text ?? "",
@@ -198,6 +223,13 @@ function convert(
 		);
 	}
 	return node;
+}
+
+/** A Defined Component's set and variants are a component set and components. */
+function componentType(element: Element): ScreenNode["type"] | undefined {
+	if (element.tag === COMPONENT_SET_TAG) return "COMPONENT_SET";
+	if (element.tag === COMPONENT_TAG) return "COMPONENT";
+	return undefined;
 }
 
 /** A checked element's Prototype Link, as Push sends it. */
@@ -280,7 +312,11 @@ export type PullContext = ResolveContext & {
 	baseElement: (key: string) => Element | undefined;
 	/** The Screen a frame is (or was) the frame of, for Prototype Links. */
 	screenOf: (frameId: string) => string | undefined;
+	/** The Component an instance is of, if it's one of the Design Project's. */
+	componentOf?: (instance: SyncedInstance) => string | undefined;
 };
+
+type SyncedInstance = NonNullable<SyncedNode["instance"]>;
 
 /** A layer Pull can't express in the Screen Subset, which stays Figma's. */
 export type FigmaOwnedLayer = {
@@ -291,17 +327,56 @@ export type FigmaOwnedLayer = {
 	reason: string;
 };
 
+/**
+ * The Defined Component a component set (or lone component) reads as. A
+ * variant Pull can't express keeps its Baseline.
+ */
+export function fromComponentNode(
+	node: SyncedNode,
+	context: PullContext,
+): { root: Element; figmaOwned: FigmaOwnedLayer[] } {
+	const figmaOwned: FigmaOwnedLayer[] = [];
+	const isSet = node.type === "COMPONENT_SET";
+	const variants = isSet ? (node.children ?? []) : [node];
+	const children = variants.flatMap((variant) => {
+		const count = figmaOwned.length;
+		const read = readElement(
+			{ ...variant, type: "FRAME" },
+			"row",
+			context,
+			figmaOwned,
+		);
+		if (read?.kind === "owned") {
+			// Not a frame Screens can express: it keeps its Baseline.
+			const owned = figmaOwned[count] as FigmaOwnedLayer;
+			owned.reason = `is a variant that ${owned.reason}, so Pull keeps its version from the last Push or Pull`;
+			const base = read.key ? context.baseElement(read.key) : undefined;
+			return base ? [{ ...structuredClone(base), nodeId: variant.id }] : [];
+		}
+		if (!read) return [];
+		read.tag = COMPONENT_TAG;
+		if (isSet) read.name = variant.name;
+		else delete read.name;
+		delete read.href;
+		delete read.transition;
+		return [read];
+	});
+	const root = componentSetRoot(children);
+	root.nodeId = node.id;
+	return { root, figmaOwned };
+}
+
 /** The Screen a frame reads as; layers outside the subset are listed. */
 export function fromSyncedNode(
 	frame: SyncedNode,
 	context: PullContext,
 ): { root?: Element; figmaOwned: FigmaOwnedLayer[] } {
 	const figmaOwned: FigmaOwnedLayer[] = [];
-	const root = read(frame, undefined, context, figmaOwned);
+	const root = readElement(frame, undefined, context, figmaOwned);
 	return { root, figmaOwned };
 }
 
-function read(
+function readElement(
 	node: SyncedNode,
 	parentDirection: string | undefined,
 	context: PullContext,
@@ -309,7 +384,14 @@ function read(
 ): Element | undefined {
 	const isRoot = parentDirection === undefined;
 	const key = context.keyFor(node);
-	const reason = unsupportedReason(node, context);
+	const component = node.instance && context.componentOf?.(node.instance);
+	if (component && parentDirection !== undefined && !instanceReason(node))
+		return instanceElement(node, key, component, parentDirection, context);
+	const reason =
+		node.type === "INSTANCE"
+			? (instanceReason(node) ??
+				"is an instance of a component that isn't one of the Design Project's Components")
+			: unsupportedReason(node, context);
 	if (reason || (isRoot && node.type !== "FRAME")) {
 		figmaOwned.push({
 			nodeId: node.id,
@@ -380,13 +462,76 @@ function read(
 	const isDefaultName = node.name === defaultName(element, context, isRoot);
 	if (!isDefaultName) element.name = node.name;
 	if (!isRoot) readLink(node, element, context);
+	if (node.property) element.property = node.property;
 	if (kind === "frame") {
 		const direction = props["flex-direction"] ?? "row";
+		// A detached instance's layers are new to the Screen, whatever keys
+		// they carry from its Component.
+		const detached = key && context.baseElement(key)?.kind === "instance";
+		const childContext = detached
+			? { ...context, keyFor: () => undefined }
+			: context;
 		for (const child of node.children ?? []) {
-			const childElement = read(child, direction, context, figmaOwned);
+			const childElement = readElement(
+				child,
+				direction,
+				childContext,
+				figmaOwned,
+			);
 			if (childElement) element.children.push(childElement);
 		}
 	}
+	return element;
+}
+
+/** Why an instance can't be an instance element, if it can't. */
+function instanceReason(node: SyncedNode): string | undefined {
+	if (!node.visible) return "is hidden";
+	if (node.rotation !== 0) return "is rotated";
+	if (
+		node.absolute &&
+		(node.absolute.horizontal !== "MIN" || node.absolute.vertical !== "MIN")
+	)
+		return "is pinned to its parent's right, bottom or center";
+	return undefined;
+}
+
+/**
+ * An instance: its Component, the properties it sets other than to their
+ * defaults, its place and size, and its name and link. Overrides of its
+ * own layers stay Figma's.
+ */
+function instanceElement(
+	node: SyncedNode,
+	key: string | undefined,
+	component: string,
+	parentDirection: string,
+	context: PullContext,
+): Element {
+	const props: Element["props"] = {};
+	const set = (prop: Prop, value: string | undefined) => {
+		if (value !== undefined) props[prop] = value;
+	};
+	readPosition(node, set);
+	readSize(node, "instance", parentDirection, context, set);
+	const definition = context.components?.(component);
+	const properties: Record<string, string> = {};
+	for (const [name, value] of Object.entries(node.instance?.properties ?? {})) {
+		const property = definition?.properties[name];
+		if (definition ? property && value !== property.default : true)
+			properties[name] = value;
+	}
+	const element: Element = {
+		kind: "instance",
+		tag: component,
+		...(key && { key }),
+		props,
+		children: [],
+		nodeId: node.id,
+	};
+	if (node.name !== component) element.name = node.name;
+	if (Object.keys(properties).length > 0) element.properties = properties;
+	readLink(node, element, context);
 	return element;
 }
 
@@ -630,7 +775,10 @@ function readSize(
 		if (sizing === "FILL")
 			set(main ? "flex" : "align-self", main ? "1" : "stretch");
 		// Rectangles and vectors can't hug; text heights always do.
-		else if (sizing === "FIXED" || (kind !== "frame" && kind !== "text")) {
+		else if (
+			sizing === "FIXED" ||
+			(kind !== "frame" && kind !== "text" && kind !== "instance")
+		) {
 			if (!(kind === "text" && axis === "height")) set(axis, px(node[axis]));
 		}
 	}

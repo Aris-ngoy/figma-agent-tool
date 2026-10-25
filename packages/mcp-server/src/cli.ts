@@ -353,6 +353,11 @@ async function push(
 		});
 	}
 	if (result.status !== "pushed") return 1;
+	for (const { component, nodeId, created } of result.components) {
+		io.out(
+			`${created ? "Created" : "Updated"} the Component ${component} (node ${nodeId})`,
+		);
+	}
 	for (const screen of result.screens) {
 		io.out(
 			`${screen.created ? "Created" : "Updated"} ${screen.screen} (frame ${screen.frameId})`,
@@ -400,7 +405,14 @@ async function pull(dir: string, bridge: Bridge, io: CliIo): Promise<number> {
 				: "";
 		io.out(`DESIGN.md: ${designSystem.status}${changed}${conflicts}`);
 	}
-	for (const screen of result.screens) {
+	const pulled = [
+		...result.components.map(({ component, ...rest }) => ({
+			...rest,
+			screen: `components/${component}`,
+		})),
+		...result.screens,
+	];
+	for (const screen of pulled) {
 		const conflicts =
 			screen.conflicts > 0
 				? `, ${screen.conflicts} Sync Conflict${screen.conflicts === 1 ? "" : "s"}`

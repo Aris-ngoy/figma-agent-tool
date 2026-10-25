@@ -5,13 +5,18 @@
 // don't shrink, counter-axis alignment starts at flex-start, absolute
 // offsets are from the parent, vectors don't clip their strokes, links
 // aren't underlined). Figma-owned
-// Elements show the export Pull cached of their layer.
+// Elements show the export Pull cached of their layer, and instances show
+// their Component.
 import {
 	checkScreen,
+	componentShowcase,
 	type DesignProject,
+	expandInstances,
 	type FigmaOwnedPreview,
 	figmaOwnedPreviews,
+	hasInstances,
 	modeTokens,
+	printScreen,
 	readBaseline,
 	type ScreenFile,
 	screenSizeOf,
@@ -100,24 +105,68 @@ export function screenDocument(
 	screen: ScreenFile,
 	{ baseUrl, head = "", figmaOwned = [], mode }: DocumentOptions,
 ): string {
-	const tokens = modeTokens(project, mode);
 	const { width, height } = screenSizeOf(project, screen);
+	return documentFor(project, screen.name, screenBody(project, screen), {
+		baseUrl,
+		head,
+		figmaOwned,
+		mode,
+		size: `width: ${width}px; height: ${height}px;`,
+	});
+}
+
+/** A Defined Component's document: its variants side by side, each at its own size. */
+export function componentDocument(
+	project: DesignProject,
+	component: ScreenFile,
+	options: Omit<DocumentOptions, "figmaOwned">,
+): string {
+	const showcase = componentShowcase(project, component);
+	const body = showcase
+		? printScreen(showcase).trim()
+		: '<body style="display:flex"></body>';
+	return documentFor(project, component.name, body, {
+		...options,
+		size: "width: max-content; height: max-content;",
+	});
+}
+
+/** A Screen's <body> as the Preview shows it: as written, but instances show their Components. */
+function screenBody(project: DesignProject, screen: ScreenFile): string {
+	const { root } = checkScreen(project, screen);
+	if (!root || !hasInstances(root)) return screen.source.trim();
+	return printScreen(expandInstances(project, root)).trim();
+}
+
+function documentFor(
+	project: DesignProject,
+	title: string,
+	body: string,
+	{
+		baseUrl,
+		head = "",
+		figmaOwned = [],
+		mode,
+		size,
+	}: DocumentOptions & { size: string },
+): string {
+	const tokens = modeTokens(project, mode);
 	return [
 		"<!doctype html>",
 		"<html>",
 		"<head>",
 		'<meta charset="utf-8">',
 		`<base href="${baseUrl}">`,
-		`<title>${screen.name}</title>`,
+		`<title>${title}</title>`,
 		"<style>",
 		RESET,
 		tokensCss(tokens),
-		`body { width: ${width}px; height: ${height}px; }`,
+		`body { ${size} }`,
 		...(figmaOwned.length > 0 ? [figmaOwnedCss(figmaOwned)] : []),
 		"</style>",
 		head,
 		"</head>",
-		screen.source.trim(),
+		body,
 		"</html>",
 		"",
 	].join("\n");

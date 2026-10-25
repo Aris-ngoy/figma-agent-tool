@@ -48,18 +48,12 @@ class Merger {
 			resolveElement(local, contexts.local, isRoot),
 			resolveElement(figma, contexts.figma, isRoot),
 		];
-		if (l["@kind"] !== f["@kind"]) {
+		if (l["@kind"] !== f["@kind"] || l["@component"] !== f["@component"]) {
 			// One side replaced the element: fine unless the other changed it.
-			if (
-				f["@kind"] === b["@kind"] &&
-				!this.changed(base, figma, contexts.figma)
-			)
-				return local;
-			if (
-				l["@kind"] === b["@kind"] &&
-				!this.changed(base, local, contexts.local)
-			)
-				return figma;
+			const same = (side: Record<string, string>) =>
+				side["@kind"] === b["@kind"] && side["@component"] === b["@component"];
+			if (same(f) && !this.changed(base, figma, contexts.figma)) return local;
+			if (same(l) && !this.changed(base, local, contexts.local)) return figma;
 			return this.conflict(local, figma);
 		}
 		const fields = [...new Set([...Object.keys(l), ...Object.keys(f)])];
@@ -75,7 +69,8 @@ class Merger {
 		const mine = geometry ? withoutViewBox(local, contexts.local) : local;
 		const merged: Element = { ...mine, props: { ...mine.props }, children: [] };
 		if (!conflicting) {
-			for (const field of taken) takeField(merged, figma, field);
+			for (const field of taken)
+				takeField(merged, figma, field, f[field], contexts.local);
 		}
 		if (merged.kind === "frame") {
 			merged.children = this.children(
@@ -184,8 +179,29 @@ class Merger {
 	}
 }
 
-function takeField(merged: Element, figma: Element, field: string) {
+function takeField(
+	merged: Element,
+	figma: Element,
+	field: string,
+	resolved: string | undefined,
+	local: ResolveContext,
+) {
+	if (field.startsWith("@prop:")) {
+		// Written unless it's what the Design Project's Component defaults to.
+		const name = field.slice("@prop:".length);
+		const property = local.components?.(merged.tag)?.properties[name];
+		const properties = { ...merged.properties };
+		if (resolved === undefined || resolved === property?.default)
+			delete properties[name];
+		else properties[name] = resolved;
+		merged.properties = properties;
+		if (Object.keys(properties).length === 0) delete merged.properties;
+		return;
+	}
 	switch (field) {
+		case "@property":
+			merged.property = figma.property;
+			return;
 		case "@name":
 			merged.name = figma.name;
 			return;

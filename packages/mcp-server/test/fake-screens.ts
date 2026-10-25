@@ -4,6 +4,7 @@
 import {
 	applyPrototypeLinks,
 	applyScreenTree,
+	createFakeComponents,
 	createFakeDesignSystem,
 } from "@figma-agent-tool/design-project/fixtures";
 import type {
@@ -27,6 +28,7 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 	>();
 	const images = new Map<string, string>();
 	const designSystem = createFakeDesignSystem(nextId);
+	const components = createFakeComponents(nextId);
 	let linkId: string | null = null;
 
 	function frameOf(screen: string, frameId: string) {
@@ -62,6 +64,8 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 		explorations,
 		/** The variables and text styles Push made, which tests edit as a designer would. */
 		designSystem,
+		/** Defined Components' nodes, and the components Linked ones find. */
+		components,
 		get linkId() {
 			return linkId;
 		},
@@ -79,18 +83,42 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 			designSystem: tokens,
 			frames: linkedFrames,
 			screenFrames,
-		}: CommandParams<"push_screens">): CommandResult<"push_screens"> {
+			components: defined,
+			linked,
+		}: CommandParams<"push_screens">):
+			| CommandResult<"push_screens">
+			| BridgeError {
+			const found = linked.map((component) => ({
+				component,
+				info: components.resolve(component),
+			}));
+			const missing = found.find(({ info }) => !info);
+			if (missing) {
+				const { component, key, id } = missing.component;
+				return {
+					code: "component_not_found",
+					message: `Linked Component ${component}: no component with ${key ? `key "${key}" in this file or its enabled libraries` : `ID ${id} in this file`}, so nothing was pushed.`,
+				};
+			}
 			const target = pageNamed(page);
 			const hashes = addImages(bytes);
 			const pageId = target.id;
 			const pushed = tokens && designSystem.push(tokens);
+			const imageHash = (name: string) => hashes[name] as string;
+			const pushedComponents = defined.map((component) => ({
+				component: component.component,
+				node: structuredClone(
+					components.apply(component, { nextId, imageHash, designSystem }),
+				),
+			}));
 			const applied = screens.map(({ screen, frameId, tree, remove }) => {
 				const previous = frameId ? frames.get(frameId) : undefined;
 				const frame = applyScreenTree(tree, previous?.frame, {
 					nextId,
-					imageHash: (name) => hashes[name] as string,
+					imageHash,
 					designSystem,
 					remove,
+					components,
 				});
 				if (previous) frames.delete(previous.frame.id);
 				frames.set(frame.id, { screen, pageId, frame });
@@ -114,6 +142,8 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 					screen,
 					frame: structuredClone(frame),
 				})),
+				components: pushedComponents,
+				linked: found.flatMap(({ info }) => (info ? [info] : [])),
 			};
 		},
 
@@ -140,6 +170,7 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 							const frame = applyScreenTree(tree, original?.frame, {
 								nextId,
 								imageHash: (name) => hashes[name] as string,
+								components,
 							});
 							explorations.set(frame.id, {
 								of: screen,
@@ -155,6 +186,7 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 
 		read_screens({
 			screens,
+			components: wanted,
 		}: CommandParams<"read_screens">): CommandResult<"read_screens"> {
 			return {
 				screens: screens.map(({ screen, frameId }) => {
@@ -164,6 +196,13 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 						frame: entry
 							? designSystem.resolve(structuredClone(entry.frame))
 							: null,
+					};
+				}),
+				components: wanted.map(({ component }) => {
+					const node = components.defined.get(component);
+					return {
+						component,
+						node: node ? designSystem.resolve(structuredClone(node)) : null,
 					};
 				}),
 			};

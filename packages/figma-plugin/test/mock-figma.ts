@@ -480,23 +480,26 @@ export function installMockFigma(
 			node.createInstance = () => {
 				const source = findNode(node.id, document) as SerializedNode;
 				const id = createdNodeId(++created);
-				return place(
-					toFigmaNode({
-						...source,
-						id,
-						type: "INSTANCE",
-						x: 0,
-						y: 0,
-						component: undefined,
-						instance: {
-							mainComponent: { id: node.id, name: String(node.name) },
-							properties: {},
-						},
-						// Figma prefixes instance sublayer IDs with the instance's.
-						children: source.children?.map((child) =>
-							prefixIds(child, `I${id};`),
-						),
-					}),
+				return instanceProperties(
+					place(
+						toFigmaNode({
+							...source,
+							id,
+							type: "INSTANCE",
+							x: 0,
+							y: 0,
+							component: undefined,
+							instance: {
+								mainComponent: { id: node.id, name: String(node.name) },
+								properties: {},
+							},
+							// Figma prefixes instance sublayer IDs with the instance's.
+							children: source.children?.map((child) =>
+								prefixIds(child, `I${id};`),
+							),
+						}),
+					),
+					node,
 				);
 			};
 		}
@@ -603,6 +606,165 @@ export function installMockFigma(
 
 	function create(node: Omit<SerializedNode, "id">): MockNode {
 		return place(toFigmaNode({ id: createdNodeId(++created), ...node }));
+	}
+
+	/** A published component (or set) by key, as importing finds it; throws like Figma when there's none. */
+	function byKey(key: string, type: string): MockNode {
+		const found = [...byId.values()].find(
+			(node) => node.type === type && node.key === key && !node.removed,
+		);
+		if (!found) throw new Error(`Failed to import component with key ${key}`);
+		return found;
+	}
+
+	/**
+	 * Like Figma's components made by a plugin: a component set's variant
+	 * properties come from its variants' names, text properties are added
+	 * to the set (or a lone component), and instances set them.
+	 */
+	function mockComponent(node: MockNode): MockNode {
+		const texts = new Map<string, { type: string; defaultValue: unknown }>();
+		let added = 0;
+		const inSet = () =>
+			(node.parent as MockNode | undefined)?.type === "COMPONENT_SET";
+		node.key = "";
+		Object.defineProperty(node, "componentPropertyDefinitions", {
+			get: () => {
+				if (node.type === "COMPONENT" && inSet())
+					throw new Error("read definitions from the component set");
+				const definitions: Record<string, Record<string, unknown>> = {};
+				for (const variant of node.type === "COMPONENT_SET"
+					? childrenOf(node)
+					: []) {
+					for (const [name, value] of Object.entries(
+						variant.variantProperties as Record<string, string>,
+					)) {
+						const definition = definitions[name] ?? {
+							type: "VARIANT",
+							defaultValue: value,
+							variantOptions: [],
+						};
+						definitions[name] = definition;
+						const options = definition.variantOptions as string[];
+						if (!options.includes(value)) options.push(value);
+					}
+				}
+				for (const [key, definition] of texts)
+					definitions[key] = { ...definition };
+				return definitions;
+			},
+		});
+		node.addComponentProperty = (
+			name: string,
+			type: string,
+			defaultValue: unknown,
+		) => {
+			if (inSet()) throw new Error("add properties to the component set");
+			const key = `${name}#${node.id}-${++added}`;
+			texts.set(key, { type, defaultValue });
+			return key;
+		};
+		node.editComponentProperty = (
+			key: string,
+			{ defaultValue }: { defaultValue: unknown },
+		) => {
+			const definition = texts.get(key);
+			if (!definition) throw new Error(`No property ${key}`);
+			definition.defaultValue = defaultValue;
+			return key;
+		};
+		node.deleteComponentProperty = (key: string) => {
+			if (!texts.delete(key)) throw new Error(`No property ${key}`);
+		};
+		if (node.type !== "COMPONENT") return node;
+		Object.defineProperty(node, "variantProperties", {
+			get: () =>
+				inSet()
+					? Object.fromEntries(
+							String(node.name)
+								.split(", ")
+								.map((pair) => pair.split("=")),
+						)
+					: null,
+		});
+		node.createInstance = () => mockInstance(node);
+		return node;
+	}
+
+	/** An instance of a mocked component, which holds none of its layers. */
+	function mockInstance(component: MockNode): MockNode {
+		const parent = component.parent as MockNode;
+		const instance = create({
+			name: String((parent.type === "COMPONENT_SET" ? parent : component).name),
+			type: "INSTANCE",
+			x: 0,
+			y: 0,
+			width: component.width as number,
+			height: component.height as number,
+			fills: [],
+		});
+		instance.layoutMode = component.layoutMode;
+		return instanceProperties(instance, component);
+	}
+
+	/** An instance's variant and text properties, read and set like Figma's. */
+	function instanceProperties(instance: MockNode, component: MockNode) {
+		let main = component;
+		const overrides = new Map<string, unknown>();
+		const holder = () =>
+			((main.parent as MockNode).type === "COMPONENT_SET"
+				? main.parent
+				: main) as MockNode;
+		instance.getMainComponentAsync = async () => main;
+		Object.defineProperty(instance, "componentProperties", {
+			get: () =>
+				Object.fromEntries(
+					Object.entries(
+						holder().componentPropertyDefinitions as Record<
+							string,
+							{ type: string; defaultValue: unknown }
+						>,
+					).map(([key, { type, defaultValue }]) => [
+						key,
+						{
+							type,
+							value:
+								type === "VARIANT"
+									? (main.variantProperties as Record<string, string>)[key]
+									: overrides.has(key)
+										? overrides.get(key)
+										: defaultValue,
+						},
+					]),
+				),
+		});
+		instance.setProperties = (properties: Record<string, unknown>) => {
+			const definitions = holder().componentPropertyDefinitions as Record<
+				string,
+				{ type: string }
+			>;
+			const variant = { ...(main.variantProperties as Record<string, string>) };
+			for (const [key, value] of Object.entries(properties)) {
+				const definition = definitions[key];
+				if (!definition)
+					throw new Error(
+						`Could not find a component property with name: '${key}'`,
+					);
+				if (definition.type === "VARIANT") variant[key] = String(value);
+				else overrides.set(key, value);
+			}
+			if (holder() === main) return;
+			const swapped = childrenOf(holder()).find((sibling) =>
+				Object.entries(variant).every(
+					([name, value]) =>
+						(sibling.variantProperties as Record<string, string>)[name] ===
+						value,
+				),
+			);
+			if (!swapped) throw new Error("No variant with these properties");
+			main = swapped;
+		};
+		return instance;
 	}
 
 	function mockPage(page: {
@@ -835,6 +997,35 @@ export function installMockFigma(
 				...newGeometry,
 				fills: [{ type: "SOLID", color: "#ffcc00" }],
 			}),
+		createComponent: () =>
+			mockComponent(
+				create({
+					name: "Component",
+					type: "COMPONENT",
+					...newGeometry,
+					fills: [{ type: "SOLID", color: "#ffffff" }],
+					children: [],
+				}),
+			),
+		/** Like Figma, puts the components in a new set in `parent`, named after their variants. */
+		combineAsVariants(components: MockNode[], parent: MockNode) {
+			const set = mockComponent(
+				create({
+					name: "Component 1",
+					type: "COMPONENT_SET",
+					...newGeometry,
+					fills: [],
+					children: [],
+				}),
+			);
+			(parent.appendChild as (node: MockNode) => void)(set);
+			for (const component of components)
+				(set.appendChild as (node: MockNode) => void)(component);
+			return set;
+		},
+		importComponentByKeyAsync: async (key: string) => byKey(key, "COMPONENT"),
+		importComponentSetByKeyAsync: async (key: string) =>
+			byKey(key, "COMPONENT_SET"),
 		createText: () =>
 			create({
 				name: "Text",
@@ -1044,6 +1235,7 @@ function toFigmaNode(node: SerializedNode): MockNode {
 	if (node.type !== "TEXT") cornerRadius(mock, node);
 	if (node.text) {
 		const { fontName, fontSize } = node.text;
+		mock.componentPropertyReferences = null;
 		Object.assign(mock, {
 			characters: node.text.characters,
 			fontName: fontName === "mixed" ? mixed : fontName,

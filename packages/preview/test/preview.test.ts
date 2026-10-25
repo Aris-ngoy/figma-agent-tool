@@ -11,6 +11,7 @@ import {
 	writeBaseline,
 } from "@figma-agent-tool/design-project";
 import {
+	componentFiles,
 	linkedScreens,
 	loginScreen,
 	logoPng,
@@ -338,5 +339,57 @@ describe("Directions", () => {
 			body: new URLSearchParams({ screen: "login", direction: "bold" }),
 		});
 		expect(again.status).toBe(404);
+	});
+});
+
+describe("Components", () => {
+	const files = { "screens/login.html": null, ...componentFiles };
+
+	test("the Preview shows each instance as its Component's variant draws it, with its properties", async () => {
+		const { server } = await preview(files);
+		const html = await (await fetch(`${server.url}screens/start`)).text();
+		expect(
+			html,
+		).toContain(`<body style="display:flex; flex-direction:column; gap:16px; padding:24px">
+  <h1>Start</h1>
+  <div data-name="app-button" style="display:flex; justify-content:center; padding:12px 16px; align-self:stretch; background-color:var(--colors-primary); border-radius:12px">
+    <p style="color:#ffffff; font-weight:600">Get started</p>
+  </div>
+  <div data-name="app-button" style="display:flex; justify-content:center; padding:12px 16px; border-radius:12px; border-width:1px; border-color:var(--colors-primary)">
+    <p style="color:var(--colors-primary); font-weight:600">Sign in</p>
+  </div>`);
+		// A Linked Component's design is in Figma: the Preview names it.
+		expect(html).toContain(
+			'<div data-name="app-avatar" style="display:flex; justify-content:center; align-items:center; width:40px; height:40px; background-color:#eeeeee">\n    <p style="color:#666666; font-size:10px">app-avatar</p>\n  </div>',
+		);
+	});
+
+	test("the Preview lists the Defined Components, each with its variants side by side", async () => {
+		const { server } = await preview(files);
+		const index = await (await fetch(server.url)).text();
+		expect(index).toContain('<iframe src="/components/app-button"');
+		const html = await (
+			await fetch(`${server.url}components/app-button`)
+		).text();
+		expect(html).toContain(
+			'<body style="display:flex; gap:40px; padding:40px">\n  <div data-name="kind=primary" style="display:flex; justify-content:center;',
+		);
+		expect(html).toContain('<div data-name="kind=secondary"');
+		expect(html).toContain("body { width: max-content; height: max-content; }");
+	});
+
+	test("Render draws instances as the Preview does", async () => {
+		const project = await loadProject(await writeFixtureProject(files));
+		const screen = project.screens[0] as ScreenFile;
+		let html = "";
+		const screenshot: Screenshotter = async (htmlPath, pngPath) => {
+			html = await readFile(htmlPath, "utf8");
+			await writeFile(pngPath, Buffer.from(logoPng, "base64"));
+		};
+		await renderScreen(project, screen, { screenshot });
+		expect(html).toContain(
+			'<p style="color:#ffffff; font-weight:600">Get started</p>',
+		);
+		expect(html).not.toContain("<app-button");
 	});
 });

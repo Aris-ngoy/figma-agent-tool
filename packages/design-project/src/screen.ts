@@ -1,11 +1,20 @@
 // Screens: parsing a Screen file into its elements, and checking it against
 // the Screen Subset with errors that name the file, element and rule.
+import {
+	type ComponentDefinition,
+	PROPERTY_NAME,
+	parseVariant,
+	variantOf,
+} from "./components";
 import type { Tokens } from "./design-md";
 import { type HtmlElement, parseHtml } from "./html";
 import { linkedScreen, parseTransition } from "./link";
 import { parsePath } from "./path";
 import {
+	COMPONENT_SET_TAG,
+	COMPONENT_TAG,
 	FIGMA_OWNED_TAG,
+	isComponentTag,
 	type Kind,
 	PROPS,
 	type Prop,
@@ -20,7 +29,10 @@ export type Element = {
 	tag: string;
 	/** The stable key Push writes into `data-key`. */
 	key?: string;
-	/** `data-name`: the layer name in Figma, when not the default. */
+	/**
+	 * `data-name`: the layer name in Figma, when not the default. On a
+	 * Component's <component>, its `data-variant`, which is its name in Figma.
+	 */
 	name?: string;
 	/** Longhand CSS properties as written (tokens unresolved). */
 	props: Partial<Record<Prop, string>>;
@@ -36,6 +48,10 @@ export type Element = {
 	href?: string;
 	/** `data-transition`: how the Prototype Link animates, as written. */
 	transition?: string;
+	/** An instance's Component properties, as written. */
+	properties?: Record<string, string>;
+	/** In a Component, the text property (`data-property`) a text element shows. */
+	property?: string;
 	children: Element[];
 	/** Where it starts in the file; not part of the element's content. */
 	line?: number;
@@ -72,6 +88,17 @@ export type ScreenContext = {
 	imageExists: (src: string) => boolean;
 	/** Whether the Design Project has a Screen by this name, for links. */
 	screenExists: (name: string) => boolean;
+	/**
+	 * The Component a custom element is an instance of, if the Design Project
+	 * has one by that name: its properties, unless it's Linked and no Push
+	 * has read them from Figma yet.
+	 */
+	component?: (name: string) => ComponentInfo | undefined;
+};
+
+export type ComponentInfo = {
+	linked: boolean;
+	definition?: ComponentDefinition;
 };
 
 const ATTRIBUTES = new Set(["data-key", "data-name", "style"]);
@@ -85,8 +112,19 @@ const KIND_ATTRIBUTES: Record<Kind, string[]> = {
 	rect: LINK_ATTRIBUTES,
 	image: ["src", ...LINK_ATTRIBUTES],
 	vector: ["viewbox", "xmlns", ...LINK_ATTRIBUTES],
+	// And its Component's properties.
+	instance: LINK_ATTRIBUTES,
 	owned: [],
 };
+
+/** Names a Component property can't have: they're the attributes every instance takes. */
+const RESERVED_PROPERTIES = new Set([
+	"style",
+	"href",
+	"src",
+	"viewbox",
+	"xmlns",
+]);
 
 /** The tag of a Prototype Link that is a frame, text or rectangle. */
 const LINK_TAG = "a";
@@ -126,6 +164,68 @@ export function parseScreen(
 	return { root, errors };
 }
 
+/**
+ * Parses a Defined Component's file: one <component> frame per variant.
+ * Its root is a stand-in for the component set holding them (see
+ * componentSetRoot), whatever the number of variants.
+ */
+export function parseComponent(
+	file: string,
+	source: string,
+	context: ScreenContext,
+): { root?: Element; errors: CheckError[] } {
+	const { nodes, errors: htmlErrors } = parseHtml(source);
+	if (htmlErrors.length > 0) {
+		return {
+			errors: htmlErrors.map((error) => ({ file, element: "", ...error })),
+		};
+	}
+	const errors: CheckError[] = [];
+	const elements = nodes.filter((node) => node.type === "element");
+	const stray = nodes.find((node) => node.type === "text" && node.text.trim());
+	const other = elements.find((element) => element.tag !== COMPONENT_TAG);
+	if (elements.length === 0 || other || stray) {
+		errors.push({
+			file,
+			line: (other ?? stray)?.line ?? 1,
+			element: "",
+			rule: "component-roots",
+			message:
+				'A Component file holds one <component style="display:flex"> per variant (its component in Figma), and nothing else.',
+		});
+		return { errors };
+	}
+	const root = componentSetRoot([]);
+	const builder = new Builder(file, context, errors, true);
+	elements.forEach((html, index) => {
+		const path = `component${elements.length > 1 ? `:nth-of-type(${index + 1})` : ""}`;
+		root.children.push(builder.element(html, path, root));
+	});
+	builder.checkVariants(elements, root.children);
+	return { root, errors };
+}
+
+/**
+ * The stand-in root of a Component's variants: its component set in Figma,
+ * laid out in a row. Only its children are the Component's.
+ */
+export function componentSetRoot(children: Element[]): Element {
+	const space = "40px";
+	return {
+		kind: "frame",
+		tag: COMPONENT_SET_TAG,
+		key: COMPONENT_SET_TAG,
+		props: {
+			gap: space,
+			"padding-top": space,
+			"padding-right": space,
+			"padding-bottom": space,
+			"padding-left": space,
+		},
+		children,
+	};
+}
+
 class Builder {
 	private readonly keys = new Map<string, number>();
 
@@ -133,6 +233,8 @@ class Builder {
 		private readonly file: string,
 		private readonly context: ScreenContext,
 		private readonly errors: CheckError[],
+		/** Parsing a Component's file, rather than a Screen. */
+		private readonly inComponent = false,
 	) {}
 
 	private error(
@@ -187,6 +289,8 @@ class Builder {
 		const isRoot = parent === undefined;
 		if (html.tag === "svg" && !isRoot) return "vector";
 		if (html.tag === FIGMA_OWNED_TAG && !isRoot) return "owned";
+		if (isComponentTag(html.tag) && !isRoot) return "instance";
+		const isVariant = parent?.tag === COMPONENT_SET_TAG;
 		const holdsText = html.children.some(
 			(child) =>
 				(child.type === "text" && child.text.trim()) ||
@@ -197,9 +301,19 @@ class Builder {
 		if (
 			html.tag === "div" ||
 			html.tag === LINK_TAG ||
-			(isRoot && html.tag === "body")
+			(isRoot && html.tag === "body") ||
+			isVariant
 		) {
 			if (display === "flex") return "frame";
+			if (isVariant) {
+				this.error(
+					html,
+					path,
+					"div-needs-flex",
+					"A <component> is a variant's component in Figma, a frame: give it `display: flex` (auto layout in Figma).",
+				);
+				return "frame";
+			}
 			if (display !== undefined) {
 				this.error(
 					html,
@@ -224,7 +338,7 @@ class Builder {
 			html,
 			path,
 			"unknown-element",
-			`<${html.tag}> isn't in the Screen Subset. Use <div style="display:flex"> for frames, <div> for rectangles, <p>, <span> or <h1>–<h6> for text, <img> for images, <svg> with <path>s for vectors and <a href> for links to other Screens.`,
+			`<${html.tag}> isn't in the Screen Subset. Use <div style="display:flex"> for frames, <div> for rectangles, <p>, <span> or <h1>–<h6> for text, <img> for images, <svg> with <path>s for vectors, <a href> for links to other Screens, and a Component's name (<app-button>) for its instances.`,
 		);
 		return "rect";
 	}
@@ -235,7 +349,37 @@ class Builder {
 		element: Element,
 		isRoot: boolean,
 	) {
+		const isVariant = this.inComponent && element.tag === COMPONENT_TAG;
+		const instance =
+			element.kind === "instance" ? this.instance(html, path) : undefined;
 		for (const { name, value } of html.attributes) {
+			if (isVariant && this.variantAttribute(html, path, element, name, value))
+				continue;
+			if (
+				name === "data-property" &&
+				this.inComponent &&
+				element.kind === "text"
+			) {
+				this.property(html, path, element, value);
+				continue;
+			}
+			if (this.inComponent && LINK_ATTRIBUTES.includes(name)) {
+				this.error(
+					html,
+					path,
+					"unknown-attribute",
+					`\`${name}\` makes a Prototype Link, which Components can't have: link their instances in the Screens instead.`,
+				);
+				continue;
+			}
+			if (
+				instance &&
+				!ATTRIBUTES.has(name) &&
+				!LINK_ATTRIBUTES.includes(name)
+			) {
+				this.instanceProperty(html, path, element, instance, name, value);
+				continue;
+			}
 			const valid =
 				ATTRIBUTES.has(name) ||
 				(KIND_ATTRIBUTES[element.kind].includes(name) &&
@@ -258,6 +402,7 @@ class Builder {
 			if (name === "data-transition") element.transition = value;
 		}
 		this.link(html, path, element);
+		if (instance?.definition) this.checkProperties(html, path, element);
 		if (element.kind === "image") this.image(html, path, element);
 		if (element.kind === "owned" && !element.key) {
 			this.error(
@@ -267,6 +412,226 @@ class Builder {
 				"A Figma-owned Element refers to its layer in Figma by the `data-key` Pull gave it. Restore it, or delete the element (Push then deletes the layer).",
 			);
 		}
+	}
+
+	/** A <component>'s own attributes: `data-variant`, `data-key` and `style`. */
+	private variantAttribute(
+		html: HtmlElement,
+		path: string,
+		element: Element,
+		name: string,
+		value: string,
+	): boolean {
+		if (name === "data-variant") {
+			element.name = value;
+			return true;
+		}
+		if (name === "data-key" || name === "style") return false;
+		this.error(
+			html,
+			path,
+			"unknown-attribute",
+			`The \`${name}\` attribute isn't in the Screen Subset on a <component>: it takes \`style\`, \`data-key\` (written by Push) and \`data-variant\` (its variant, as in \`data-variant="kind=primary, size=lg"\`); its name is the Component file's.`,
+		);
+		return true;
+	}
+
+	/** `data-property` on a Component's text: the text property it shows. */
+	private property(
+		html: HtmlElement,
+		path: string,
+		element: Element,
+		name: string,
+	) {
+		if (!PROPERTY_NAME.test(name) || RESERVED_PROPERTIES.has(name)) {
+			this.error(
+				html,
+				path,
+				"invalid-property",
+				`\`data-property="${name}"\` isn't a property name: use lower-case letters, digits and hyphens (not ${[...RESERVED_PROPERTIES].join(", ")}), as instances set it as an attribute (\`<app-button ${PROPERTY_NAME.test(name) ? name : "label"}="…">\`).`,
+			);
+			return;
+		}
+		element.property = name;
+	}
+
+	/** The Component a custom element is an instance of; an error if there's none. */
+	private instance(html: HtmlElement, path: string): ComponentInfo | undefined {
+		if (this.inComponent) {
+			this.error(
+				html,
+				path,
+				"nested-component",
+				`<${html.tag}> is an instance of a Component, but Components can't hold instances of other Components yet: write its elements here instead.`,
+			);
+			return undefined;
+		}
+		const info = this.context.component?.(html.tag);
+		if (!info) {
+			this.error(
+				html,
+				path,
+				"unknown-component",
+				`<${html.tag}> isn't a Component of the Design Project: Define it in components/${html.tag}.html, or Link it to a Figma component in components/${html.tag}.json (\`{ "key": "…" }\`).`,
+			);
+		}
+		return info;
+	}
+
+	/** An attribute of an instance that sets one of its Component's properties. */
+	private instanceProperty(
+		html: HtmlElement,
+		path: string,
+		element: Element,
+		{ definition }: ComponentInfo,
+		name: string,
+		value: string,
+	) {
+		const property = definition?.properties[name];
+		const known = definition
+			? property !== undefined
+			: PROPERTY_NAME.test(name) && !RESERVED_PROPERTIES.has(name);
+		if (!known) {
+			const names = Object.keys(definition?.properties ?? {});
+			this.error(
+				html,
+				path,
+				"unknown-attribute",
+				`The \`${name}\` attribute isn't a property of <${html.tag}>${names.length > 0 ? `, which has ${names.map((n) => `\`${n}\``).join(", ")}` : ", which has no properties"}. Instances also take \`style\` (their place and size), \`data-name\`, \`data-key\`, \`href\` and \`data-transition\`.`,
+			);
+			return;
+		}
+		if (property?.type === "VARIANT" && !property.options.includes(value)) {
+			this.error(
+				html,
+				path,
+				"invalid-property",
+				`\`${name}="${value}"\` isn't a variant of <${html.tag}>: ${name} is one of ${property.options.map((o) => `\`${o}\``).join(", ")}.`,
+			);
+			return;
+		}
+		if (property?.type === "BOOLEAN" && value !== "true" && value !== "false") {
+			this.error(
+				html,
+				path,
+				"invalid-property",
+				`\`${name}="${value}"\` must be \`true\` or \`false\`: it's a boolean property of <${html.tag}>.`,
+			);
+			return;
+		}
+		element.properties = { ...element.properties, [name]: value };
+	}
+
+	/** An instance's variant properties name one of its Component's variants. */
+	private checkProperties(html: HtmlElement, path: string, element: Element) {
+		const definition = this.context.component?.(element.tag)?.definition;
+		if (!definition?.variants) return;
+		const chosen = variantOf(definition, element.properties ?? {});
+		if (!definition.variants.includes(chosen)) {
+			this.error(
+				html,
+				path,
+				"invalid-property",
+				`<${element.tag}> has no variant ${chosen}: its variants are ${definition.variants.map((v) => `\`${v}\``).join(", ")}.`,
+			);
+		}
+	}
+
+	/** Every variant of a Component is named, alike and different. */
+	checkVariants(htmls: HtmlElement[], variants: Element[]) {
+		const seen = new Map<string, number>();
+		/** Each text property's text, as the first variant showing it has it. */
+		const defaults = new Map<string, string>();
+		let names: string | undefined;
+		variants.forEach((variant, index) => {
+			const html = htmls[index] as HtmlElement;
+			const path = `component${variants.length > 1 ? `:nth-of-type(${index + 1})` : ""}`;
+			const { props } = variant;
+			const placed = (["flex", "align-self", "position"] as const).filter(
+				(prop) => props[prop] !== undefined,
+			);
+			if (placed.length > 0) {
+				this.error(
+					html,
+					path,
+					"unknown-property",
+					`A <component> is a top-level component in Figma, so \`${placed.join("`, `")}\` don't apply to it: its instances are placed in their Screens.`,
+				);
+			}
+			if (variant.name === undefined) {
+				if (variants.length > 1) {
+					this.error(
+						html,
+						path,
+						"missing-variant",
+						'A Component with several <component>s has a variant in each: name it with `data-variant`, as in `data-variant="kind=primary"` (its variant properties in Figma).',
+					);
+				}
+				return;
+			}
+			const pairs = parseVariant(variant.name);
+			if (!pairs) {
+				this.error(
+					html,
+					path,
+					"invalid-variant",
+					`\`data-variant="${variant.name}"\` isn't a variant: write each property as \`name=value\`, separated by commas (\`kind=primary, size=lg\`), with lower-case names given once.`,
+				);
+				return;
+			}
+			variant.name = pairs
+				.map(([name, value]) => `${name}=${value}`)
+				.join(", ");
+			const theseNames = pairs.map(([name]) => name).join(", ");
+			names ??= theseNames;
+			if (theseNames !== names) {
+				this.error(
+					html,
+					path,
+					"invalid-variant",
+					`Every variant of a Component sets the same properties in the same order: this one sets ${theseNames}, the first ${names}.`,
+				);
+			}
+			const first = seen.get(variant.name);
+			if (first !== undefined) {
+				this.error(
+					html,
+					path,
+					"duplicate-variant",
+					`The variant ${variant.name} is already on line ${first}.`,
+				);
+			}
+			seen.set(variant.name, html.line);
+			const variantNames = new Set(pairs.map(([name]) => name));
+			const texts = new Set<string>();
+			const walk = (element: Element) => {
+				const { property } = element;
+				if (property && (variantNames.has(property) || texts.has(property))) {
+					this.errors.push({
+						file: this.file,
+						line: element.line ?? html.line,
+						element: path,
+						rule: "invalid-property",
+						message: `\`data-property="${property}"\` is already ${variantNames.has(property) ? "a variant property" : "another text's property in this variant"}: give each text property its own name.`,
+					});
+				}
+				if (property) texts.add(property);
+				const text = element.text ?? "";
+				const first = property && defaults.get(property);
+				if (property && first !== undefined && first !== text) {
+					this.errors.push({
+						file: this.file,
+						line: element.line ?? html.line,
+						element: path,
+						rule: "invalid-property",
+						message: `\`data-property="${property}"\` shows "${text}" here but "${first}" in an earlier variant: a text property has one default text in Figma, so give its texts the same one.`,
+					});
+				}
+				if (property && first === undefined) defaults.set(property, text);
+				element.children.forEach(walk);
+			};
+			variant.children.forEach(walk);
+		});
 	}
 
 	/** A Prototype Link goes to a Screen of the Design Project, with a transition Figma has. */
@@ -538,16 +903,23 @@ class Builder {
 			this.paths(html, path, element);
 			return true;
 		}
-		if (element.kind === "owned") {
+		if (element.kind === "owned" || element.kind === "instance") {
 			const content = html.children.some(
 				(child) => child.type === "element" || child.text.trim(),
 			);
-			if (content) {
+			if (content && element.kind === "owned") {
 				this.error(
 					html,
 					path,
 					"figma-owned-content",
 					"A Figma-owned Element stands for a layer only designers edit in Figma, so it holds nothing. Place and size it with `style`.",
+				);
+			} else if (content) {
+				this.error(
+					html,
+					path,
+					"instance-content",
+					`<${element.tag}> is an instance of a Component, whose content is the Component's, so it holds nothing: set its properties as attributes, and place and size it with \`style\`.`,
 				);
 			}
 			return !content;
@@ -649,7 +1021,11 @@ class Builder {
 				"A border needs both a width and a color: `border: 1px solid #dddddd`, or `border-width` with `border-color`.",
 			);
 		}
-		if (element.kind !== "frame" && element.kind !== "text") {
+		if (
+			element.kind !== "frame" &&
+			element.kind !== "text" &&
+			element.kind !== "instance"
+		) {
 			const missing = (["width", "height"] as const).filter(
 				(axis) => props[axis] === undefined && !fills[axis],
 			);
@@ -784,6 +1160,7 @@ function kindName(kind: Kind): string {
 		rect: "rectangles",
 		image: "images",
 		vector: "vectors",
+		instance: "instances",
 		owned: "Figma-owned Elements",
 	}[kind];
 }
@@ -795,6 +1172,7 @@ function describeKind(element: Element): string {
 		rect: "a rectangle (<div> without display:flex)",
 		image: "an image (<img>)",
 		vector: "a vector (<svg>)",
+		instance: `an instance of a Component (<${element.tag}>, which only takes its place and size)`,
 		owned: "a Figma-owned Element (which only takes its place and size)",
 	}[element.kind];
 }

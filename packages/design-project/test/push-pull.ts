@@ -1,13 +1,14 @@
 // Push and Pull through the fake plugin's in-place apply, as the MCP tools
 // do through the real one.
 import type { SyncedNode } from "@figma-agent-tool/protocol";
-import { applyScreenTree } from "../fixtures";
+import { applyScreenTree, type FakeComponents } from "../fixtures";
 import {
 	assignKeys,
 	type Baseline,
 	baselineAfterPush,
 	checkScreen,
 	type DesignProject,
+	type FigmaComponents,
 	pullScreen,
 	pushedImageRecords,
 	type ScreenFile,
@@ -21,6 +22,7 @@ export async function push(
 	screen: ScreenFile,
 	previous?: { frame: SyncedNode; baseline: Baseline },
 	nextId?: () => string,
+	components?: FakeComponents,
 ) {
 	const { source } = assignKeys(screen.source);
 	const keyed = { ...screen, source };
@@ -37,6 +39,7 @@ export async function push(
 		nextId: nextId ?? (() => `9:${++id}`),
 		imageHash: (name) => `hash-of-${name}`,
 		remove,
+		components,
 	});
 	const hashes = Object.fromEntries(
 		Object.keys(images).map((name) => [name, `hash-of-${name}`]),
@@ -58,8 +61,18 @@ export function pull(
 	baseline: Baseline,
 	frame: SyncedNode,
 	screenFrames: Record<string, string> = {},
+	components?: FigmaComponents,
 ) {
 	const { root } = checkScreen(project, screen);
 	if (!root) throw new Error("Screen doesn't check");
-	return pullScreen(project, screen, root, baseline, frame, {}, screenFrames);
+	return pullScreen(
+		project,
+		screen,
+		root,
+		baseline,
+		frame,
+		{},
+		screenFrames,
+		components,
+	);
 }

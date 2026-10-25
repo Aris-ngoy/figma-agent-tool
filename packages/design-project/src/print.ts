@@ -4,7 +4,12 @@
 // markers the Agent resolves by keeping one side.
 import { escapeAttribute, escapeText } from "./html";
 import type { Element } from "./screen";
-import { PROP_NAMES, type Prop } from "./subset";
+import {
+	COMPONENT_SET_TAG,
+	COMPONENT_TAG,
+	PROP_NAMES,
+	type Prop,
+} from "./subset";
 
 export const CONFLICT_START = "<<<<<<< Design Project";
 export const CONFLICT_SEPARATOR = "=======";
@@ -18,7 +23,13 @@ const PADDING: Prop[] = [
 ];
 
 export function printScreen(root: Element): string {
+	if (root.tag === COMPONENT_SET_TAG) return printComponent(root);
 	return `${printElement(root, 0).join("\n")}\n`;
+}
+
+/** A Defined Component's file: its variants, from their stand-in root. */
+function printComponent(root: Element): string {
+	return `${printChildren(root, -1).join("\n")}\n`;
 }
 
 function printElement(element: Element, depth: number): string[] {
@@ -85,7 +96,14 @@ function markers(local: string[], figma: string[]): string[] {
 function openTag(element: Element): string {
 	const attributes: [string, string][] = [];
 	if (element.key) attributes.push(["data-key", element.key]);
-	if (element.name !== undefined) attributes.push(["data-name", element.name]);
+	if (element.name !== undefined) {
+		const name = element.tag === COMPONENT_TAG ? "data-variant" : "data-name";
+		attributes.push([name, element.name]);
+	}
+	if (element.property !== undefined)
+		attributes.push(["data-property", element.property]);
+	for (const [name, value] of Object.entries(element.properties ?? {}))
+		attributes.push([name, value]);
 	if (element.href !== undefined) attributes.push(["href", element.href]);
 	if (element.transition !== undefined)
 		attributes.push(["data-transition", element.transition]);

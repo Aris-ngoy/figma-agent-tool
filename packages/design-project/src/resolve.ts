@@ -1,12 +1,14 @@
 // What an element means, independent of how it's written: tokens resolved,
 // units dropped, defaults filled in. Pull compares elements this way, so
 // `var(--colors-primary)` in the file and `#3366ff` read from Figma match.
+import { type ComponentDefinition, instanceProperties } from "./components";
 import type { Tokens } from "./design-md";
 import { linkedScreen, resolveTransition } from "./link";
 import { formatPath, parsePath, transformPath } from "./path";
 import type { ScreenSize } from "./project";
 import type { Element, VectorPath } from "./screen";
 import {
+	COMPONENT_TAG,
 	DEFAULT_NAMES,
 	defaultValue,
 	PROP_NAMES,
@@ -17,11 +19,18 @@ import {
 
 export type ResolveContext = {
 	tokens: Tokens;
+	/** The Screen's name; a Component's, for its file. */
 	screenName: string;
 	screenSize: ScreenSize;
+	/** Components' properties, for the defaults of those an instance doesn't set. */
+	components?: (name: string) => ComponentDefinition | undefined;
 };
 
-/** Own fields (not children): `@kind`, `@name`, `@text`, `@src`, a link's `@href` and `@transition`, and props. */
+/**
+ * Own fields (not children): `@kind`, `@name`, `@text`, `@src`, a link's
+ * `@href` and `@transition`, an instance's `@component` and `@prop:<name>`
+ * per property, a Component's text's `@property`, and props.
+ */
 export type ResolvedElement = Record<string, string>;
 
 export function resolveElement(
@@ -35,6 +44,16 @@ export function resolveElement(
 	};
 	if (element.kind === "text") resolved["@text"] = element.text ?? "";
 	if (element.kind === "image") resolved["@src"] = element.src ?? "";
+	if (element.kind === "instance") {
+		resolved["@component"] = element.tag;
+		const properties = instanceProperties(
+			context.components?.(element.tag),
+			element.properties,
+		);
+		for (const [name, value] of Object.entries(properties))
+			resolved[`@prop:${name}`] = value;
+	}
+	if (element.property !== undefined) resolved["@property"] = element.property;
 	if (element.href !== undefined) {
 		resolved["@href"] = linkedScreen(element.href) ?? element.href;
 		resolved["@transition"] = resolveTransition(element.transition);
@@ -147,8 +166,9 @@ export function defaultName(
 	context: { screenName: string },
 	isRoot: boolean,
 ): string {
-	if (isRoot) return context.screenName;
+	if (isRoot || element.tag === COMPONENT_TAG) return context.screenName;
 	if (element.kind === "text") return element.text ?? "";
+	if (element.kind === "instance") return element.tag;
 	return DEFAULT_NAMES[element.kind];
 }
 

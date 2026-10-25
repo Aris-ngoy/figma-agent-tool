@@ -22,8 +22,10 @@ import {
 	directionPush,
 	type Element,
 	exportsToFetch,
+	type FigmaComponents,
 	type FigmaDesignSystem,
 	type FigmaOwnedLayer,
+	figmaComponents,
 	figmaDesignSystem,
 	figmaOwnedElements,
 	figmaTokens,
@@ -40,6 +42,7 @@ import {
 	pullScreen,
 	pushedImageRecords,
 	readBaselines,
+	readComponentBaselines,
 	readDesignSystemBaseline,
 	readExports,
 	readLink,
@@ -56,8 +59,10 @@ import {
 	unlinkedFigmaOwned,
 	withTokens,
 	writeBaseline,
+	writeComponentBaseline,
 	writeDesignSystemBaseline,
 	writeLink,
+	writeLinkedComponentRecord,
 } from "@figma-agent-tool/design-project";
 import type {
 	FileInfo,
@@ -142,6 +147,8 @@ export type PushResult =
 			linkedFile: FileInfo;
 			page: { id: string; name: string };
 			screens: { screen: string; frameId: string; created: boolean }[];
+			/** Defined Components: their component set's (or lone component's) node. */
+			components: { component: string; nodeId: string; created: boolean }[];
 	  };
 
 export async function pushDesignProject(
@@ -160,7 +167,12 @@ export async function pushDesignProject(
 			"Nothing to push: the Design Project has no Screens yet. Add HTML files to screens/.",
 		);
 	}
-	await refuseFailingCheck(project, screens);
+	// Every Component goes with every Push, so instances always find theirs.
+	await refuseFailingCheck(project, [
+		...screens,
+		...project.components,
+		...project.linkedComponents,
+	]);
 	const link = await linkOrConfirm(project, bridge, confirmLink);
 	if ("status" in link) return link;
 
@@ -171,8 +183,29 @@ export async function pushDesignProject(
 		);
 	}
 	const baselines = linkedBaselines(await readBaselines(project), linked);
+	const componentBaselines = linkedBaselines(
+		await readComponentBaselines(project),
+		linked,
+	);
 	// Every Screen's frame, since the pushed ones may link to any of them.
-	const frames = await readFrames(bridge, project.screens, baselines);
+	const { frames, components: componentNodes } = await readFigma(
+		bridge,
+		project.screens,
+		baselines,
+		componentBaselines,
+	);
+	const editedComponents = screensWithUnpulledChanges(
+		project,
+		project.components,
+		componentBaselines,
+		componentNodes,
+		{},
+	);
+	if (editedComponents.length > 0) {
+		throw new DesignSyncError(
+			`Push refused: the Component${editedComponents.length === 1 ? "" : "s"} ${editedComponents.map((c) => c.name).join(", ")} ${editedComponents.length === 1 ? "has" : "have"} Unpulled Changes: a designer edited ${editedComponents.length === 1 ? "its main component" : "their main components"} in Figma. Pull first; it merges their edits into components/.`,
+		);
+	}
 	const screenFrames = screenFramesOf(baselines, frames);
 	const unpulled = screensWithUnpulledChanges(
 		project,
@@ -180,6 +213,7 @@ export async function pushDesignProject(
 		baselines,
 		frames,
 		screenFrames,
+		figmaComponents(project, componentBaselines),
 	);
 	if (unpulled.length > 0) {
 		throw new DesignSyncError(
@@ -203,11 +237,39 @@ export async function pushDesignProject(
 		figmaOwned: string[];
 	}[] = [];
 	const images: Record<string, string> = {};
+	const componentPushes: {
+		component: ScreenFile;
+		tree: ScreenNode;
+		sources: Record<string, PushedImage>;
+		nodeId?: string;
+		remove: string[];
+	}[] = [];
+	for (const original of project.components) {
+		const component = await withKeys(original);
+		const { root } = checkScreen(project, component);
+		if (!root)
+			throw new Error(
+				`${component.file} stopped checking while keys were added.`,
+			);
+		const node = componentNodes.get(component.name);
+		const previous = componentBaselines.get(component.name);
+		const baseline =
+			node && previous
+				? followFrame(project, component, previous, node)
+				: undefined;
+		const push = await screenPush(project, component, root, baseline, bindings);
+		Object.assign(images, push.images);
+		componentPushes.push({
+			component,
+			tree: push.tree,
+			sources: push.sources,
+			nodeId: baseline?.frameId,
+			remove: push.remove,
+		});
+	}
 	const pushedNames = new Set(screens.map((screen) => screen.name));
 	for (const original of screens) {
-		const { source, added } = assignKeys(original.source);
-		if (added > 0) await writeFile(original.path, source);
-		const screen = { ...original, source };
+		const screen = await withKeys(original);
 		const { root } = checkScreen(project, screen);
 		if (!root)
 			throw new Error(`${screen.file} stopped checking while keys were added.`);
@@ -261,8 +323,39 @@ export async function pushDesignProject(
 				.map(([name, frame]) => [name, frame.id]),
 		),
 		screenFrames: Object.keys(screenFrames),
+		components: componentPushes.map(({ component, nodeId, tree, remove }) => ({
+			component: component.name,
+			nodeId,
+			tree,
+			remove,
+		})),
+		linked: project.linkedComponents.map(({ name, key, id }) => ({
+			component: name,
+			key,
+			id,
+		})),
 	});
 	await writeLink(project, { ...link, screensPage: result.page });
+	const pushedComponents = [];
+	for (const [index, push] of componentPushes.entries()) {
+		const node = result.components[index]?.node as SyncedNode;
+		const records = pushedImageRecords(push.sources, result.images);
+		await writeComponentBaseline(
+			project,
+			push.component.name,
+			baselineAfterPush(project, push.component.source, node, records),
+		);
+		pushedComponents.push({
+			component: push.component.name,
+			nodeId: node.id,
+			created: node.id !== push.nodeId,
+		});
+	}
+	for (const { component, ...record } of result.linked)
+		await writeLinkedComponentRecord(project, component, record);
+	// Screens' Baselines record their Linked Components' properties as Figma has them.
+	const pushedProject =
+		result.linked.length > 0 ? await loadProject(dir) : project;
 	if (result.designSystem) {
 		await writeDesignSystemBaseline(project, {
 			source: project.designMd,
@@ -277,7 +370,7 @@ export async function pushDesignProject(
 		await writeBaseline(
 			project,
 			push.screen.name,
-			baselineAfterPush(project, push.screen.source, frame, records),
+			baselineAfterPush(pushedProject, push.screen.source, frame, records),
 		);
 		// Exports of Figma-owned Elements the Screen deleted go with their layers.
 		await saveExports(project, push.screen.name, [], push.figmaOwned);
@@ -292,11 +385,22 @@ export async function pushDesignProject(
 		linkedFile: link.file,
 		page: result.page,
 		screens: pushed,
+		components: pushedComponents,
 	};
 }
 
+/** A Screen's or Component's file with a key on every element, written back when Push added any. */
+async function withKeys(file: ScreenFile): Promise<ScreenFile> {
+	const { source, added } = assignKeys(file.source);
+	if (added > 0) await writeFile(file.path, source);
+	return { ...file, source };
+}
+
 /** Refuses while DESIGN.md, its Modes file or one of `files` fails Check. */
-async function refuseFailingCheck(project: DesignProject, files: ScreenFile[]) {
+async function refuseFailingCheck(
+	project: DesignProject,
+	files: { file: string }[],
+) {
 	const checked = await checkProject(project);
 	const failing = checked.errors.filter(
 		(error) =>
@@ -387,6 +491,7 @@ export async function pushDirections(
 	if ("status" in link) return link;
 
 	const baselines = await readBaselines(project);
+	const components = await componentNodeIds(project);
 	const images: Record<string, string> = {};
 	const screens = new Map<string, { direction: string; tree: ScreenNode }[]>();
 	for (const direction of directions) {
@@ -402,6 +507,14 @@ export async function pushDirections(
 		if (unlinked.length > 0) {
 			throw new DesignSyncError(
 				`Push refused: ${direction.file} has Figma-owned Elements (${unlinked.join(", ")}) whose layers aren't in ${direction.of}'s frame, so they can't be copied. Only Pull makes Figma-owned Elements: copy them from the Screen as Pull wrote them, or delete them.`,
+			);
+		}
+		const unpushed = instanceComponents(root).filter(
+			(component) => !components[component],
+		);
+		if (unpushed.length > 0) {
+			throw new DesignSyncError(
+				`Push refused: ${direction.file} uses ${unpushed.join(", ")}, which ${unpushed.length === 1 ? "isn't" : "aren't"} in Figma yet. Push the Screens first: every Push sends the Components.`,
 			);
 		}
 		const push = await directionPush(project, keyed, root, baseline);
@@ -421,6 +534,7 @@ export async function pushDirections(
 			directions: pushes,
 		})),
 		images,
+		components,
 	});
 	await writeLink(project, { ...link, explorationsPage: result.page });
 	return {
@@ -432,6 +546,33 @@ export async function pushDirections(
 			directions: frames,
 		})),
 	};
+}
+
+/** The node each Component's instances come from, once a Push has sent (or found) it. */
+async function componentNodeIds(
+	project: DesignProject,
+): Promise<Record<string, string>> {
+	const baselines = await readComponentBaselines(project);
+	return Object.fromEntries([
+		...project.components.flatMap((component) => {
+			const baseline = baselines.get(component.name);
+			return baseline ? [[component.name, baseline.frameId]] : [];
+		}),
+		...project.linkedComponents.flatMap(({ name, record }) =>
+			record ? [[name, record.componentId]] : [],
+		),
+	]);
+}
+
+/** The Components an element's instances are of. */
+function instanceComponents(root: Element): string[] {
+	const found = new Set<string>();
+	const walk = (element: Element) => {
+		if (element.kind === "instance") found.add(element.tag);
+		element.children.forEach(walk);
+	};
+	walk(root);
+	return [...found];
 }
 
 /** DESIGN.md and its Modes file. */
@@ -463,13 +604,14 @@ function selectScreens(
 	return only.map((name) => findScreen(project, name));
 }
 
-/** The Screens whose frames a designer edited since their Baseline. */
+/** The Screens (or Components) whose frames (or nodes) a designer edited since their Baseline. */
 function screensWithUnpulledChanges(
 	project: DesignProject,
 	screens: ScreenFile[],
 	baselines: Map<string, Baseline>,
 	frames: Map<string, SyncedNode>,
 	screenFrames: ScreenFrames,
+	components?: FigmaComponents,
 ): ScreenFile[] {
 	return screens.filter((screen) => {
 		const baseline = baselines.get(screen.name);
@@ -477,7 +619,14 @@ function screensWithUnpulledChanges(
 		return (
 			baseline &&
 			frame &&
-			hasUnpulledChanges(project, screen, baseline, frame, screenFrames)
+			hasUnpulledChanges(
+				project,
+				screen,
+				baseline,
+				frame,
+				screenFrames,
+				components,
+			)
 		);
 	});
 }
@@ -536,23 +685,45 @@ function linkedBaselines(
 	);
 }
 
-/** The current frame of each Screen that has a Baseline; missing when deleted. */
-async function readFrames(
+/**
+ * The current frame of each Screen, and node of each Defined Component,
+ * that has a Baseline; missing when deleted.
+ */
+async function readFigma(
 	bridge: Bridge,
 	screens: { name: string }[],
 	baselines: Map<string, Baseline>,
-): Promise<Map<string, SyncedNode>> {
+	componentBaselines: Map<string, Baseline> = new Map(),
+): Promise<{
+	frames: Map<string, SyncedNode>;
+	components: Map<string, SyncedNode>;
+}> {
 	const requested = screens.flatMap((screen) => {
 		const baseline = baselines.get(screen.name);
 		return baseline ? [{ screen: screen.name, frameId: baseline.frameId }] : [];
 	});
-	if (requested.length === 0) return new Map();
-	const { screens: frames } = await bridge.request("read_screens", {
+	const wanted = [...componentBaselines].map(([component, baseline]) => ({
+		component,
+		nodeId: baseline.frameId,
+	}));
+	if (requested.length === 0 && wanted.length === 0)
+		return { frames: new Map(), components: new Map() };
+	const result = await bridge.request("read_screens", {
 		screens: requested,
+		components: wanted,
 	});
-	return new Map(
-		frames.flatMap(({ screen, frame }) => (frame ? [[screen, frame]] : [])),
-	);
+	return {
+		frames: new Map(
+			result.screens.flatMap(({ screen, frame }) =>
+				frame ? [[screen, frame]] : [],
+			),
+		),
+		components: new Map(
+			result.components.flatMap(({ component, node }) =>
+				node ? [[component, node]] : [],
+			),
+		),
+	};
 }
 
 export type PullResult = {
@@ -572,6 +743,13 @@ export type PullResult = {
 		/** Layers kept in Figma because the Screen Subset can't express them. */
 		figmaOwned: FigmaOwnedLayer[];
 	}[];
+	/** Defined Components: designers' edits to their main components. */
+	components: {
+		component: string;
+		status: "merged" | "unchanged" | "missing";
+		conflicts: number;
+		figmaOwned: FigmaOwnedLayer[];
+	}[];
 	conflicts: number;
 };
 
@@ -588,13 +766,19 @@ export async function pullDesignProject(
 	}
 	checkBridgedFile(bridge, link);
 	const baselines = await readBaselines(project);
+	const componentBaselines = await readComponentBaselines(project);
 	const screens = project.screens.filter((screen) =>
 		baselines.has(screen.name),
+	);
+	const components = project.components.filter((component) =>
+		componentBaselines.has(component.name),
 	);
 	const failing = [
 		...project.designMdErrors,
 		...project.modes.errors,
-		...screens.flatMap((screen) => checkScreen(project, screen).errors),
+		...[...components, ...screens].flatMap(
+			(screen) => checkScreen(project, screen).errors,
+		),
 	];
 	if (failing.length > 0) {
 		throw new DesignSyncError(
@@ -633,15 +817,62 @@ export async function pullDesignProject(
 		// Screens merge against the merged tokens, unless they're in conflict.
 		if (pulled.conflicts === 0) project = await loadProject(dir);
 	}
+	const { frames, components: componentNodes } = await readFigma(
+		bridge,
+		screens,
+		linkedBaselines(baselines, linked),
+		linkedBaselines(componentBaselines, linked),
+	);
+	// Components first: the Screens' instances read against their properties.
+	const componentResults: PullResult["components"] = [];
+	for (const original of components) {
+		const component = checkScreen(
+			project,
+			project.components.find((c) => c.name === original.name) ?? original,
+		);
+		const stored = componentBaselines.get(component.name) as Baseline;
+		const node = componentNodes.get(component.name);
+		if (!node) {
+			componentResults.push({
+				component: component.name,
+				status: "missing",
+				conflicts: 0,
+				figmaOwned: [],
+			});
+			continue;
+		}
+		const baseline = linkedBaseline(stored, linked);
+		const pulled = pullScreen(
+			project,
+			component,
+			component.root as Element,
+			baseline,
+			node,
+			await fetchImages(project, component, node, baseline, bridge),
+		);
+		if (pulled.source !== undefined)
+			await writeFile(component.path, pulled.source);
+		if (JSON.stringify(pulled.baseline) !== JSON.stringify(stored)) {
+			await writeComponentBaseline(project, component.name, pulled.baseline);
+			componentBaselines.set(component.name, pulled.baseline);
+		}
+		componentResults.push({
+			component: component.name,
+			status: pulled.changed ? "merged" : "unchanged",
+			conflicts: pulled.conflicts,
+			figmaOwned: pulled.figmaOwned,
+		});
+	}
+	if (componentResults.some(({ status }) => status === "merged"))
+		project = await loadProject(dir);
+	const figma = figmaComponents(
+		project,
+		linkedBaselines(componentBaselines, linked),
+	);
 	const checked = screens.map((original) => {
 		const screen = project.screens.find((s) => s.name === original.name);
 		return checkScreen(project, screen ?? original);
 	});
-	const frames = await readFrames(
-		bridge,
-		screens,
-		linkedBaselines(baselines, linked),
-	);
 	const screenFrames = screenFramesOf(baselines, frames);
 	const results: PullResult["screens"] = [];
 	for (const screen of checked) {
@@ -657,24 +888,15 @@ export async function pullDesignProject(
 			});
 			continue;
 		}
-		const fetched: Record<string, { src: string; record: ImageRecord }> = {};
-		for (const imageHash of unknownImages(frame, baseline)) {
-			const { bytes } = await bridge.request("get_image", { imageHash });
-			fetched[imageHash] = await saveImage(
-				project,
-				screen,
-				imageHash,
-				Buffer.from(bytes, "base64"),
-			);
-		}
 		const pulled = pullScreen(
 			project,
 			screen,
 			screen.root as Element,
 			baseline,
 			frame,
-			fetched,
+			await fetchImages(project, screen, frame, baseline, bridge),
 			screenFrames,
+			figma,
 		);
 		if (pulled.source !== undefined)
 			await writeFile(screen.path, pulled.source);
@@ -692,11 +914,33 @@ export async function pullDesignProject(
 		linkedFile: link.file,
 		designSystem,
 		screens: results,
-		conflicts: results.reduce(
+		components: componentResults,
+		conflicts: [...results, ...componentResults].reduce(
 			(sum, screen) => sum + screen.conflicts,
 			designSystem.conflicts,
 		),
 	};
+}
+
+/** Saves the images a designer put in a frame (or Component) that its Baseline doesn't know. */
+async function fetchImages(
+	project: DesignProject,
+	screen: ScreenFile,
+	frame: SyncedNode,
+	baseline: Baseline,
+	bridge: Bridge,
+): Promise<Record<string, { src: string; record: ImageRecord }>> {
+	const fetched: Record<string, { src: string; record: ImageRecord }> = {};
+	for (const imageHash of unknownImages(frame, baseline)) {
+		const { bytes } = await bridge.request("get_image", { imageHash });
+		fetched[imageHash] = await saveImage(
+			project,
+			screen,
+			imageHash,
+			Buffer.from(bytes, "base64"),
+		);
+	}
+	return fetched;
 }
 
 /** Caches an export of each Figma-owned Element's layer a designer made or changed. */
@@ -767,7 +1011,7 @@ export async function designProjectStatus(
 	}
 	const link = await readLink(project);
 	const { errors } = await checkProject(project);
-	const syncConflicts = project.screens
+	const syncConflicts = [...project.screens, ...project.components]
 		.filter((screen) =>
 			errors.some(
 				(error) => error.file === screen.file && error.rule === "sync-conflict",
@@ -784,14 +1028,33 @@ export async function designProjectStatus(
 			const linked = await readLinkedDesignSystem(project, bridge);
 			unpulledTokens = linked?.changes ?? [];
 			const baselines = linkedBaselines(await readBaselines(project), linked);
-			const frames = await readFrames(bridge, project.screens, baselines);
-			unpulledChanges = screensWithUnpulledChanges(
-				project,
+			const componentBaselines = linkedBaselines(
+				await readComponentBaselines(project),
+				linked,
+			);
+			const { frames, components } = await readFigma(
+				bridge,
 				project.screens,
 				baselines,
-				frames,
-				screenFramesOf(baselines, frames),
-			).map((screen) => screen.name);
+				componentBaselines,
+			);
+			unpulledChanges = [
+				...screensWithUnpulledChanges(
+					project,
+					project.components,
+					componentBaselines,
+					components,
+					{},
+				),
+				...screensWithUnpulledChanges(
+					project,
+					project.screens,
+					baselines,
+					frames,
+					screenFramesOf(baselines, frames),
+					figmaComponents(project, componentBaselines),
+				),
+			].map((screen) => screen.name);
 		} catch {
 			unpulledChanges = null;
 			unpulledTokens = null;

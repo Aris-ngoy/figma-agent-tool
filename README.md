@@ -69,8 +69,12 @@ design/
   screens/login.html  one Screen per file
   screens/login.directions/bold.html
                       optional: alternative versions (Directions) of a Screen, compared in the Preview
+  components/app-button.html
+                      a Defined Component: one <component> per variant, used in Screens as <app-button>
+  components/app-avatar.json
+                      a Linked Component: { "key": "…" } (a library's) or { "id": "…" } (in the Linked File)
   assets/             images Screens use
-  sync/               the Linked File, each Screen's Baseline and the Design System's; commit it so teammates share it
+  sync/               the Linked File, each Screen's, Component's and the Design System's Baseline; commit it so teammates share it
 ```
 
 Every tool has a CLI command doing the same thing (`bun packages/mcp-server/src/cli.ts <command>`, or the `figma-agent-tool` bin once built):
@@ -113,6 +117,29 @@ A Screen is one `<body>` element in the **Screen Subset**, where everything has 
 - `data-name` names the layer. Push writes a `data-key` into each element, which links it to its layer: leave it, and don't copy it onto another element.
 - DESIGN.md's tokens are CSS variables named after their path: `colors.primary` is `var(--colors-primary)`, `typography.title.fontSize` is `var(--typography-title-font-size)`.
 
+### Components
+
+A **Component** is a reusable part Screens use as a custom element named after its file, which is lower case with a hyphen (`app-button`). Instances hold nothing: their attributes set the Component's properties, and their `style` takes only their place and size (`width`, `height`, `flex`, `align-self`, `position`, `left`, `top`; none hugs). They also take `data-name` and Prototype Links.
+
+```html
+<!-- components/app-button.html: a Defined Component, one <component> per variant -->
+<component data-variant="kind=primary" style="display:flex; padding:12px 16px; background:var(--colors-primary); border-radius:12px">
+  <p data-property="label" style="color:#ffffff">Sign in</p>
+</component>
+<component data-variant="kind=secondary" style="display:flex; padding:12px 16px; border:1px solid var(--colors-primary); border-radius:12px">
+  <p data-property="label" style="color:var(--colors-primary)">Sign in</p>
+</component>
+
+<!-- in a Screen -->
+<app-button label="Get started" style="align-self:stretch"></app-button>
+<app-button kind="secondary"></app-button>
+```
+
+- A **Defined Component**'s `<component>`s are frames in the Screen Subset. With variants, each has `data-variant="name=value, …"` (the same property names, in the same order, in each) and the Component pushes as a component set of them on the Screens Page. Without any, it pushes as a lone component. `data-property="label"` on a text makes a text property, defaulting to that text (each variant showing it has the same one). An instance sets each property as an attribute (`kind="secondary"`, `label="…"`); those it leaves out have their defaults (the first variant's values). Components can't hold instances or Prototype Links yet.
+- A **Linked Component** is `components/<name>.json` with `{ "key": "…" }` (a published component or component set, from an enabled library) or `{ "id": "…" }` (one in the Linked File). Push finds it, and refuses to push if it can't, naming it. It then records its properties in `sync/linked/`, after which Check checks instances' attributes against them (Figma's property names as attributes: lower case, spaces as hyphens). The Preview and Render show its instances as grey boxes with its name.
+- Push sends every Component with every Push, before the Screens, keeping node IDs. Pull reads instances back: a property a designer set becomes an attribute, one set back to its default goes, a detached instance becomes plain elements, an instance of a component that isn't the Design Project's becomes a Figma-owned Element, and other overrides of an instance's own layers stay in Figma. Edits to a Defined Component's main component merge into its file (three-way, like Screens), and Push is refused until they're pulled. A Linked Component's own design is never pulled.
+- Check rejects instances of Components the Design Project doesn't have, properties a Component doesn't have and variants it doesn't have. The Preview shows each instance as its variant draws it, with its text properties, and lists each Defined Component's variants side by side.
+
 ### Directions
 
 A **Direction** is an alternative version of a Screen, written next to it in `screens/<screen>.directions/<direction>.html` (a Screen that doesn't exist yet can have Directions too). It is a Screen in every other way: the same Screen Subset, Components and Prototype Links, and its images' `src`s are relative to its own folder (`../../assets/logo.png`).
@@ -137,7 +164,7 @@ A **Direction** is an alternative version of a Screen, written next to it in `sc
 
 - A layer the Screen Subset can't express (effects, gradients, boolean shapes, stars, frames without auto layout, rotated or hidden layers, …) becomes a **Figma-owned Element**: `<figma-owned data-key="e8" data-name="Star" style="width:40px; height:38px"></figma-owned>`, at the layer's place and size. Pull lists each with the reason and caches a PNG export of its layer in `sync/exports/`, fetched again only when a designer changed it. The Preview and Render show that export, and say when it's stale (the Screen resized the element since) or missing. The Agent can move, resize, rename (`data-name`) or delete the element, and Push does the same to the layer, never touching its content; it holds nothing and takes only `width`, `height`, `flex`, `align-self`, `position`, `left` and `top`. Push refuses one Pull didn't make (its `data-key` names no layer).
 - Push turns each Prototype Link into its layer's on-click NAVIGATE, and Pull turns on-click NAVIGATEs to a Screen's frame back into `href` and `data-transition`, merged like any other change. Every other interaction (hover, drag, overlays, other actions, custom easing curves, Motion) is Figma-only: Pull leaves it out of the Screen and Push leaves it as the designers made it, as it does every reaction on a Screen's own frame. `trace_flow` and the handoff tools work on the pushed frames like on any others. A Push of only some Screens is refused when they link to a Screen that has no frame yet.
-- `get_status` reports the Design Project, its Linked File, Screens with Unpulled Changes or Sync Conflicts, and the Design System's (`designSystem`).
+- `get_status` reports the Design Project, its Linked File, Screens and Components with Unpulled Changes or Sync Conflicts, and the Design System's (`designSystem`).
 
 ### The Design System
 
