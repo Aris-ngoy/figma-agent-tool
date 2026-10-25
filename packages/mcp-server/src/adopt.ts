@@ -12,6 +12,7 @@ import {
 	adoptedComponentNames,
 	adoptedScreenNames,
 	adoptFrame,
+	type DesignProject,
 	designSystemToAdopt,
 	type FigmaOwnedLayer,
 	figmaComponents,
@@ -30,11 +31,7 @@ import {
 	writeLink,
 	writeLinkedComponentRecord,
 } from "@figma-agent-tool/design-project";
-import type {
-	CommandResult,
-	FileInfo,
-	SyncedNode,
-} from "@figma-agent-tool/protocol";
+import type { FileInfo, SyncedNode } from "@figma-agent-tool/protocol";
 import type { Bridge } from "./bridge";
 import { connected, DesignSyncError, fetchExports } from "./design-sync";
 
@@ -306,18 +303,16 @@ async function readComponents(bridge: Bridge, frames: SyncedNode[]) {
 
 /** Saves the images a frame uses into assets/, by `src`. */
 async function fetchImages(
-	project: Awaited<ReturnType<typeof loadProject>>,
+	project: DesignProject,
 	screen: ScreenFile,
 	frame: SyncedNode,
 	bridge: Bridge,
 ): Promise<Record<string, ImageRecord>> {
 	const images: Record<string, ImageRecord> = {};
+	// A frame being adopted has no Baseline, so every image is unknown.
 	const none = { frameId: "", source: "", tokens: {}, nodes: {}, images: {} };
 	for (const imageHash of unknownImages(frame, none)) {
-		const { bytes }: CommandResult<"get_image"> = await bridge.request(
-			"get_image",
-			{ imageHash },
-		);
+		const { bytes } = await bridge.request("get_image", { imageHash });
 		const { src, record } = await saveImage(
 			project,
 			screen,

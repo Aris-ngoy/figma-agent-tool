@@ -308,12 +308,12 @@ function differingTokens(
 	};
 	const same = (a: unknown, b: unknown) =>
 		JSON.stringify(a) === JSON.stringify(b);
+	const [, ...otherModes] = Object.entries(baseline.modes ?? {});
 	const differing = push.variables.flatMap((pushed) => {
 		const variable = variables.get(pushed.id ?? "");
 		if (!variable || !same(pushed.value, asPushed(variable.value)))
 			return [pushed.token];
-		const [, ...others] = Object.entries(baseline.modes ?? {});
-		const inModes = others.every(([mode, modeId]) =>
+		const inModes = otherModes.every(([mode, modeId]) =>
 			same(
 				pushed.modes?.[mode] ?? pushed.value,
 				asPushed(variable.modes?.[modeId]?.value ?? variable.value),

@@ -185,14 +185,10 @@ function size(
 	reuse: SyncedNode | undefined,
 	isRoot: boolean,
 ): { width: number; height: number } {
-	const fixed = (sizing: string) => isRoot || !reuse || sizing === "FIXED";
+	if (isRoot || !reuse) return { width: spec.width, height: spec.height };
 	return {
-		width: fixed(spec.sizing.horizontal)
-			? spec.width
-			: (reuse as SyncedNode).width,
-		height: fixed(spec.sizing.vertical)
-			? spec.height
-			: (reuse as SyncedNode).height,
+		width: spec.sizing.horizontal === "FIXED" ? spec.width : reuse.width,
+		height: spec.sizing.vertical === "FIXED" ? spec.height : reuse.height,
 	};
 }
 
