@@ -56,14 +56,14 @@ function start(args, ready, extraEnv = {}) {
 		detached: true,
 	});
 	const stop = () => process.kill(-child.pid);
-	const lines = createInterface({ input: child.stderr });
+	const err = createInterface({ input: child.stderr });
 	const out = createInterface({ input: child.stdout });
 	const match = new Promise((resolve, reject) => {
 		const timer = setTimeout(
 			() => reject(new Error(`${args[0]} didn't start`)),
 			60_000,
 		);
-		for (const stream of [lines, out]) {
+		for (const stream of [err, out]) {
 			stream.on("line", (line) => {
 				const found = ready.exec(line);
 				if (found) {

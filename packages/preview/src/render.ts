@@ -164,11 +164,12 @@ async function downloadChrome(platform: string, into: string) {
 		await mkdir(into, { recursive: true });
 		const zipPath = join(into, "chrome-headless-shell.zip");
 		await writeFile(zipPath, zip);
-		const [unzip, ...args] =
+		const unzip = process.platform === "win32" ? "tar" : "unzip";
+		const args =
 			process.platform === "win32"
-				? ["tar", "-xf", zipPath, "-C", into]
-				: ["unzip", "-q", "-o", zipPath, "-d", into];
-		const { code } = await run(unzip as string, args);
+				? ["-xf", zipPath, "-C", into]
+				: ["-q", "-o", zipPath, "-d", into];
+		const { code } = await run(unzip, args);
 		await rm(zipPath, { force: true });
 		if (code !== 0) throw new Error(`${unzip} exited with ${code}`);
 	} catch (error) {

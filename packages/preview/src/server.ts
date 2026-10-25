@@ -51,6 +51,10 @@ document.addEventListener("click", (event) => {
 const FIT =
 	"this.style.width = this.contentDocument.body.scrollWidth + 'px'; this.style.height = this.contentDocument.body.scrollHeight + 'px';";
 
+/** The live-reload stream's messages: its greeting, and a reload. */
+const CONNECTED_EVENT = new TextEncoder().encode(": connected\n\n");
+const RELOAD_EVENT = new TextEncoder().encode("data: reload\n\n");
+
 /** Content types of the files Screens use, by extension. */
 const CONTENT_TYPES: Record<string, string> = {
 	".png": "image/png",
@@ -78,14 +82,13 @@ export async function startPreview({
 }): Promise<Preview> {
 	const root = resolve(dir);
 	const clients = new Set<ReadableStreamDefaultController<Uint8Array>>();
-	const reload = new TextEncoder().encode("data: reload\n\n");
 	let watcher: FSWatcher | undefined;
 	let debounce: ReturnType<typeof setTimeout> | undefined;
 	try {
 		watcher = watch(root, { recursive: true }, () => {
 			clearTimeout(debounce);
 			debounce = setTimeout(() => {
-				for (const client of clients) client.enqueue(reload);
+				for (const client of clients) client.enqueue(RELOAD_EVENT);
 			}, 50);
 		});
 	} catch {
@@ -100,7 +103,7 @@ export async function startPreview({
 				start(c) {
 					controller = c;
 					clients.add(c);
-					c.enqueue(new TextEncoder().encode(": connected\n\n"));
+					c.enqueue(CONNECTED_EVENT);
 				},
 				cancel() {
 					clients.delete(controller);
