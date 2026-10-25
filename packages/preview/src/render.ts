@@ -32,15 +32,25 @@ export type Screenshotter = (
 export async function renderScreen(
 	project: DesignProject,
 	screen: ScreenFile,
-	{ screenshot = chromeScreenshot }: { screenshot?: Screenshotter } = {},
+	{
+		screenshot = chromeScreenshot,
+		mode,
+	}: {
+		screenshot?: Screenshotter;
+		/** The Mode to render in; the default Mode when absent. */
+		mode?: string;
+	} = {},
 ): Promise<{ png: Uint8Array; width: number; height: number }> {
 	const size = screenSize(project, screen);
+	const document = screenDocument(project, screen, {
+		baseUrl: pathToFileURL(`${dirname(screen.path)}/`).href,
+		mode,
+	});
 	const scratch = await mkdtemp(join(tmpdir(), "figma-agent-render-"));
 	try {
 		const htmlPath = join(scratch, "screen.html");
 		const pngPath = join(scratch, "screen.png");
-		const baseUrl = pathToFileURL(`${dirname(screen.path)}/`).href;
-		await writeFile(htmlPath, screenDocument(project, screen, { baseUrl }));
+		await writeFile(htmlPath, document);
 		await screenshot(htmlPath, pngPath, size);
 		if (!existsSync(pngPath)) {
 			throw new RenderError(

@@ -1,12 +1,14 @@
 // A Design Project on disk: project.json (the Screen Size and Screens Page),
-// DESIGN.md, Screens in screens/, images (anywhere, by convention assets/)
+// DESIGN.md and its Modes file, Screens in screens/, images (anywhere, by convention assets/)
 // and the committed sync state in sync/.
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { parseDesignMd, type TokenFields, type Tokens } from "./design-md";
 import { designSystemPush } from "./design-system";
-import { lineOf, lintDesignMd } from "./lint";
+import { DesignProjectError } from "./errors";
+import { checkModes, lineOf, lintDesignMd } from "./lint";
+import { MODES_FILE, type Modes, parseModes } from "./modes";
 import { type CheckError, type Element, parseScreen } from "./screen";
 
 /** Relative to the working directory. */
@@ -42,10 +44,12 @@ export type DesignProject = {
 	/** DESIGN.md's token fields as written. */
 	fields: TokenFields;
 	designMdErrors: CheckError[];
+	/** The Modes file: the tokens' values in the other Modes. */
+	modes: Modes;
 	screens: ScreenFile[];
 };
 
-export class DesignProjectError extends Error {}
+export { DesignProjectError };
 
 const CONFIG_FILE = "project.json";
 
@@ -67,6 +71,10 @@ export async function loadProject(dir: string): Promise<DesignProject> {
 		? await readFile(designMdPath, "utf8")
 		: "";
 	const { tokens, fields, errors } = parseDesignMd(designMd);
+	const modesPath = join(root, MODES_FILE);
+	const modes = parseModes(
+		existsSync(modesPath) ? await readFile(modesPath, "utf8") : "",
+	);
 	const screensDir = join(root, "screens");
 	const names = existsSync(screensDir)
 		? (await readdir(screensDir))
@@ -97,6 +105,7 @@ export async function loadProject(dir: string): Promise<DesignProject> {
 			rule,
 			message,
 		})),
+		modes,
 		screens,
 	};
 }
@@ -182,8 +191,9 @@ export type ParsedScreen = ScreenFile & {
 };
 
 /**
- * Checks every Screen against the Screen Subset and DESIGN.md against the
- * spec. Warnings (low contrast, tokens Figma can't hold) don't stop a Push.
+ * Checks every Screen against the Screen Subset, DESIGN.md against the spec
+ * and the Modes file against DESIGN.md. Warnings (low contrast, tokens Figma
+ * can't hold) don't stop a Push.
  */
 export async function checkProject(project: DesignProject): Promise<{
 	errors: CheckError[];
@@ -192,9 +202,18 @@ export async function checkProject(project: DesignProject): Promise<{
 }> {
 	const screens = project.screens.map((screen) => checkScreen(project, screen));
 	const designMd = checkDesignMd(project);
+	// Modes are checked against DESIGN.md's tokens, so it must read first.
+	const modes =
+		designMd.errors.length > 0
+			? { errors: [], warnings: [] }
+			: checkModes(project);
 	return {
-		errors: [...designMd.errors, ...screens.flatMap((screen) => screen.errors)],
-		warnings: designMd.warnings,
+		errors: [
+			...designMd.errors,
+			...modes.errors,
+			...screens.flatMap((screen) => screen.errors),
+		],
+		warnings: [...designMd.warnings, ...modes.warnings],
 		screens,
 	};
 }

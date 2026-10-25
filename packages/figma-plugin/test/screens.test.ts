@@ -9,6 +9,7 @@ import {
 	hasUnpulledChanges,
 	loadProject,
 	parseDesignMd,
+	parseModes,
 	pushedImageRecords,
 	type ScreenFile,
 	screenPush,
@@ -569,6 +570,168 @@ describe("read_design_system", () => {
 					fontSize: 28,
 				},
 			],
+		});
+	});
+});
+
+const modes = `default: Light
+modes:
+  Dark:
+    colors:
+      surface: "#111111"
+      text: "#eeeeee"
+  Dim:
+    spacing:
+      lg: 20px
+`;
+
+/** Pushes just the Design System, with Modes, as Push does with the Screens. */
+async function pushModes(modesSource: string, previous?: DesignSystemBaseline) {
+	const login = await loginScreen();
+	const { push: designSystem } = designSystemPush(
+		parseDesignMd(designMd).fields,
+		previous,
+		parseModes(modesSource),
+	);
+	const { tree } = await screenPush(
+		login.project,
+		login.screen,
+		login.root,
+		undefined,
+		tokenBindings(designSystem),
+	);
+	const result = await send<{ designSystem: DesignSystemBaseline }>(
+		"push_screens",
+		{
+			page: { name: "Screens" },
+			screens: [{ screen: "login", tree }],
+			images: {},
+			designSystem,
+		},
+	);
+	return { ...result.designSystem, source: designMd, modesSource };
+}
+
+describe("push_screens with Modes", () => {
+	test("makes a variable mode per Mode, the default renamed, with each variable's value in it", async () => {
+		const figma = installMockFigma(document);
+		const pushed = await pushModes(modes);
+		const collection = await figma.variables.getVariableCollectionByIdAsync(
+			pushed.collectionId,
+		);
+		expect(collection?.modes.map((mode) => mode.name)).toEqual([
+			"Light",
+			"Dark",
+			"Dim",
+		]);
+		expect(pushed.modes).toEqual(
+			Object.fromEntries(
+				(collection?.modes ?? []).map((mode) => [mode.name, mode.modeId]),
+			),
+		);
+		const { Light, Dark, Dim } = pushed.modes as Record<string, string>;
+		const surface = await variableNamed(figma, "colors/surface");
+		expect(surface.valuesByMode).toEqual({
+			[Light as string]: { r: 1, g: 1, b: 1, a: 1 },
+			[Dark as string]: { r: 17 / 255, g: 17 / 255, b: 17 / 255, a: 1 },
+			[Dim as string]: { r: 1, g: 1, b: 1, a: 1 },
+		});
+		const heading = await variableNamed(figma, "colors/heading");
+		expect(heading.valuesByMode[Dark as string]).toEqual({
+			type: "VARIABLE_ALIAS",
+			id: pushed.variables["colors.text"],
+		});
+		expect((await variableNamed(figma, "spacing/lg")).valuesByMode).toEqual({
+			[Light as string]: 24,
+			[Dark as string]: 24,
+			[Dim as string]: 20,
+		});
+		expect(figma.undoCommits).toBe(1);
+	});
+
+	test("pushing again keeps the modes' IDs, renames them and removes the Modes the file dropped", async () => {
+		const figma = installMockFigma(document);
+		const first = await pushModes(modes);
+		const second = await pushModes(
+			modes
+				.replace("default: Light", "default: Day")
+				.replace(/ {2}Dim:\n.*\n.*\n/, ""),
+			first,
+		);
+		const collection = await figma.variables.getVariableCollectionByIdAsync(
+			second.collectionId,
+		);
+		expect(collection?.modes).toEqual([
+			{ modeId: first.modes?.Light as string, name: "Day" },
+			{ modeId: first.modes?.Dark as string, name: "Dark" },
+		]);
+	});
+
+	test("explains a mode Figma refuses to add, before changing any variable or Screen", async () => {
+		const figma = installMockFigma(document);
+		const first = await pushModes(modes.replace(/ {2}Dim:\n.*\n.*\n/, ""));
+		const collection = await figma.variables.getVariableCollectionByIdAsync(
+			first.collectionId,
+		);
+		if (!collection) throw new Error("no collection");
+		collection.addMode = () => {
+			throw new Error("Limited to 2 modes only");
+		};
+		const login = await loginScreen();
+		const { push: designSystem } = designSystemPush(
+			parseDesignMd(designMd.replace("#3366FF", "#000000")).fields,
+			first,
+			parseModes(modes),
+		);
+		const result = await send<{ error: { code: string; message: string } }>(
+			"push_screens",
+			{
+				page: { name: "Screens" },
+				screens: [
+					{
+						screen: "login",
+						tree: (
+							await screenPush(
+								login.project,
+								login.screen,
+								login.root,
+								undefined,
+								tokenBindings(designSystem),
+							)
+						).tree,
+					},
+				],
+				designSystem,
+			},
+		);
+		expect(result.error.code).toBe("mode_limit");
+		expect(result.error.message).toContain("“Dim”");
+		const primary = await variableNamed(figma, "colors/primary");
+		expect(primary.valuesByMode[collection.defaultModeId]).toEqual({
+			r: 0.2,
+			g: 0.4,
+			b: 1,
+			a: 1,
+		});
+	});
+
+	test("read_design_system reads every mode's value, aliases resolved in that mode", async () => {
+		installMockFigma(document);
+		const pushed = await pushModes(modes);
+		const { Dark, Dim } = pushed.modes as Record<string, string>;
+		const read = await send<SyncedDesignSystem>("read_design_system", {
+			variables: [pushed.variables["colors.heading"]],
+			textStyles: [],
+		});
+		expect(read.variables[0]?.modes).toEqual({
+			[Dark as string]: {
+				value: { alias: pushed.variables["colors.text"] as string },
+				resolved: { color: "#eeeeee" },
+			},
+			[Dim as string]: {
+				value: { alias: pushed.variables["colors.text"] as string },
+				resolved: { color: "#111111" },
+			},
 		});
 	});
 });

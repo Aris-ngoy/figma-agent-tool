@@ -72,7 +72,10 @@ In a scratch repo, with the MCP server's working directory there (or `FIGMA_AGEN
 - [ ] After a `push`, the file's local variables have a “Design System” collection with `colors/…`, `spacing/…` and `rounded/…` (aliases where DESIGN.md references a token), and a text style per typography token. Select the frame: its fill, gap and padding show the variables; the title shows its text style.
 - [ ] Change `colors/primary` and the title style's size in Figma: the button and title update, `get_status` lists both under `designSystem.unpulledChanges`, and `push` is refused naming them. `pull`: DESIGN.md gets the new values and nothing else changes (`git diff`), the Screen file doesn't change, and `npx @google/design.md lint design/DESIGN.md` reports no errors.
 - [ ] Change the same token in Figma and in DESIGN.md, then `pull`: DESIGN.md has the markers and `push` is refused until they're resolved.
-- [ ] Unverified against the mock: binding corner radii and padding with `setBoundVariable`, `setTextStyleIdAsync` after the synchronous pass, and creating variables with `createVariable(name, collection, type)`.
+- [ ] Add `design/modes.yaml` with a Dark Mode (a few colors and a spacing token) and `push`: the “Design System” collection's default mode is renamed after `default`, a Dark mode appears with the Mode's values, and the other variables have the default's value in it. Switch the frame to Dark in Figma's layer panel: it looks like the Preview with Dark picked in its switcher, and like `render login --mode Dark`.
+- [ ] Change a Dark value in Figma: `get_status` lists `modes.Dark.…` under `designSystem.unpulledChanges` and `push` is refused. `pull`: only that value changes in `modes.yaml`, DESIGN.md stays as it was. Drop the Mode from the file and `push`: the mode is gone from the collection.
+- [ ] On a Free (Starter) plan, `push` with a second Mode: refused with `mode_limit`, naming the mode.
+- [ ] Unverified against the mock: `addMode`, `renameMode` and `removeMode` on the collection, and Figma resolving an alias in a non-default mode to the target's value in that mode. Binding corner radii and padding with `setBoundVariable`, `setTextStyleIdAsync` after the synchronous pass, and creating variables with `createVariable(name, collection, type)`.
 
 ## Agent loop
 

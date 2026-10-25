@@ -109,7 +109,10 @@ type FakeVariable = {
 	id: string;
 	name: string;
 	type: "COLOR" | "FLOAT";
+	/** The default mode's value. */
 	value: VariableValue;
+	/** The other modes' values, by mode ID. */
+	modes: Record<string, VariableValue>;
 };
 
 /**
@@ -123,11 +126,19 @@ export function createFakeDesignSystem(nextId: () => string) {
 	/** Token path → ID, from the last Push. */
 	const ids = new Map<string, string>();
 	let collectionId: string | undefined;
+	/** The collection's modes other than the default, by name → ID. */
+	const modes = new Map<string, string>();
+	let defaultMode: { id: string; name: string } | undefined;
 
-	const resolved = (value: VariableValue): VariableValue | null => {
+	/** A value with aliases followed, in a mode (default when absent). */
+	const resolved = (
+		value: VariableValue,
+		mode?: string,
+	): VariableValue | null => {
 		if (typeof value === "object" && "alias" in value) {
 			const target = variables.get(value.alias);
-			return target ? resolved(target.value) : null;
+			if (!target) return null;
+			return resolved((mode && target.modes[mode]) || target.value, mode);
 		}
 		return value;
 	};
@@ -136,6 +147,23 @@ export function createFakeDesignSystem(nextId: () => string) {
 		variables,
 		textStyles,
 		idOf: (token: string) => ids.get(token),
+		/** The ID of the mode with this name. */
+		modeId(name: string): string {
+			const id = defaultMode?.name === name ? defaultMode.id : modes.get(name);
+			if (!id) throw new Error(`No mode ${name}`);
+			return id;
+		},
+		/** The modes' names, the default first. */
+		get modeNames() {
+			return [defaultMode?.name ?? "Mode 1", ...modes.keys()];
+		},
+		/** Deletes a mode, as a designer would. */
+		removeMode(name: string) {
+			const id = modes.get(name);
+			modes.delete(name);
+			for (const variable of variables.values())
+				delete variable.modes[id as string];
+		},
 		/** The variable with this name, as a designer finds it. */
 		variable(name: string): FakeVariable {
 			const found = [...variables.values()].find((v) => v.name === name);
@@ -153,28 +181,60 @@ export function createFakeDesignSystem(nextId: () => string) {
 				collectionId = spec.collection.id ?? nextId();
 			for (const id of spec.remove.variables) variables.delete(id);
 			for (const id of spec.remove.textStyles) textStyles.delete(id);
+			for (const id of spec.remove.modes ?? []) {
+				for (const [name, modeId] of modes)
+					if (modeId === id) modes.delete(name);
+			}
+			defaultMode ??= { id: nextId(), name: "Mode 1" };
 			const pushed: PushedDesignSystem = {
 				collectionId,
 				variables: {},
 				textStyles: {},
 			};
+			if (spec.collection.modes) {
+				const [first, ...others] = spec.collection.modes;
+				defaultMode.name = first?.name as string;
+				pushed.modes = { [defaultMode.name]: defaultMode.id };
+				for (const { id, name } of others) {
+					const found =
+						[...modes].find(([, modeId]) => modeId === id) ??
+						[...modes].find(([modeName]) => modeName === name);
+					if (found) modes.delete(found[0]);
+					const modeId = found?.[1] ?? nextId();
+					modes.set(name, modeId);
+					pushed.modes[name] = modeId;
+				}
+			}
 			for (const variable of spec.variables) {
 				const id =
 					variable.id && variables.has(variable.id) ? variable.id : nextId();
 				pushed.variables[variable.token] = id;
 				ids.set(variable.token, id);
 			}
+			const stored = (
+				value: DesignSystemPush["variables"][number]["value"],
+			): VariableValue =>
+				typeof value === "object" && "token" in value
+					? { alias: pushed.variables[value.token] as string }
+					: value;
 			for (const variable of spec.variables) {
-				const { value } = variable;
 				const id = pushed.variables[variable.token] as string;
+				const value = stored(variable.value);
+				// Like Figma, a mode without a value set has the default's.
+				const byMode: Record<string, VariableValue> = {};
+				for (const modeId of modes.values()) {
+					byMode[modeId] = variables.get(id)?.modes[modeId] ?? value;
+				}
+				for (const [name, modeValue] of Object.entries(variable.modes ?? {})) {
+					const modeId = modes.get(name);
+					if (modeId) byMode[modeId] = stored(modeValue);
+				}
 				variables.set(id, {
 					id,
 					name: variable.name,
 					type: variable.type,
-					value:
-						typeof value === "object" && "token" in value
-							? { alias: pushed.variables[value.token] as string }
-							: value,
+					value,
+					modes: byMode,
 				});
 			}
 			for (const { token, id: given, ...style } of spec.textStyles) {
@@ -194,8 +254,23 @@ export function createFakeDesignSystem(nextId: () => string) {
 				variables: params.variables.flatMap((id) => {
 					const variable = variables.get(id);
 					if (!variable) return [];
-					const { value, ...rest } = structuredClone(variable);
-					return [{ ...rest, value, resolved: resolved(value) }];
+					const { value, modes: byMode, ...rest } = structuredClone(variable);
+					const read = { ...rest, value, resolved: resolved(value) };
+					if (modes.size === 0) return [read];
+					return [
+						{
+							...read,
+							modes: Object.fromEntries(
+								[...modes.values()].map((modeId) => {
+									const modeValue = byMode[modeId] ?? value;
+									return [
+										modeId,
+										{ value: modeValue, resolved: resolved(modeValue, modeId) },
+									];
+								}),
+							),
+						},
+					];
 				}),
 				textStyles: params.textStyles.flatMap((id) => {
 					const style = textStyles.get(id);

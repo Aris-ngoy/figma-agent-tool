@@ -212,6 +212,7 @@ describe("Design System Pull", () => {
 			changed: [],
 			conflicts: 0,
 			baselineSource: designMd,
+			baselineModesSource: "",
 		});
 	});
 

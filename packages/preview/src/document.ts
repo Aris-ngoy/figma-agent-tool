@@ -1,11 +1,12 @@
 // The one renderer: the HTML document a Screen is shown in, both by the
 // Preview and by Render. It wraps the Screen's <body> with the Design
-// System's tokens as CSS variables, the Screen Size, and a reset that makes
+// System's tokens as CSS variables (in the Mode asked for), the Screen Size, and a reset that makes
 // CSS behave like Figma's auto layout (no margins or inheritance, children
 // don't shrink, counter-axis alignment starts at flex-start).
 import {
 	checkScreen,
 	type DesignProject,
+	modeTokens,
 	resolveProp,
 	type ScreenFile,
 	type ScreenSize,
@@ -27,6 +28,8 @@ export type DocumentOptions = {
 	baseUrl: string;
 	/** Extra markup for <head>, such as the Preview's live-reload script. */
 	head?: string;
+	/** The Mode whose token values to show; the default Mode when absent. */
+	mode?: string;
 };
 
 /** The Screen Size a Screen renders at: its <body> override, else the project's. */
@@ -43,8 +46,9 @@ export function screenSize(
 export function screenDocument(
 	project: DesignProject,
 	screen: ScreenFile,
-	{ baseUrl, head = "" }: DocumentOptions,
+	{ baseUrl, head = "", mode }: DocumentOptions,
 ): string {
+	const tokens = modeTokens(project, mode);
 	const { width, height } = screenSize(project, screen);
 	return [
 		"<!doctype html>",
@@ -55,7 +59,7 @@ export function screenDocument(
 		`<title>${screen.name}</title>`,
 		"<style>",
 		RESET,
-		tokensCss(project.tokens),
+		tokensCss(tokens),
 		`body { width: ${width}px; height: ${height}px; }`,
 		"</style>",
 		head,

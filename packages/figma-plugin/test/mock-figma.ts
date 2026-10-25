@@ -78,13 +78,52 @@ export function installMockFigma(
 	const loadedFonts = new Set<string>();
 	let created = 0;
 
-	const collections = document.collections.map((collection) => ({
-		id: collection.id,
-		name: collection.name,
-		modes: collection.modes.map(({ id, name }) => ({ modeId: id, name })),
-		defaultModeId: modeId(collection, collection.defaultMode),
-		variableIds: collection.variables.map((variable) => variable.id),
-	}));
+	/** Like Figma's VariableCollection: modes added, renamed and removed. */
+	function mockCollection(collection: {
+		id: string;
+		name: string;
+		modes: { modeId: string; name: string }[];
+		defaultModeId: string;
+		variableIds: string[];
+	}) {
+		let added = 0;
+		return {
+			...collection,
+			/** Copies the default mode's values into the new mode, as Figma does. */
+			addMode(name: string): string {
+				const id = `${this.id}/mode-${++added}`;
+				this.modes.push({ modeId: id, name });
+				for (const variableId of this.variableIds) {
+					const variable = variables.get(variableId);
+					if (variable)
+						variable.valuesByMode[id] =
+							variable.valuesByMode[this.defaultModeId];
+				}
+				return id;
+			},
+			renameMode(id: string, name: string) {
+				const mode = this.modes.find((m) => m.modeId === id);
+				if (!mode) throw new Error(`No mode ${id}`);
+				mode.name = name;
+			},
+			removeMode(id: string) {
+				if (id === this.defaultModeId)
+					throw new Error("Can't remove the default mode");
+				this.modes = this.modes.filter((m) => m.modeId !== id);
+				for (const variableId of this.variableIds)
+					delete variables.get(variableId)?.valuesByMode[id];
+			},
+		};
+	}
+	const collections = document.collections.map((collection) =>
+		mockCollection({
+			id: collection.id,
+			name: collection.name,
+			modes: collection.modes.map(({ id, name }) => ({ modeId: id, name })),
+			defaultModeId: modeId(collection, collection.defaultMode),
+			variableIds: collection.variables.map((variable) => variable.id),
+		}),
+	);
 	type MockCollection = (typeof collections)[number];
 	type MockVariable = {
 		id: string;
@@ -703,13 +742,13 @@ export function installMockFigma(
 			},
 			createVariableCollection(name: string): MockCollection {
 				const id = `VariableCollectionId:created-${++created}`;
-				const collection = {
+				const collection = mockCollection({
 					id,
 					name,
 					modes: [{ modeId: `${id}/mode`, name: "Mode 1" }],
 					defaultModeId: `${id}/mode`,
 					variableIds: [] as string[],
-				};
+				});
 				collections.push(collection);
 				return collection;
 			},

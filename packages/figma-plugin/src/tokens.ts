@@ -1,5 +1,5 @@
-// Push and Pull of the Design System: variables in one collection (default
-// mode) and text styles, updated in place by ID. Like push_screens, which
+// Push and Pull of the Design System: variables in one collection, with a
+// variable mode per Mode, and text styles, updated in place by ID. Like push_screens, which
 // carries it, the async lookups come first and the edits happen in one
 // synchronous pass; tokens are addressed by their DESIGN.md path so the
 // Screens' bindings can refer to variables this push creates.
@@ -10,6 +10,7 @@ import type {
 	PushedDesignSystem,
 	VariableValue,
 } from "@figma-agent-tool/protocol";
+import { CommandError } from "./errors";
 import { hex, round } from "./serialize";
 
 /** What a push needs from the file before it edits anything. */
@@ -95,6 +96,13 @@ export function applyDesignSystem(
 	for (const id of spec.remove.textStyles) loaded.textStyles.get(id)?.remove();
 	const variables = new Map<string, Variable>();
 	let collection = loaded.collection;
+	let modes: Record<string, string> | undefined;
+	if (spec.collection.modes) {
+		collection ??= figma.variables.createVariableCollection(
+			spec.collection.name,
+		);
+		modes = applyModes(collection, spec.collection.modes, spec.remove.modes);
+	}
 	for (const entry of spec.variables) {
 		const existing = entry.id ? loaded.variables.get(entry.id) : undefined;
 		let variable: Variable;
@@ -124,6 +132,12 @@ export function applyDesignSystem(
 			own.defaultModeId,
 			variableValue(entry.value, variables),
 		);
+		if (own !== collection || !modes) continue;
+		for (const [mode, value] of Object.entries(entry.modes ?? {})) {
+			const modeId = modes[mode];
+			if (modeId)
+				variable.setValueForMode(modeId, variableValue(value, variables));
+		}
 	}
 	const textStyles = new Map<string, TextStyle>();
 	for (const { token, id, name, ...entry } of spec.textStyles) {
@@ -142,10 +156,60 @@ export function applyDesignSystem(
 			collectionId: collection?.id ?? spec.collection.id ?? "",
 			variables: ids(variables),
 			textStyles: ids(textStyles),
+			...(modes && { modes }),
 		},
 		variables,
 		textStyles,
 	};
+}
+
+/**
+ * Gives the collection the Modes as variable modes: the default mode
+ * renamed, the others found by ID, else by name, else added (Figma copies
+ * the default's values into a new mode). Dropped ones go first, so they
+ * don't count against the plan's limit on modes. Returns name → mode ID.
+ */
+function applyModes(
+	collection: VariableCollection,
+	[defaultMode, ...others]: NonNullable<
+		DesignSystemPush["collection"]["modes"]
+	>,
+	remove: string[] = [],
+): Record<string, string> {
+	for (const id of remove) {
+		const exists = collection.modes.some((mode) => mode.modeId === id);
+		if (exists && id !== collection.defaultModeId) collection.removeMode(id);
+	}
+	const rename = (modeId: string, name: string) => {
+		const mode = collection.modes.find((m) => m.modeId === modeId);
+		if (mode && mode.name !== name) collection.renameMode(modeId, name);
+	};
+	const name = defaultMode?.name as string;
+	rename(collection.defaultModeId, name);
+	const ids: Record<string, string> = { [name]: collection.defaultModeId };
+	const taken = new Set([collection.defaultModeId]);
+	for (const mode of others) {
+		const candidates = collection.modes.filter((m) => !taken.has(m.modeId));
+		const found =
+			candidates.find((m) => m.modeId === mode.id) ??
+			candidates.find((m) => m.name === mode.name);
+		const modeId = found?.modeId ?? addMode(collection, mode.name);
+		rename(modeId, mode.name);
+		taken.add(modeId);
+		ids[mode.name] = modeId;
+	}
+	return ids;
+}
+
+function addMode(collection: VariableCollection, name: string): string {
+	try {
+		return collection.addMode(name);
+	} catch (error) {
+		throw new CommandError(
+			"mode_limit",
+			`Figma refused to add the variable mode “${name}” to “${collection.name}”: ${(error as Error).message}. Figma's plan limits how many modes a collection can have. Nothing but the collection's modes changed; remove Modes from the Modes file, or push to a file on a plan with more modes.`,
+		);
+	}
 }
 
 function variableValue(
@@ -187,37 +251,56 @@ export async function readDesignSystem({
 		}
 		return collections.get(id);
 	};
-	const defaultValue = async (variable: Variable) => {
+	/** A variable's value in a mode of its collection; the default mode if it has no such mode. */
+	const valueIn = async (variable: Variable, modeId?: string) => {
 		const collection = await collectionOf(variable);
-		return collection
-			? variable.valuesByMode[collection.defaultModeId]
-			: undefined;
+		if (!collection) return undefined;
+		const own = modeId && collection.modes.some((m) => m.modeId === modeId);
+		return variable.valuesByMode[own ? modeId : collection.defaultModeId];
 	};
-	/** Follows aliases, across collections, to a value. */
+	/** Follows aliases to a value: in the same mode within a collection, the default across. */
 	const resolved = async (
-		variable: Variable,
+		value: unknown,
+		modeId?: string,
 		depth = 0,
 	): Promise<VariableValue | null> => {
-		const value = await defaultValue(variable);
 		if (isAlias(value)) {
 			const target = await figma.variables.getVariableByIdAsync(value.id);
-			return target && depth < 10 ? resolved(target, depth + 1) : null;
+			return target && depth < 10
+				? resolved(await valueIn(target, modeId), modeId, depth + 1)
+				: null;
 		}
 		return compact(value);
 	};
+	const read = async (value: unknown, modeId?: string) => ({
+		value: isAlias(value) ? { alias: value.id } : compact(value),
+		resolved: await resolved(value, modeId),
+	});
 	const variables = (
 		await Promise.all(
 			variableIds.map(async (id) => {
 				const variable = await figma.variables.getVariableByIdAsync(id);
 				if (!variable) return [];
-				const value = await defaultValue(variable);
+				const collection = await collectionOf(variable);
+				const otherModes = (collection?.modes ?? []).filter(
+					(mode) => mode.modeId !== collection?.defaultModeId,
+				);
+				const modes = await Promise.all(
+					otherModes.map(
+						async ({ modeId }) =>
+							[
+								modeId,
+								await read(variable.valuesByMode[modeId], modeId),
+							] as const,
+					),
+				);
 				return [
 					{
 						id: variable.id,
 						name: variable.name,
 						type: variable.resolvedType,
-						value: isAlias(value) ? { alias: value.id } : compact(value),
-						resolved: await resolved(variable),
+						...(await read(await valueIn(variable))),
+						...(modes.length > 0 && { modes: Object.fromEntries(modes) }),
 					},
 				];
 			}),

@@ -8,8 +8,8 @@ import type {
 	DesignSystemPush,
 	ScreenBindings,
 	SyncedDesignSystem,
+	VariableValue,
 } from "@figma-agent-tool/protocol";
-import { isMap, isScalar, parseDocument, Scalar, type YAMLMap } from "yaml";
 import {
 	cssVariable,
 	FRONT_MATTER,
@@ -20,11 +20,12 @@ import {
 	type TokenFields,
 	type Tokens,
 } from "./design-md";
-import { CONFLICT_END, CONFLICT_SEPARATOR, CONFLICT_START } from "./print";
+import { type Modes, modeFields, parseModes } from "./modes";
 import type { Element } from "./screen";
 import { fontStyle, parseFontStyle, variableName } from "./subset";
+import { editYaml, type FieldEdit } from "./yaml-edit";
 
-/** DESIGN.md as of the last Push or Pull, and the variables and styles its tokens went to. */
+/** DESIGN.md and the Modes file as of the last Push or Pull, and the variables, styles and modes they went to. */
 export type DesignSystemBaseline = {
 	source: string;
 	collectionId: string;
@@ -32,6 +33,10 @@ export type DesignSystemBaseline = {
 	variables: Record<string, string>;
 	/** Typography token path → text style ID. */
 	textStyles: Record<string, string>;
+	/** The Modes file's source; absent or "" without one. */
+	modesSource?: string;
+	/** Mode name → variable mode ID, the default's included; absent without Modes. */
+	modes?: Record<string, string>;
 };
 
 /** The variable collection Push keeps the Design System's tokens in. */
@@ -53,13 +58,13 @@ const TYPOGRAPHY_DEFAULTS: Record<string, string> = {
 	fontWeight: "400",
 };
 
-const VARIABLE_GROUPS = {
+export const VARIABLE_GROUPS = {
 	colors: "COLOR",
 	spacing: "FLOAT",
 	rounded: "FLOAT",
 } as const;
 
-type VariableGroup = keyof typeof VARIABLE_GROUPS;
+export type VariableGroup = keyof typeof VARIABLE_GROUPS;
 
 /** A token DESIGN.md has that Figma can't hold, and why. */
 export type DesignSystemWarning = { path: string; message: string };
@@ -78,17 +83,24 @@ function tokenPaths(fields: TokenFields) {
 
 const groupOf = (path: string) => path.split(".")[0] as string;
 
-/** The Design System as Push sends it, updating what the Baseline says it made. */
+/**
+ * The Design System as Push sends it, updating what the Baseline says it
+ * made. With Modes, every variable gets a value in each of them.
+ */
 export function designSystemPush(
 	fields: TokenFields,
 	baseline?: DesignSystemBaseline,
+	modes?: Modes,
 ): { push: DesignSystemPush; warnings: DesignSystemWarning[] } {
 	const warnings: DesignSystemWarning[] = [];
 	const paths = tokenPaths(fields);
 	const variables: DesignSystemPush["variables"] = [];
+	const otherModes = [...(modes?.overrides.keys() ?? [])]
+		.filter((mode) => mode !== modes?.default)
+		.map((mode) => [mode, modeFields(fields, modes as Modes, mode)] as const);
 	for (const path of paths.variables) {
 		const type = VARIABLE_GROUPS[groupOf(path) as VariableGroup];
-		const value = variableValue(type, resolveField(path, fields));
+		const value = pushedValue(path, type, fields);
 		if (value === undefined) {
 			const expected =
 				type === "COLOR"
@@ -100,17 +112,17 @@ export function designSystemPush(
 			});
 			continue;
 		}
-		const reference = referencePath(fields.get(path) as string);
-		const aliased =
-			reference !== undefined &&
-			groupOf(reference) in VARIABLE_GROUPS &&
-			VARIABLE_GROUPS[groupOf(reference) as VariableGroup] === type;
+		const modeValues = otherModes.flatMap(([mode, merged]) => {
+			const modeValue = pushedValue(path, type, merged);
+			return modeValue === undefined ? [] : [[mode, modeValue] as const];
+		});
 		variables.push({
 			token: path,
 			...(baseline?.variables[path] && { id: baseline.variables[path] }),
 			name: path.replace(".", "/"),
 			type,
-			value: aliased ? { token: reference } : value,
+			value,
+			...(modeValues.length > 0 && { modes: Object.fromEntries(modeValues) }),
 		});
 	}
 	const textStyles: DesignSystemPush["textStyles"] = [];
@@ -126,11 +138,28 @@ export function designSystemPush(
 	const pushed = (list: { token: string }[]) =>
 		new Set(list.map((entry) => entry.token));
 	const [keptVariables, keptStyles] = [pushed(variables), pushed(textStyles)];
+	const modeNames =
+		otherModes.length > 0
+			? [modes?.default as string, ...otherModes.map(([mode]) => mode)]
+			: [];
+	// The Baseline lists the default mode first; it stays, renamed if need be.
+	const [defaultId, ...otherIds] = Object.values(baseline?.modes ?? {});
+	const modeIds = { ...baseline?.modes };
+	if (defaultId && modeNames[0]) modeIds[modeNames[0]] = defaultId;
+	const removedModes = otherIds.filter(
+		(id) => !modeNames.slice(1).some((name) => modeIds[name] === id),
+	);
 	return {
 		push: {
 			collection: {
 				...(baseline?.collectionId && { id: baseline.collectionId }),
 				name: DESIGN_SYSTEM_COLLECTION,
+				...(modeNames.length > 0 && {
+					modes: modeNames.map((name) => ({
+						...(modeIds[name] && { id: modeIds[name] }),
+						name,
+					})),
+				}),
 			},
 			variables,
 			textStyles,
@@ -141,14 +170,31 @@ export function designSystemPush(
 				textStyles: Object.entries(baseline?.textStyles ?? {})
 					.filter(([token]) => !keptStyles.has(token))
 					.map(([, id]) => id),
+				...(removedModes.length > 0 && { modes: removedModes }),
 			},
 		},
 		warnings,
 	};
 }
 
+/** A variable token's value as pushed: an alias where it references a variable of its type. */
+function pushedValue(
+	path: string,
+	type: "COLOR" | "FLOAT",
+	fields: TokenFields,
+): DesignSystemPush["variables"][number]["value"] | undefined {
+	const value = variableValue(type, resolveField(path, fields));
+	if (value === undefined) return undefined;
+	const reference = referencePath(fields.get(path) as string);
+	const aliased =
+		reference !== undefined &&
+		groupOf(reference) in VARIABLE_GROUPS &&
+		VARIABLE_GROUPS[groupOf(reference) as VariableGroup] === type;
+	return aliased ? { token: reference } : value;
+}
+
 /** A token's resolved value as a variable of this type takes it; undefined if it can't. */
-function variableValue(
+export function variableValue(
 	type: "COLOR" | "FLOAT",
 	literal: string | undefined,
 ): { color: string; opacity?: number } | number | undefined {
@@ -328,6 +374,8 @@ export type FigmaDesignSystem = {
 	/** Token paths whose variable or text style still exists. */
 	tokens: Set<string>;
 	fields: TokenFields;
+	/** The variables' values in each other Mode the Baseline made that still exists. */
+	modes: Map<string, TokenFields>;
 };
 
 /** Reads the variables and text styles the Baseline names as DESIGN.md token fields. */
@@ -341,15 +389,28 @@ export function figmaDesignSystem(
 	const tokenOf = (ids: Record<string, string>) =>
 		new Map(Object.entries(ids).map(([token, id]) => [id, token]));
 	const variableTokens = tokenOf(baseline.variables);
+	const [, ...otherModes] = Object.entries(baseline.modes ?? {});
+	const modes = new Map<string, TokenFields>();
+	const written = (read: {
+		value: VariableValue | null;
+		resolved: VariableValue | null;
+	}) =>
+		writtenValue(read.value, variableTokens) ??
+		writtenValue(read.resolved, variableTokens);
 	for (const variable of read.variables) {
 		const token = variableTokens.get(variable.id);
 		if (!token) continue;
-		const value =
-			writtenValue(variable.value, variableTokens) ??
-			writtenValue(variable.resolved, variableTokens);
+		const value = written(variable);
 		if (value === undefined) continue;
 		tokens.add(token);
 		fields.set(token, value);
+		for (const [mode, modeId] of otherModes) {
+			const inMode = variable.modes?.[modeId];
+			const modeValue = inMode && written(inMode);
+			if (modeValue === undefined) continue;
+			if (!modes.has(mode)) modes.set(mode, new Map());
+			modes.get(mode)?.set(token, modeValue);
+		}
 	}
 	const styleTokens = tokenOf(baseline.textStyles);
 	for (const style of read.textStyles) {
@@ -380,7 +441,7 @@ export function figmaDesignSystem(
 			);
 		}
 	}
-	return { tokens, fields };
+	return { tokens, fields, modes };
 }
 
 function writtenValue(
@@ -436,16 +497,55 @@ function fieldMeaning(path: string, fields: TokenFields): string {
 	return px === undefined ? value : `${px}px`;
 }
 
-/** Token fields Figma changed since the Baseline. Deleted variables and styles aren't changes: Push makes them again. */
+/**
+ * Token fields Figma changed since the Baseline: DESIGN.md's paths, then
+ * the Modes file's (`modes.Dark.colors.surface`). A Mode's value is a change
+ * only if it differs from what the Baseline gave that Mode, its own value or
+ * the default's. Deleted variables, styles and modes aren't changes: Push
+ * makes them again.
+ */
 export function designSystemChanges(
 	base: TokenFields,
 	figma: FigmaDesignSystem,
+	baseModes?: Modes,
 ): string[] {
+	return [...fieldChanges(base, figma), ...modeChanges(base, figma, baseModes)];
+}
+
+/** DESIGN.md's fields Figma changed: the default Mode's values and the text styles. */
+function fieldChanges(base: TokenFields, figma: FigmaDesignSystem): string[] {
 	return [...figma.tokens].flatMap((token) =>
 		syncedFields(token).filter(
 			(path) => fieldMeaning(path, base) !== fieldMeaning(path, figma.fields),
 		),
 	);
+}
+
+function modeChanges(
+	base: TokenFields,
+	figma: FigmaDesignSystem,
+	baseModes: Modes | undefined,
+): string[] {
+	return [...figma.modes].flatMap(([mode, values]) => {
+		const inBase = baseModes ? modeFields(base, baseModes, mode) : base;
+		return [...values.keys()]
+			.filter(
+				(token) => fieldMeaning(token, inBase) !== fieldMeaning(token, values),
+			)
+			.map((token) => modePath(mode, token));
+	});
+}
+
+const modePath = (mode: string, token: string) => `modes.${mode}.${token}`;
+
+/** `modes.Dark.colors.surface` → Dark and colors.surface; undefined for DESIGN.md's paths. */
+function splitModePath(
+	path: string,
+): { mode: string; token: string } | undefined {
+	const match = /^modes\.([^.]+)\.(.+)$/.exec(path);
+	return match
+		? { mode: match[1] as string, token: match[2] as string }
+		: undefined;
 }
 
 /**
@@ -458,7 +558,7 @@ export function figmaTokens(
 	figma: FigmaDesignSystem,
 ): Tokens {
 	const fields = new Map(base);
-	for (const path of designSystemChanges(base, figma)) {
+	for (const path of fieldChanges(base, figma)) {
 		const value = figma.fields.get(path);
 		if (value === undefined) fields.delete(path);
 		else fields.set(path, value);
@@ -467,70 +567,131 @@ export function figmaTokens(
 }
 
 export type DesignSystemPull = {
-	/** Token fields Figma changed since the Baseline. */
+	/** Token fields Figma changed since the Baseline, the Modes' included. */
 	changed: string[];
-	/** The merged DESIGN.md, when Figma changed something. */
+	/** The merged DESIGN.md, when Figma changed it. */
 	source?: string;
+	/** The merged Modes file, when Figma changed a Mode. */
+	modesSource?: string;
 	conflicts: number;
 	/** DESIGN.md as Figma has it now, for the Baseline. */
 	baselineSource: string;
+	/** The Modes file as Figma has it now, for the Baseline. */
+	baselineModesSource: string;
 };
 
 /**
- * Merges Figma's token changes into DESIGN.md against the Baseline, field by
- * field. Where both changed a field differently, it gets Sync Conflict
- * markers. Everything else in the file stays as written.
+ * Merges Figma's token changes into DESIGN.md and the Modes file against
+ * the Baseline, field by field. Where both changed a field differently, it
+ * gets Sync Conflict markers. Everything else in the files stays as written.
  */
 export function pullDesignSystem(
 	local: string,
 	baseline: DesignSystemBaseline,
 	figma: FigmaDesignSystem,
+	localModesSource = "",
 ): DesignSystemPull {
 	const base = parseDesignMd(baseline.source).fields;
-	const localFields = parseDesignMd(local).fields;
-	const changed = designSystemChanges(base, figma);
+	const baseModesSource = baseline.modesSource ?? "";
+	const baseModes = parseModes(baseModesSource);
+	const changed = designSystemChanges(base, figma, baseModes);
 	if (changed.length === 0) {
-		return { changed, conflicts: 0, baselineSource: baseline.source };
+		return {
+			changed,
+			conflicts: 0,
+			baselineSource: baseline.source,
+			baselineModesSource: baseModesSource,
+		};
 	}
+	const localFields = parseDesignMd(local).fields;
+	const localModes = parseModes(localModesSource);
+	/** A changed field in each version: its fields, and the path to compare. */
+	const versions = (path: string) => {
+		const inMode = splitModePath(path);
+		if (!inMode) return { token: path, of: [base, localFields, figma.fields] };
+		const { mode, token } = inMode;
+		return {
+			token,
+			of: [
+				modeFields(base, baseModes, mode),
+				modeFields(localFields, localModes, mode),
+				figma.modes.get(mode) as TokenFields,
+			],
+		};
+	};
 	const edits: FieldEdit[] = [];
 	for (const path of changed) {
-		const [fromBase, fromLocal, fromFigma] = [
-			base,
-			localFields,
-			figma.fields,
-		].map((fields) => fieldMeaning(path, fields));
+		const { token, of } = versions(path);
+		const [fromBase, fromLocal, fromFigma] = of.map((fields) =>
+			fieldMeaning(token, fields),
+		);
 		if (fromLocal === fromFigma) continue;
 		edits.push({
 			path,
-			value: figma.fields.get(path),
+			value: (of[2] as TokenFields).get(token),
 			conflict: fromLocal !== fromBase,
 		});
 	}
-	const merged = editFrontMatter(local, edits);
+	const isMode = (edit: { path: string }) =>
+		splitModePath(edit.path) !== undefined;
+	const designMdEdits = edits.filter((edit) => !isMode(edit));
+	const modeEdits = edits.filter(isMode);
+	const merged = editFrontMatter(local, designMdEdits);
+	const mergedModes = editModes(localModesSource, modeEdits);
+	const baselineSource = editFrontMatter(
+		baseline.source,
+		fieldChanges(base, figma).map((path) => ({
+			path,
+			value: figma.fields.get(path),
+		})),
+	).source;
 	return {
 		changed,
-		source: merged.source,
-		conflicts: merged.conflicts,
-		baselineSource: editFrontMatter(
-			baseline.source,
-			changed.map((path) => ({ path, value: figma.fields.get(path) })),
-		).source,
+		...(designMdEdits.length > 0 && { source: merged.source }),
+		...(modeEdits.length > 0 && { modesSource: mergedModes.text }),
+		conflicts: merged.conflicts + mergedModes.conflicts,
+		baselineSource,
+		baselineModesSource: figmaModesSource(
+			parseDesignMd(baselineSource).fields,
+			baseModes,
+			figma,
+		),
 	};
 }
 
-type FieldEdit = {
-	path: string;
-	/** The new value as DESIGN.md writes it; undefined removes the field. */
-	value: string | undefined;
-	/** Keep the current line too, between Sync Conflict markers. */
-	conflict?: boolean;
-};
+/**
+ * The Modes file as the Linked File has it: the Baseline's, with every
+ * Mode's value Figma holds that the default (as Figma has it now) doesn't
+ * already give that Mode.
+ */
+function figmaModesSource(
+	base: TokenFields,
+	baseModes: Modes,
+	figma: FigmaDesignSystem,
+): string {
+	const edits = [...figma.modes].flatMap(([mode, values]) => {
+		const inBase = modeFields(base, baseModes, mode);
+		return [...values]
+			.filter(
+				([token]) =>
+					fieldMeaning(token, inBase) !== fieldMeaning(token, values),
+			)
+			.map(([token, value]) => ({ path: modePath(mode, token), value }));
+	});
+	return edits.length > 0
+		? editModes(baseModes.source, edits).text
+		: baseModes.source;
+}
+
+function editModes(source: string, edits: FieldEdit[]) {
+	if (edits.length === 0) return { text: source, conflicts: 0 };
+	const text = source === "" || source.endsWith("\n") ? source : `${source}\n`;
+	return editYaml(text, edits, { createParents: true, quoted: isColor });
+}
 
 /**
- * Edits token fields in DESIGN.md's front matter in place: a changed value
- * replaces just the old one (keeping its quotes and comments), a new field
- * goes after its siblings. Fields whose token the file no longer has are
- * left out.
+ * Edits token fields in DESIGN.md's front matter in place (see editYaml).
+ * Fields whose token the file no longer has are left out.
  */
 function editFrontMatter(
 	source: string,
@@ -541,94 +702,16 @@ function editFrontMatter(
 	// Every line ends in a newline, so lines can be swapped whole.
 	const text = `${match[1]}\n`;
 	const offset = match.index + match[0].indexOf(match[1] as string);
-	const document = parseDocument(text);
-	const replacements: { start: number; end: number; text: string }[] = [];
-	let conflicts = 0;
-	for (const edit of edits) {
-		const segments = edit.path.split(".");
-		const key = segments.pop() as string;
-		const parent = document.getIn(segments, true);
-		if (!isMap(parent)) continue;
-		const region = fieldRegion(text, parent, key);
-		if (!region) continue;
-		const lines =
-			edit.value === undefined ? "" : region.line(edit.value, edit.path);
-		const current = text.slice(region.start, region.end);
-		if (edit.conflict) conflicts++;
-		replacements.push({
-			start: region.start,
-			end: region.end,
-			text: edit.conflict
-				? `${CONFLICT_START}\n${current}${CONFLICT_SEPARATOR}\n${lines}${CONFLICT_END}\n`
-				: lines,
-		});
-	}
-	let edited = text;
-	for (const { start, end, text: replacement } of replacements.sort(
-		(a, b) => b.start - a.start,
-	)) {
-		edited = edited.slice(0, start) + replacement + edited.slice(end);
-	}
+	const edited = editYaml(text, edits, { quoted: isColor });
 	return {
 		source:
-			source.slice(0, offset) + edited + source.slice(offset + text.length),
-		conflicts,
+			source.slice(0, offset) +
+			edited.text +
+			source.slice(offset + text.length),
+		conflicts: edited.conflicts,
 	};
 }
 
-/** Where a field's line is (or would go) in the front matter, and how to write it. */
-function fieldRegion(
-	text: string,
-	parent: YAMLMap,
-	key: string,
-):
-	| {
-			start: number;
-			end: number;
-			line: (value: string, path: string) => string;
-	  }
-	| undefined {
-	const lineStart = (at: number) => text.lastIndexOf("\n", at - 1) + 1;
-	const lineEnd = (at: number) => text.indexOf("\n", at) + 1;
-	const pair = parent.items.find(
-		(item) => isScalar(item.key) && String(item.key.value) === key,
-	);
-	if (pair && isScalar(pair.value) && isScalar(pair.key)) {
-		const value = pair.value;
-		const [valueStart, valueEnd] = value.range as [number, number, number];
-		const start = lineStart((pair.key.range as number[])[0] as number);
-		const end = lineEnd(valueEnd);
-		return {
-			start,
-			end,
-			line: (written, path) =>
-				text.slice(start, valueStart) +
-				yamlScalar(written, path, value.type) +
-				text.slice(valueEnd, end),
-		};
-	}
-	if (pair) return undefined;
-	// A new field: after the last one, indented like it.
-	const last = parent.items.at(-1);
-	if (!last || !isScalar(last.key)) return undefined;
-	const keyStart = (last.key.range as number[])[0] as number;
-	const indent = text.slice(lineStart(keyStart), keyStart);
-	const lastEnd = (
-		(isScalar(last.value) ? last.value.range : last.key.range) as number[]
-	)[1] as number;
-	const at = lineEnd(lastEnd);
-	return {
-		start: at,
-		end: at,
-		line: (written, path) => `${indent}${key}: ${yamlScalar(written, path)}\n`,
-	};
-}
-
-/** A value as YAML, quoted as the value it replaces was, or as it needs. */
-function yamlScalar(value: string, path: string, type?: Scalar.Type): string {
-	if (type === Scalar.QUOTE_SINGLE) return `'${value.replaceAll("'", "''")}'`;
-	if (type === Scalar.QUOTE_DOUBLE) return JSON.stringify(value);
-	const plain = /^-?[A-Za-z0-9][\w .-]*$/.test(value) && !/\s$/.test(value);
-	// Colors are strings even when they'd read as something else.
-	return plain && groupOf(path) !== "colors" ? value : JSON.stringify(value);
-}
+/** Colors are strings even when they'd read as something else. */
+const isColor = (path: string) =>
+	groupOf(path.replace(/^modes\.[^.]+\./, "")) === "colors";

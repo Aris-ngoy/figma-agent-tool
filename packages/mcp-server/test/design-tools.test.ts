@@ -48,6 +48,14 @@ async function pushed(overrides: Record<string, string | null> = {}) {
 	return { ...setup, frame: () => setup.plugin.screens.frame("login") };
 }
 
+const modesFile = `default: Light
+modes:
+  Dark:
+    colors:
+      surface: "#111111"
+      text: "#eeeeee"
+`;
+
 function ids(frame: SyncedNode): string[] {
 	return [frame.id, ...(frame.children ?? []).flatMap(ids)];
 }
@@ -131,6 +139,33 @@ describe("render_screen", () => {
 		expect((await readFile(path)).toString("base64")).toBe(logoPng);
 		expect(shots[0]?.size).toEqual({ width: 393, height: 852 });
 		expect(shots[0]?.html).toContain("Welcome back");
+	});
+
+	test("renders a Screen in a Mode", async () => {
+		const designDir = await writeFixtureProject({ "modes.yaml": modesFile });
+		const shots: string[] = [];
+		const harness = await startHarness({
+			designDir,
+			screenshot: async (htmlPath, pngPath) => {
+				shots.push(await readFile(htmlPath, "utf8"));
+				await writeFile(pngPath, Buffer.from(logoPng, "base64"));
+			},
+		});
+		const result = await harness.callTool("render_screen", {
+			screen: "login",
+			mode: "Dark",
+		});
+		expect(result.isError).toBeFalsy();
+		expect(structured<{ path: string }>(result).path).toContain(
+			"screen-login-Dark",
+		);
+		expect(shots[0]).toContain("--colors-surface: #111111;");
+		const unknown = await harness.callTool("render_screen", {
+			screen: "login",
+			mode: "Sepia",
+		});
+		expect(unknown.isError).toBe(true);
+		expect(text(unknown)).toContain("the Design System has Light, Dark");
 	});
 
 	test("names the Screens there are when one doesn't exist", async () => {
@@ -668,5 +703,130 @@ components:
 				line: 8,
 			}),
 		);
+	});
+});
+
+describe("Modes", () => {
+	const modesPath = (designDir: string) => join(designDir, "modes.yaml");
+
+	test("Push makes a variable mode per Mode; Pull brings a designer's Mode edits into the Modes file", async () => {
+		const { harness, plugin, designDir, read } = await pushed({
+			"modes.yaml": modesFile,
+		});
+		const tokens = plugin.screens.designSystem;
+		expect(tokens.modeNames).toEqual(["Light", "Dark"]);
+		const dark = tokens.modeId("Dark");
+		expect(tokens.variable("colors/surface").modes[dark]).toEqual({
+			color: "#111111",
+		});
+		expect(tokens.variable("colors/primary").modes[dark]).toEqual({
+			color: "#3366ff",
+		});
+		const screen = await read();
+		const designMd = await readFile(join(designDir, "DESIGN.md"), "utf8");
+
+		tokens.variable("colors/surface").modes[dark] = { color: "#000000" };
+		tokens.variable("colors/primary").modes[dark] = { color: "#99bbff" };
+		const status = await harness.callTool("get_status");
+		expect(structured(status)).toMatchObject({
+			designProject: {
+				unpulledChanges: [],
+				designSystem: {
+					unpulledChanges: [
+						"modes.Dark.colors.primary",
+						"modes.Dark.colors.surface",
+					],
+				},
+			},
+		});
+		const refused = await harness.callTool("push");
+		expect(refused.isError).toBe(true);
+		expect(text(refused)).toContain("modes.Dark.colors.surface");
+
+		const pulled = await harness.callTool("pull");
+		expect(structured(pulled)).toMatchObject({
+			designSystem: { status: "merged", conflicts: 0 },
+			screens: [{ screen: "login", status: "unchanged" }],
+		});
+		expect(await readFile(modesPath(designDir), "utf8")).toBe(
+			modesFile
+				.replace('surface: "#111111"', 'surface: "#000000"')
+				.replace(
+					'text: "#eeeeee"\n',
+					'text: "#eeeeee"\n      primary: "#99bbff"\n',
+				),
+		);
+		const designMdAfter = await readFile(join(designDir, "DESIGN.md"), "utf8");
+		expect(designMdAfter).toBe(designMd);
+		expect(lint(designMdAfter).summary.errors).toBe(0);
+		expect(await read()).toBe(screen);
+
+		const again = await harness.callTool("push");
+		expect(again.isError).toBeFalsy();
+		const check = await harness.callTool("pull");
+		expect(structured(check)).toMatchObject({
+			designSystem: { status: "unchanged" },
+		});
+	});
+
+	test("Push removes the Modes the file dropped, and a Mode deleted in Figma is made again", async () => {
+		const { harness, plugin, designDir } = await pushed({
+			"modes.yaml": modesFile.replace(
+				"modes:\n",
+				"modes:\n  Dim:\n    spacing:\n      lg: 20px\n",
+			),
+		});
+		const tokens = plugin.screens.designSystem;
+		expect(tokens.modeNames).toEqual(["Light", "Dim", "Dark"]);
+		tokens.removeMode("Dark");
+		await writeFile(modesPath(designDir), modesFile);
+		const again = await harness.callTool("push");
+		expect(again.isError).toBeFalsy();
+		expect(tokens.modeNames).toEqual(["Light", "Dark"]);
+	});
+
+	test("Pull marks a Mode's token both sides changed, and Push refuses until it's resolved", async () => {
+		const { harness, plugin, designDir } = await pushed({
+			"modes.yaml": modesFile,
+		});
+		const tokens = plugin.screens.designSystem;
+		tokens.variable("colors/text").modes[tokens.modeId("Dark")] = {
+			color: "#ffffff",
+		};
+		await writeFile(
+			modesPath(designDir),
+			modesFile.replace("#eeeeee", "#dddddd"),
+		);
+		const result = await harness.callTool("pull");
+		expect(structured(result)).toMatchObject({
+			designSystem: { conflicts: 1 },
+			conflicts: 1,
+		});
+		const status = await harness.callTool("get_status");
+		expect(structured(status)).toMatchObject({
+			designProject: { designSystem: { syncConflicts: true } },
+		});
+		const refused = await harness.callTool("push");
+		expect(refused.isError).toBe(true);
+		expect(text(refused)).toContain("modes.yaml still has Sync Conflicts");
+	});
+
+	test("check validates the Modes file against DESIGN.md's tokens", async () => {
+		const designDir = await writeFixtureProject({
+			"modes.yaml": modesFile.replace("text:", "txt:"),
+		});
+		const harness = await startHarness({ designDir });
+		const result = await harness.callTool("check_design_project");
+		expect(structured(result)).toMatchObject({
+			ok: false,
+			errors: [
+				{
+					file: "modes.yaml",
+					line: 6,
+					element: "modes.Dark.colors.txt",
+					rule: "unknown-token",
+				},
+			],
+		});
 	});
 });

@@ -40,9 +40,9 @@ const USAGE = `Usage: figma-agent-tool <command> [options]
 
 Commands:
   init [--size 393x852]     Create a Design Project
-  check                     Check Screens and DESIGN.md against the spec
-  render <screen> [--out <file.png>]
-                            Render a Screen as the Preview shows it
+  check                     Check Screens, DESIGN.md and modes.yaml
+  render <screen> [--mode <mode>] [--out <file.png>]
+                            Render a Screen as the Preview shows it, in a Mode
   preview [--port 4321]     Serve the Preview, reloading on every change
   push [<screen>...] [--yes]
                             Push Screens to the Linked File (--yes confirms
@@ -195,8 +195,18 @@ async function render(
 		);
 		return 1;
 	}
-	const { png, width, height } = await renderScreen(project, screen);
-	const out = resolve(String(flags.get("out") ?? `${screen.name}.png`));
+	const mode = flags.get("mode");
+	if (mode === true) {
+		io.err(`--mode takes a Mode's name: ${project.modes.names.join(", ")}.`);
+		return 1;
+	}
+	const { png, width, height } = await renderScreen(project, screen, { mode });
+	const out = resolve(
+		String(
+			flags.get("out") ??
+				`${[screen.name, mode].filter(Boolean).join("-")}.png`,
+		),
+	);
 	await writeFile(out, png);
 	io.out(`Rendered ${screen.file} at ${width}×${height} to ${out}`);
 	return 0;
