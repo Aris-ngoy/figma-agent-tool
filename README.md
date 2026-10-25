@@ -64,7 +64,8 @@ The Agent designs **Screens** as files in a **Design Project** in the repo, sees
 ```
 design/
   project.json        { "screenSize": { "width": 393, "height": 852 }, "screensPage": "Screens" }
-  DESIGN.md           the Design System (Google Labs' DESIGN.md format)
+  DESIGN.md           the Design System (Google Labs' DESIGN.md format), in its default Mode
+  modes.yaml          optional: the tokens' values in other Modes (dark, high contrast, …)
   screens/login.html  one Screen per file
   assets/             images Screens use
   sync/               the Linked File, each Screen's Baseline and the Design System's; commit it so teammates share it
@@ -75,9 +76,9 @@ Every tool has a CLI command doing the same thing (`bun packages/mcp-server/src/
 | MCP tool | CLI | |
 | --- | --- | --- |
 | `init_design_project` | `init [--size 393x852]` | Create the folder above. |
-| `check_design_project` | `check` | Check Screens and DESIGN.md (the DESIGN.md spec's own linter, WCAG contrast included); each finding names the file, line, element or token and rule. Warnings don't fail it. |
-| `render_screen` | `render <screen> [--out file.png]` | A PNG of the Screen exactly as the Preview shows it. |
-| `open_preview` | `preview [--port 4321]` | Every Screen at its Screen Size, reloading as files change. |
+| `check_design_project` | `check` | Check Screens, DESIGN.md (the DESIGN.md spec's own linter, WCAG contrast included) and `modes.yaml`; each finding names the file, line, element or token and rule. Warnings don't fail it. |
+| `render_screen` | `render <screen> [--mode Dark] [--out file.png]` | A PNG of the Screen exactly as the Preview shows it, in a Mode. |
+| `open_preview` | `preview [--port 4321]` | Every Screen at its Screen Size, in the Mode its switcher picks, reloading as files change. |
 | `push` | `push [<screen>…] [--yes]` | Screens → frames on the Screens Page, DESIGN.md → variables and text styles, all updated in place. |
 | `pull` | `pull` | Designers' edits → the Screens and DESIGN.md, merged against the Baseline. |
 | `relink_file` | `relink [--yes]` | Link the Bridged File instead of the Linked File. |
@@ -131,7 +132,32 @@ A Screen is one `<body>` element in the **Screen Subset**, where everything has 
 - Screen elements written with a token's variable are bound to it: `background`/`color` (fill), `gap`, `padding` and `border-radius` to the variable; text whose `font-size` is a typography token's, and whose family and weight match it, gets that text style.
 - Pull reads those variables and styles back and writes what designers changed into DESIGN.md, merged against its Baseline: only the changed values are edited, so the file stays as written and passes `npx @google/design.md lint`. Where both sides changed a token, the line gets the same Sync Conflict markers. Screens bound to a token Figma changed aren't rewritten: they keep `var(--…)`.
 - Push is refused while the Design System has Unpulled Changes, naming the tokens. A variable or style deleted in Figma isn't a change: the next Push makes it again.
-- Check warns about tokens Figma can't hold (colors other than hex, lengths in units other than px or rem); Push leaves them out. Modes (light/dark) don't sync yet.
+- Check warns about tokens Figma can't hold (colors other than hex, lengths in units other than px or rem); Push leaves them out.
+
+### Modes
+
+DESIGN.md holds the default Mode and stays spec-pure. Other Modes (dark, high contrast, brand variants) go in `modes.yaml` next to it, which the tool owns until the DESIGN.md spec can express Modes (ADR-0004, ADR-0012):
+
+```yaml
+default: Light            # the default Mode's name: DESIGN.md's values (Default if left out)
+modes:
+  Dark:
+    colors:
+      surface: "#111111"
+      text: "#eeeeee"
+      heading: "{colors.text}"   # references follow the Mode's values
+    spacing:
+      lg: 32px
+  High contrast:
+    colors:
+      text: "#000000"
+```
+
+- A Mode gives other values to DESIGN.md's `colors`, `spacing` and `rounded` tokens, the ones that become variables; every token it leaves out keeps the default's value. Typography stays as DESIGN.md has it in every Mode (Figma's text styles have no modes).
+- Check rejects a token DESIGN.md doesn't have (`unknown-token`), other groups (`mode-group`), values variables can't take (`mode-value`), broken references (`broken-ref`), a Mode named like the default (`duplicate-mode`) and a file that doesn't parse (`modes-file`), and warns about low contrast in each Mode as in the default.
+- Push gives the “Design System” collection a variable mode per Mode: the default mode renamed, the others added, found again by ID on later Pushes (renamed back if a designer renamed them), and removed when the file drops them. Every variable gets a value in every Mode, the default's where the Mode leaves it out. Figma's plan limits how many modes a collection has; Push explains when Figma refuses one.
+- Pull writes designers' edits to a Mode's values into `modes.yaml`, merged against the Baseline like DESIGN.md: only the changed values are edited (a value the Mode left to the default is added under it), conflicts get the usual markers. Edits to the default mode go to DESIGN.md. Modes a designer adds or deletes aren't Pulled: Push makes deleted ones again.
+- The Preview's Mode switcher shows every Screen in a Mode; `render_screen` takes `mode` (the CLI `--mode`). Frames in Figma show the default Mode.
 
 ## Devices (Yoqa)
 

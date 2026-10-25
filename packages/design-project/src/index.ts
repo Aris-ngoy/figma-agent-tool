@@ -4,6 +4,7 @@ export * from "./exports";
 export * from "./keys";
 export * from "./lint";
 export * from "./merge";
+export * from "./modes";
 export * from "./nodes";
 export * from "./print";
 export * from "./project";

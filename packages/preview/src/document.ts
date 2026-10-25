@@ -1,6 +1,6 @@
 // The one renderer: the HTML document a Screen is shown in, both by the
 // Preview and by Render. It wraps the Screen's <body> with the Design
-// System's tokens as CSS variables, the Screen Size, and a reset that makes
+// System's tokens as CSS variables (in the Mode asked for), the Screen Size, and a reset that makes
 // CSS behave like Figma's auto layout (no margins or inheritance, children
 // don't shrink, counter-axis alignment starts at flex-start, absolute
 // offsets are from the parent, vectors don't clip their strokes). Figma-owned
@@ -10,6 +10,7 @@ import {
 	type DesignProject,
 	type FigmaOwnedPreview,
 	figmaOwnedPreviews,
+	modeTokens,
 	readBaseline,
 	resolveProp,
 	type ScreenFile,
@@ -43,6 +44,8 @@ export type DocumentOptions = {
 	head?: string;
 	/** How to show the Screen's Figma-owned Elements; see figmaOwnedOf. */
 	figmaOwned?: FigmaOwnedPreview[];
+	/** The Mode whose token values to show; the default Mode when absent. */
+	mode?: string;
 };
 
 /** A Screen's Figma-owned Elements, with the state of their exports. */
@@ -104,8 +107,9 @@ export function screenSize(
 export function screenDocument(
 	project: DesignProject,
 	screen: ScreenFile,
-	{ baseUrl, head = "", figmaOwned = [] }: DocumentOptions,
+	{ baseUrl, head = "", figmaOwned = [], mode }: DocumentOptions,
 ): string {
+	const tokens = modeTokens(project, mode);
 	const { width, height } = screenSize(project, screen);
 	return [
 		"<!doctype html>",
@@ -116,7 +120,7 @@ export function screenDocument(
 		`<title>${screen.name}</title>`,
 		"<style>",
 		RESET,
-		tokensCss(project.tokens),
+		tokensCss(tokens),
 		`body { width: ${width}px; height: ${height}px; }`,
 		...(figmaOwned.length > 0 ? [figmaOwnedCss(figmaOwned)] : []),
 		"</style>",

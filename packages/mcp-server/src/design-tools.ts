@@ -67,7 +67,10 @@ export function registerDesignTools(
 				`Create a Design Project in ${designDir}/: project.json (the default Screen Size), ` +
 				"a DESIGN.md Design System to fill in, screens/ for Screens and assets/ for images. " +
 				"Screens are single <body> HTML files in the Screen Subset; DESIGN.md tokens are " +
-				"CSS variables named after their path (var(--colors-primary), var(--spacing-md)).",
+				"CSS variables named after their path (var(--colors-primary), var(--spacing-md)). " +
+				"Other Modes (dark, …) go in an optional modes.yaml next to DESIGN.md: " +
+				'`default: Light` names DESIGN.md\'s Mode, and `modes: { Dark: { colors: { surface: "#111111" } } }` ' +
+				"gives colors, spacing and rounded tokens other values in a Mode.",
 			inputSchema: {
 				screenWidth: z
 					.number()
@@ -98,8 +101,9 @@ export function registerDesignTools(
 		"check_design_project",
 		{
 			description:
-				"Check every Screen against the Screen Subset, and DESIGN.md against the DESIGN.md " +
-				"spec (the rules of `npx @google/design.md lint`, WCAG contrast included). Each " +
+				"Check every Screen against the Screen Subset, DESIGN.md against the DESIGN.md " +
+				"spec (the rules of `npx @google/design.md lint`, WCAG contrast included), and the " +
+				"Modes file (modes.yaml) against DESIGN.md's tokens, contrast in each Mode too. Each " +
 				"finding names the file, line, element (a CSS selector, or a DESIGN.md token path), " +
 				"rule and how to fix it. Push refuses while there are errors; warnings (low " +
 				"contrast, tokens Figma variables can't hold) don't stop it.",
@@ -124,15 +128,22 @@ export function registerDesignTools(
 		{
 			description:
 				"Render a Screen to a PNG exactly as the Preview shows it (headless Chromium, " +
-				"downloaded on first use), into the artifacts folder. Returns its path and size, " +
-				"and its Figma-owned Elements, drawn from the exports Pull cached (`export`: " +
-				"current, stale once the Screen resized one, or missing); set `inline` to also " +
-				"get the image.",
+				"downloaded on first use), into the artifacts folder, in the default Mode or the " +
+				"`mode` given. Returns its path and size, and its Figma-owned Elements, drawn " +
+				"from the exports Pull cached (`export`: current, stale once the Screen resized " +
+				"one, or missing); set `inline` to also get the image.",
 			inputSchema: {
 				screen: z
 					.string()
 					.min(1)
 					.describe("Screen name: its file name in screens/ without .html."),
+				mode: z
+					.string()
+					.min(1)
+					.optional()
+					.describe(
+						"A Mode from the Modes file (modes.yaml), such as Dark; the default Mode otherwise.",
+					),
 				inline: z
 					.boolean()
 					.default(false)
@@ -152,14 +163,19 @@ export function registerDesignTools(
 				),
 			},
 		},
-		async ({ screen: name, inline }) => {
+		async ({ screen: name, mode, inline }) => {
 			const project = await loadProject(designDir);
 			const screen = findScreen(project, name);
 			const { png, figmaOwned } = await renderScreen(project, screen, {
 				screenshot,
+				mode,
 			});
 			const structuredContent = {
-				...(await writePngArtifact(artifactsDir, `screen-${name}`, png)),
+				...(await writePngArtifact(
+					artifactsDir,
+					mode ? `screen-${name}-${mode}` : `screen-${name}`,
+					png,
+				)),
 				figmaOwned: figmaOwned.map(({ src: _, ...owned }) => {
 					const note = exportNote(owned);
 					return note ? { ...owned, note } : owned;
@@ -186,7 +202,8 @@ export function registerDesignTools(
 		{
 			description:
 				"Start the local Preview (once) and return its URL for the user to open: every " +
-				"Screen at its Screen Size with Check's errors, reloading as files change. It " +
+				"Screen at its Screen Size with Check's errors, in the Mode its switcher picks, " +
+				"reloading as files change. It " +
 				"only views; Agents without a browser use render_screen to see their work.",
 			outputSchema: { url: z.string() },
 		},
@@ -216,7 +233,7 @@ export function registerDesignTools(
 				"Push Screens and the Design System to the Linked File: each Screen becomes (or " +
 				"updates, in place, keeping node IDs) an auto-layout frame on the Screens Page, and " +
 				"DESIGN.md's colors, spacing and rounded tokens become variables (typography: text " +
-				"styles), updated in place too. Fills, spacing, radii and text written with a token's " +
+				"styles), updated in place too, with a variable mode per Mode in modes.yaml. Fills, spacing, radii and text written with a token's " +
 				"var(--…) are bound to its variable or style. One undo step. Writes a data-key into " +
 				"every element. The first Push asks to confirm the Bridged File before linking it " +
 				"(status confirm_link): ask the user, then call again with confirmLink. Refused " +
@@ -246,7 +263,8 @@ export function registerDesignTools(
 		{
 			description:
 				"Pull designers' edits from the Linked File into the Screens, and their edits to the " +
-				"Design System's variables and text styles into DESIGN.md: a three-way merge " +
+				"Design System's variables and text styles into DESIGN.md (other Modes' values into " +
+				"modes.yaml): a three-way merge " +
 				"against the Baseline (the last Push or Pull). Where both sides changed the same " +
 				"element or token, the file gets Sync Conflict markers (<<<<<<< Design Project / " +
 				"======= / >>>>>>> Figma): keep one side, delete the markers, then Push. Layers the " +

@@ -1538,30 +1538,45 @@ export const FLOAT_BINDINGS = [
 	"cornerRadius",
 ] as const;
 
+/** A variable's value as Push gives it: a color, a number, or another variable of the push. */
+const PushedVariableValue = z.union([
+	z.object({
+		color: HexColor,
+		opacity: z.number().min(0).max(1).optional(),
+	}),
+	z.number(),
+	// Another variable of this push, by token path.
+	z.object({ token: z.string().min(1) }),
+]);
+
 /**
  * The Design System as Push wants it in Figma: variables in one collection
- * (default mode) and text styles, each updated in place by ID or created,
- * and named by its DESIGN.md token path so bindings and aliases can refer
- * to it before it exists.
+ * and text styles, each updated in place by ID or created, and named by its
+ * DESIGN.md token path so bindings and aliases can refer to it before it
+ * exists. With Modes, the collection has one variable mode per Mode.
  */
 export const DesignSystemPush = z.object({
 	// Found by ID, else created.
-	collection: z.object({ id: z.string().min(1).optional(), name: z.string() }),
+	collection: z.object({
+		id: z.string().min(1).optional(),
+		name: z.string(),
+		// The Modes, the default first: each found by ID, else by name, else
+		// added, and named as given. Absent: the modes are left as they are.
+		modes: z
+			.array(z.object({ id: z.string().min(1).optional(), name: z.string() }))
+			.min(1)
+			.optional(),
+	}),
 	variables: z.array(
 		z.object({
 			token: z.string().min(1),
 			id: z.string().min(1).optional(),
 			name: z.string().min(1),
 			type: z.enum(["COLOR", "FLOAT"]),
-			value: z.union([
-				z.object({
-					color: HexColor,
-					opacity: z.number().min(0).max(1).optional(),
-				}),
-				z.number(),
-				// Another variable of this push, by token path.
-				z.object({ token: z.string().min(1) }),
-			]),
+			// The default Mode's value.
+			value: PushedVariableValue,
+			// The other Modes' values, by Mode name.
+			modes: z.record(z.string(), PushedVariableValue).optional(),
 		}),
 	),
 	textStyles: z.array(
@@ -1570,26 +1585,31 @@ export const DesignSystemPush = z.object({
 			id: z.string().min(1).optional(),
 		}),
 	),
-	// Variables and text styles a previous Push made that DESIGN.md dropped.
+	// Variables, text styles and modes a previous Push made that DESIGN.md
+	// (or the Modes file) dropped.
 	remove: z.object({
 		variables: z.array(z.string().min(1)),
 		textStyles: z.array(z.string().min(1)),
+		modes: z.array(z.string().min(1)).optional(),
 	}),
 });
 export type DesignSystemPush = z.infer<typeof DesignSystemPush>;
 
-/** Where each token of a DesignSystemPush went: collection, variable and style IDs. */
+/** Where each token of a DesignSystemPush went: collection, variable, style and mode IDs. */
 export const PushedDesignSystem = z.object({
 	collectionId: z.string(),
 	// Token path → ID.
 	variables: z.record(z.string(), z.string()),
 	textStyles: z.record(z.string(), z.string()),
+	// Mode name → mode ID, when the push gave modes.
+	modes: z.record(z.string(), z.string()).optional(),
 });
 export type PushedDesignSystem = z.infer<typeof PushedDesignSystem>;
 
 /**
  * Variables and text styles as Pull reads them: the default mode's value
- * (aliases by ID) and the value aliases resolve to. Deleted ones are left out.
+ * (aliases by ID) and the value aliases resolve to, and the same for the
+ * collection's other modes. Deleted ones are left out.
  */
 export const SyncedDesignSystem = z.object({
 	variables: z.array(
@@ -1599,6 +1619,16 @@ export const SyncedDesignSystem = z.object({
 			type: VariableInfo.shape.type,
 			value: VariableValue.nullable(),
 			resolved: VariableValue.nullable(),
+			// Mode ID → the value in that mode, for modes other than the default.
+			modes: z
+				.record(
+					z.string(),
+					z.object({
+						value: VariableValue.nullable(),
+						resolved: VariableValue.nullable(),
+					}),
+				)
+				.optional(),
 		}),
 	),
 	textStyles: z.array(TextStyleInfo),

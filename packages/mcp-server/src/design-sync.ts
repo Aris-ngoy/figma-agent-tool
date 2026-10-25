@@ -29,8 +29,10 @@ import {
 	type ImageRecord,
 	type Link,
 	loadProject,
+	MODES_FILE,
 	type PushedImage,
 	parseDesignMd,
+	parseModes,
 	pullDesignSystem,
 	pullScreen,
 	pushedImageRecords,
@@ -134,7 +136,7 @@ export async function pushDesignProject(
 	const checked = await checkProject(project);
 	const failing = checked.errors.filter(
 		(error) =>
-			error.file === "DESIGN.md" ||
+			isDesignSystemFile(error.file) ||
 			screens.some((screen) => screen.file === error.file),
 	);
 	if (failing.length > 0) {
@@ -193,6 +195,7 @@ export async function pushDesignProject(
 	const { push: designSystem } = designSystemPush(
 		project.fields,
 		linked?.baseline,
+		project.modes,
 	);
 	const bindings = tokenBindings(designSystem);
 	const pushes: {
@@ -253,6 +256,7 @@ export async function pushDesignProject(
 	if (result.designSystem) {
 		await writeDesignSystemBaseline(project, {
 			source: project.designMd,
+			modesSource: project.modes.source,
 			...result.designSystem,
 		});
 	}
@@ -280,6 +284,10 @@ export async function pushDesignProject(
 		screens: pushed,
 	};
 }
+
+/** DESIGN.md and its Modes file. */
+const isDesignSystemFile = (file: string) =>
+	file === "DESIGN.md" || file === MODES_FILE;
 
 async function linkBridgedFile(
 	project: DesignProject,
@@ -347,7 +355,11 @@ async function readLinkedDesignSystem(
 	return {
 		baseline,
 		figma,
-		changes: designSystemChanges(base, figma),
+		changes: designSystemChanges(
+			base,
+			figma,
+			parseModes(baseline.modesSource ?? ""),
+		),
 		tokens: figmaTokens(base, figma),
 	};
 }
@@ -394,7 +406,7 @@ async function readFrames(
 export type PullResult = {
 	linkedFile: FileInfo;
 	designSystem: {
-		/** merged: Figma's token edits are in DESIGN.md; unchanged: nothing to pull; not_pushed: no Push sent it yet. */
+		/** merged: Figma's token edits are in DESIGN.md and the Modes file; unchanged: nothing to pull; not_pushed: no Push sent it yet. */
 		status: "merged" | "unchanged" | "not_pushed";
 		/** Token fields Figma changed. */
 		changed: string[];
@@ -429,6 +441,7 @@ export async function pullDesignProject(
 	);
 	const failing = [
 		...project.designMdErrors,
+		...project.modes.errors,
 		...screens.flatMap((screen) => checkScreen(project, screen).errors),
 	];
 	if (failing.length > 0) {
@@ -447,13 +460,18 @@ export async function pullDesignProject(
 			project.designMd,
 			linked.baseline,
 			linked.figma,
+			project.modes.source,
 		);
 		if (pulled.source !== undefined) {
 			await writeFile(join(project.dir, "DESIGN.md"), pulled.source);
 		}
+		if (pulled.modesSource !== undefined) {
+			await writeFile(join(project.dir, MODES_FILE), pulled.modesSource);
+		}
 		await writeDesignSystemBaseline(project, {
 			...linked.baseline,
 			source: pulled.baselineSource,
+			modesSource: pulled.baselineModesSource,
 		});
 		Object.assign(designSystem, {
 			status: "merged",
@@ -578,7 +596,7 @@ export type DesignStatus = {
 	designSystem: {
 		/** Token fields with Unpulled Changes; null when Figma can't be read. */
 		unpulledChanges: string[] | null;
-		/** Whether DESIGN.md has Sync Conflicts to resolve. */
+		/** Whether DESIGN.md or the Modes file has Sync Conflicts to resolve. */
 		syncConflicts: boolean;
 	};
 };
@@ -634,7 +652,8 @@ export async function designProjectStatus(
 		designSystem: {
 			unpulledChanges: unpulledTokens,
 			syncConflicts: errors.some(
-				(error) => error.file === "DESIGN.md" && error.rule === "sync-conflict",
+				(error) =>
+					isDesignSystemFile(error.file) && error.rule === "sync-conflict",
 			),
 		},
 	};

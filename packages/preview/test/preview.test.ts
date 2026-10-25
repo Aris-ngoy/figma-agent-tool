@@ -23,6 +23,13 @@ import {
 	startPreview,
 } from "../src";
 
+const modes = `default: Light
+modes:
+  Dark:
+    colors:
+      surface: "#111111"
+`;
+
 const stops: (() => void)[] = [];
 afterEach(() => {
 	for (const stop of stops.splice(0)) stop();
@@ -65,6 +72,31 @@ describe("Preview", () => {
 		);
 		expect(html).toContain('<iframe src="/screens/broken"');
 		expect(html).toContain("single-root");
+	});
+
+	test("shows Screens in the Mode the switcher picks", async () => {
+		const { server } = await preview({ "modes.yaml": modes });
+		const index = await (await fetch(server.url)).text();
+		expect(index).toContain('<select id="mode"');
+		expect(index).toContain('<option value="Light" selected>Light</option>');
+		expect(index).toContain('<option value="Dark">Dark</option>');
+		expect(index).toContain('<iframe src="/screens/login"');
+		const dark = await (await fetch(`${server.url}?mode=Dark`)).text();
+		expect(dark).toContain('<option value="Dark" selected>Dark</option>');
+		expect(dark).toContain('<iframe src="/screens/login?mode=Dark"');
+		const screen = await (
+			await fetch(`${server.url}screens/login?mode=Dark`)
+		).text();
+		expect(screen).toContain("--colors-surface: #111111;");
+		expect(screen).toContain("--colors-primary: #3366FF;");
+		const unknown = await fetch(`${server.url}screens/login?mode=Sepia`);
+		expect(unknown.status).toBe(404);
+		expect(await unknown.text()).toContain("No Mode named “Sepia”");
+	});
+
+	test("has no Mode switcher without Modes", async () => {
+		const { server } = await preview();
+		expect(await (await fetch(server.url)).text()).not.toContain("<select");
 	});
 
 	test("serves the Design Project's images, and nothing outside it", async () => {
@@ -188,6 +220,20 @@ describe("Render", () => {
 		]);
 		expect(Buffer.from(result.png).toString("base64")).toBe(logoPng);
 		expect(result).toMatchObject({ width: 393, height: 852 });
+	});
+
+	test("renders a Screen in a Mode", async () => {
+		const project = await loadProject(
+			await writeFixtureProject({ "modes.yaml": modes }),
+		);
+		const screen = project.screens[0] as ScreenFile;
+		let html = "";
+		const screenshot: Screenshotter = async (htmlPath, pngPath) => {
+			html = await readFile(htmlPath, "utf8");
+			await writeFile(pngPath, Buffer.from(logoPng, "base64"));
+		};
+		await renderScreen(project, screen, { screenshot, mode: "Dark" });
+		expect(html).toContain("--colors-surface: #111111;");
 	});
 
 	// Needs a Chromium that runs here: set FIGMA_AGENT_CHROME, or let Render

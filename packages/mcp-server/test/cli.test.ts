@@ -106,6 +106,20 @@ describe("figma-agent-tool CLI", () => {
 		expect(out.at(-1)).toMatch(/checked: no errors, \d+ warnings\.$/);
 	});
 
+	test("render names the Modes there are when asked for another", async () => {
+		const dir = await writeFixtureProject({
+			"modes.yaml":
+				'default: Light\nmodes:\n  Dark:\n    colors:\n      surface: "#111111"\n',
+		});
+		const { cli, err } = io();
+		expect(
+			await runCli(["render", "login", "--dir", dir, "--mode", "Sepia"], cli),
+		).toBe(1);
+		expect(err.join("\n")).toBe(
+			"No Mode named “Sepia”: the Design System has Light, Dark.",
+		);
+	});
+
 	test("push asks before linking the Bridged File, and links it once confirmed", async () => {
 		const dir = await writeFixtureProject();
 		const declined = io([false]);
