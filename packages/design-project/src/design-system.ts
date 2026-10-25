@@ -509,7 +509,10 @@ export function designSystemChanges(
 	figma: FigmaDesignSystem,
 	baseModes?: Modes,
 ): string[] {
-	return [...fieldChanges(base, figma), ...modeChanges(base, figma, baseModes)];
+	return [
+		...fieldChanges(base, figma),
+		...modeValueChanges(base, figma, baseModes).map(({ path }) => path),
+	];
 }
 
 /** DESIGN.md's fields Figma changed: the default Mode's values and the text styles. */
@@ -521,18 +524,20 @@ function fieldChanges(base: TokenFields, figma: FigmaDesignSystem): string[] {
 	);
 }
 
-function modeChanges(
+/** The Modes' values Figma holds that differ from what the Baseline gives each Mode, its own or the default's. */
+function modeValueChanges(
 	base: TokenFields,
 	figma: FigmaDesignSystem,
 	baseModes: Modes | undefined,
-): string[] {
+): { path: string; value: string }[] {
 	return [...figma.modes].flatMap(([mode, values]) => {
 		const inBase = baseModes ? modeFields(base, baseModes, mode) : base;
-		return [...values.keys()]
+		return [...values]
 			.filter(
-				(token) => fieldMeaning(token, inBase) !== fieldMeaning(token, values),
+				([token]) =>
+					fieldMeaning(token, inBase) !== fieldMeaning(token, values),
 			)
-			.map((token) => modePath(mode, token));
+			.map(([token, value]) => ({ path: modePath(mode, token), value }));
 	});
 }
 
@@ -669,18 +674,8 @@ function figmaModesSource(
 	baseModes: Modes,
 	figma: FigmaDesignSystem,
 ): string {
-	const edits = [...figma.modes].flatMap(([mode, values]) => {
-		const inBase = modeFields(base, baseModes, mode);
-		return [...values]
-			.filter(
-				([token]) =>
-					fieldMeaning(token, inBase) !== fieldMeaning(token, values),
-			)
-			.map(([token, value]) => ({ path: modePath(mode, token), value }));
-	});
-	return edits.length > 0
-		? editModes(baseModes.source, edits).text
-		: baseModes.source;
+	return editModes(baseModes.source, modeValueChanges(base, figma, baseModes))
+		.text;
 }
 
 function editModes(source: string, edits: FieldEdit[]) {

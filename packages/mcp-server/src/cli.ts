@@ -201,12 +201,8 @@ async function render(
 		return 1;
 	}
 	const { png, width, height } = await renderScreen(project, screen, { mode });
-	const out = resolve(
-		String(
-			flags.get("out") ??
-				`${[screen.name, mode].filter(Boolean).join("-")}.png`,
-		),
-	);
+	const defaultOut = mode ? `${screen.name}-${mode}.png` : `${screen.name}.png`;
+	const out = resolve(String(flags.get("out") ?? defaultOut));
 	await writeFile(out, png);
 	io.out(`Rendered ${screen.file} at ${width}×${height} to ${out}`);
 	return 0;
