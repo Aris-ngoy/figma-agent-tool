@@ -97,19 +97,9 @@ export function startPreview({
 				await chooseDirection(project, direction);
 				return new Response(null, { status: 303, headers: { Location: "/" } });
 			}
-			const screenMatch = /^\/screens\/([^/]+)$/.exec(pathname);
-			const directionMatch = /^\/directions\/([^/]+)\/([^/]+)$/.exec(pathname);
-			const screen = screenMatch
-				? project.screens.find(
-						(s) => s.name === decodeURIComponent(screenMatch[1] as string),
-					)
-				: directionMatch &&
-					directionOf(
-						project,
-						decodeURIComponent(directionMatch[1] as string),
-						decodeURIComponent(directionMatch[2] as string),
-					);
-			if (screenMatch || directionMatch) {
+			const route = screenRoute(project, pathname);
+			if (route) {
+				const { screen } = route;
 				if (!screen) return new Response("No such Screen", { status: 404 });
 				return html(
 					screenDocument(project, screen, {
@@ -231,6 +221,32 @@ ${(await Promise.all(screens)).join("\n") || "<p>No Screens yet: add HTML files 
 </body>
 </html>
 `;
+}
+
+/**
+ * The Screen or Direction a /screens/<screen> or /directions/<screen>/<direction>
+ * path shows (undefined if there's none by that name), or undefined for any other path.
+ */
+function screenRoute(
+	project: DesignProject,
+	pathname: string,
+): { screen: ScreenFile | undefined } | undefined {
+	const screenMatch = /^\/screens\/([^/]+)$/.exec(pathname);
+	if (screenMatch) {
+		const name = decodeURIComponent(screenMatch[1] as string);
+		return { screen: project.screens.find((s) => s.name === name) };
+	}
+	const directionMatch = /^\/directions\/([^/]+)\/([^/]+)$/.exec(pathname);
+	if (directionMatch) {
+		return {
+			screen: directionOf(
+				project,
+				decodeURIComponent(directionMatch[1] as string),
+				decodeURIComponent(directionMatch[2] as string),
+			),
+		};
+	}
+	return undefined;
 }
 
 /** Chooses the Direction: it becomes the Screen, and the other Directions are deleted. */

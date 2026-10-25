@@ -192,7 +192,7 @@ async function check(dir: string, io: CliIo): Promise<number> {
 	io.out(
 		errors.length === 0
 			? `${plural(project.screens.length, "Screen")}${directions} and DESIGN.md checked: no errors${warned}.`
-			: `${errors.length} error${errors.length === 1 ? "" : "s"}${warned}.`,
+			: `${plural(errors.length, "error")}${warned}.`,
 	);
 	return errors.length === 0 ? 0 : 1;
 }
@@ -216,12 +216,12 @@ async function render(
 	}
 	const mode = flags.get("mode");
 	const direction = flags.get("direction");
-	if (mode === true || direction === true) {
-		io.err(
-			mode === true
-				? `--mode takes a Mode's name: ${project.modes.names.join(", ")}.`
-				: "--direction takes a Direction's name.",
-		);
+	if (mode === true) {
+		io.err(`--mode takes a Mode's name: ${project.modes.names.join(", ")}.`);
+		return 1;
+	}
+	if (direction === true) {
+		io.err("--direction takes a Direction's name.");
 		return 1;
 	}
 	const screen = direction ? findDirection(project, name, direction) : found;
