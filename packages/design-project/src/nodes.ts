@@ -366,6 +366,12 @@ export function fromComponentNode(
 	return { root, figmaOwned };
 }
 
+/** Why a top-level frame can't be a Screen, if it can't. */
+export function screenFrameReason(node: SyncedNode): string | undefined {
+	if (node.type !== "FRAME") return `is a ${node.type}, not a frame`;
+	return unsupportedReason(node, { srcFor: () => undefined });
+}
+
 /** The Screen a frame reads as; layers outside the subset are listed. */
 export function fromSyncedNode(
 	frame: SyncedNode,
@@ -624,7 +630,7 @@ function kindOf(node: SyncedNode): Kind {
 /** Why a layer isn't expressible in the basic Screen Subset, if it isn't. */
 function unsupportedReason(
 	node: SyncedNode,
-	context: PullContext,
+	context: Pick<PullContext, "srcFor">,
 ): string | undefined {
 	if (!SUPPORTED_TYPES.includes(node.type)) return `is a ${node.type}`;
 	if (!node.visible) return "is hidden";

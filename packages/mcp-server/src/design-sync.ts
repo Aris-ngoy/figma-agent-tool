@@ -76,7 +76,7 @@ export class DesignSyncError extends Error {}
 
 const fileName = (file: FileInfo) => `“${file.name}”`;
 
-function connected(bridge: Bridge) {
+export function connected(bridge: Bridge) {
 	const status = bridge.status();
 	if (!status.connected) throw new BridgeNotConnectedError(status.port);
 	return status;
@@ -944,7 +944,7 @@ async function fetchImages(
 }
 
 /** Caches an export of each Figma-owned Element's layer a designer made or changed. */
-async function fetchExports(
+export async function fetchExports(
 	project: DesignProject,
 	screen: string,
 	frame: SyncedNode,

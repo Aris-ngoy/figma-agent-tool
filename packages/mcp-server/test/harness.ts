@@ -4,6 +4,7 @@ import { afterEach } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { DesignerFile } from "@figma-agent-tool/design-project/fixtures";
 import type { Screenshotter } from "@figma-agent-tool/preview";
 import {
 	type BridgeError,
@@ -270,9 +271,14 @@ function answer(
 			const handle = motion[command] as (params: unknown) => object;
 			return okOrFailure(handle(params));
 		}
+		case "get_design_system": {
+			const designed = screens.get_design_system();
+			return designed ? ok(designed) : replayExchange(message);
+		}
 		case "push_screens":
 		case "push_explorations":
 		case "read_screens":
+		case "read_components":
 		case "read_design_system":
 		case "link_file":
 		case "get_image": {
@@ -315,6 +321,8 @@ type FakePluginOptions = {
 	exportPng?: (nodeId: string, scale: number) => string | undefined;
 	/** Loopback address to connect to, as a URL host. */
 	host?: string;
+	/** Designers' file to be in instead of the document fixture, for Adopt. */
+	designerFile?: DesignerFile;
 };
 
 /** Connects a fake plugin to a bridge on `port`, such as one the CLI hosts. */
@@ -325,11 +333,13 @@ export async function connectFakePlugin(
 		answers = true,
 		exportPng,
 		host = "127.0.0.1",
+		designerFile,
 	}: FakePluginOptions,
 ) {
 	const socket = new WebSocket(`ws://${host}:${port}`);
 	const requests: Request[] = [];
 	const fake = fakeDocument();
+	if (designerFile) fake.screens.addDesignerFile(designerFile);
 	const closed = new Promise<CloseEvent>((resolve) =>
 		socket.addEventListener("close", resolve, { once: true }),
 	);

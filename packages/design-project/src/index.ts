@@ -1,3 +1,4 @@
+export * from "./adopt";
 export * from "./components";
 export * from "./design-md";
 export * from "./design-system";

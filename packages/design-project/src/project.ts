@@ -296,7 +296,10 @@ named after their path: \`var(--colors-primary)\`, \`var(--spacing-md)\`,
 /** Creates a Design Project in `dir`; refuses if one is already there. */
 export async function initProject(
 	dir: string,
-	{ screenSize = DEFAULT_SCREEN_SIZE }: { screenSize?: ScreenSize } = {},
+	{
+		screenSize = DEFAULT_SCREEN_SIZE,
+		screensPage = "Screens",
+	}: { screenSize?: ScreenSize; screensPage?: string } = {},
 ): Promise<{ dir: string; created: string[] }> {
 	const root = resolve(dir);
 	if (existsSync(join(root, CONFIG_FILE))) {
@@ -304,7 +307,7 @@ export async function initProject(
 	}
 	const config: ProjectConfig = {
 		screenSize,
-		screensPage: "Screens",
+		screensPage,
 		explorationsPage: "Explorations",
 	};
 	const files: [string, string][] = [

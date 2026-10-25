@@ -37,6 +37,11 @@ export type DesignSystemBaseline = {
 	modesSource?: string;
 	/** Mode name → variable mode ID, the default's included; absent without Modes. */
 	modes?: Record<string, string>;
+	/**
+	 * Token path → its variable's or text style's name in Figma, where it
+	 * isn't the one Push would give it (Adopt keeps designers' names).
+	 */
+	names?: Record<string, string>;
 };
 
 /** The variable collection Push keeps the Design System's tokens in. */
@@ -121,7 +126,7 @@ export function designSystemPush(
 		variables.push({
 			token: path,
 			...(baseline?.variables[path] && { id: baseline.variables[path] }),
-			name: path.replace(".", "/"),
+			name: baseline?.names?.[path] ?? path.replace(".", "/"),
 			type,
 			value,
 			...(modeValues.length > 0 && { modes: Object.fromEntries(modeValues) }),
@@ -135,6 +140,7 @@ export function designSystemPush(
 			token,
 			...(baseline?.textStyles[token] && { id: baseline.textStyles[token] }),
 			...style,
+			name: baseline?.names?.[token] ?? style.name,
 		});
 	}
 	const pushed = (list: { token: string }[]) =>

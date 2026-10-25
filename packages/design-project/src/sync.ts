@@ -17,7 +17,7 @@ import {
 	componentDefinition,
 	type LinkedComponentRecord,
 } from "./components";
-import type { Tokens } from "./design-md";
+import { cssVariable, type Tokens } from "./design-md";
 import type { DesignSystemBaseline, TokenBindings } from "./design-system";
 import { type HtmlNode, parseHtml } from "./html";
 import { assignElementKeys, elementKeys } from "./keys";
@@ -46,7 +46,13 @@ import {
 	sameOwn,
 } from "./resolve";
 import { type Element, parseComponent, parseScreen } from "./screen";
-import { isComponentTag, type Kind, PROP_NAMES, variableName } from "./subset";
+import {
+	isComponentTag,
+	type Kind,
+	PROP_NAMES,
+	type Prop,
+	variableName,
+} from "./subset";
 
 /** The Linked File, as the first Push (or a re-link) recorded it. */
 export type Link = {
@@ -796,18 +802,7 @@ export function pullScreen(
 	if (!figma) {
 		return { changed: false, baseline, conflicts: 0, figmaOwned };
 	}
-	const withKeys = () => {
-		const keys = new Map<string, string>();
-		const walk = (element: Element) => {
-			if (element.nodeId && element.key) keys.set(element.nodeId, element.key);
-			element.children.forEach(walk);
-		};
-		walk(figma);
-		return figmaOwned.map((layer) => {
-			const key = keys.get(layer.nodeId);
-			return key ? { key, ...layer } : layer;
-		});
-	};
+	const withKeys = () => ownedWithKeys(figma, figmaOwned);
 	const base = baselineRoot(screen, baseline);
 	const contexts = {
 		base: baselineContext(project, screen, baseline),
@@ -846,6 +841,151 @@ export function pullScreen(
 		conflicts: merged.conflicts,
 		figmaOwned: withKeys(),
 	};
+}
+
+/** The layers kept in Figma, with the keys of their Figma-owned Elements. */
+function ownedWithKeys(
+	root: Element,
+	figmaOwned: FigmaOwnedLayer[],
+): FigmaOwnedLayer[] {
+	const keys = new Map<string, string>();
+	const walk = (element: Element) => {
+		if (element.nodeId && element.key) keys.set(element.nodeId, element.key);
+		element.children.forEach(walk);
+	};
+	walk(root);
+	return figmaOwned.map((layer) => {
+		const key = keys.get(layer.nodeId);
+		return key ? { key, ...layer } : layer;
+	});
+}
+
+/**
+ * A frame designers made, read as a new Screen with its first Baseline, as
+ * Adopt makes it; or why the frame can't be a Screen. Its layers are all
+ * new to the Design Project, whatever keys they carry.
+ */
+export function adoptFrame(
+	project: DesignProject,
+	screen: ScreenFile,
+	frame: SyncedNode,
+	{
+		images = {},
+		screenFrames = {},
+		components,
+		designSystem,
+	}: {
+		/** Image `src` → the Figma image it's saved from. */
+		images?: Record<string, ImageRecord>;
+		screenFrames?: ScreenFrames;
+		components?: FigmaComponents;
+		/** The adopted variables and text styles, whose layers' bindings become tokens. */
+		designSystem?: DesignSystemBaseline;
+	} = {},
+):
+	| { source: string; baseline: Baseline; figmaOwned: FigmaOwnedLayer[] }
+	| { reason: string } {
+	const srcs = new Map(
+		Object.entries(images).map(([src, image]) => [image.imageHash, src]),
+	);
+	const { root, figmaOwned } = fromSyncedNode(frame, {
+		...resolveContext(project, screen),
+		componentOf: componentOfInstance(components),
+		keyFor: () => undefined,
+		tagFor: () => undefined,
+		srcFor: (imageHash) => srcs.get(imageHash),
+		baseElement: () => undefined,
+		screenOf: (frameId) => screenFrames[frameId],
+	});
+	if (!root) return { reason: figmaOwned[0]?.reason ?? "isn't a frame" };
+	if (designSystem) bindTokens(root, frame, designSystem, project.tokens);
+	assignElementKeys(root);
+	const source = printScreen(root);
+	const used = usedComponents(source, (name) => definitionOf(project, name));
+	return {
+		source,
+		baseline: {
+			frameId: frame.id,
+			source,
+			tokens: tokenRecord(project.tokens),
+			nodes: elementNodeMap(root, {}),
+			images,
+			...(used && { components: used }),
+		},
+		figmaOwned: ownedWithKeys(root, figmaOwned),
+	};
+}
+
+/** The prop a layer's first fill is, by kind of element. */
+const FILL_PROPS: Partial<Record<Kind, Prop>> = {
+	frame: "background-color",
+	rect: "background-color",
+	text: "color",
+	vector: "fill",
+};
+
+/**
+ * Writes a token's CSS variable wherever a layer is bound to its variable
+ * (or a text to its text style) and shows its value, so Push binds the
+ * layer to it again.
+ */
+function bindTokens(
+	root: Element,
+	frame: SyncedNode,
+	designSystem: DesignSystemBaseline,
+	tokens: Tokens,
+) {
+	const nodes = new Map<string, SyncedNode>();
+	const index = (node: SyncedNode) => {
+		nodes.set(node.id, node);
+		node.children?.forEach(index);
+	};
+	index(frame);
+	const tokenOf = new Map(
+		[
+			...Object.entries(designSystem.variables),
+			...Object.entries(designSystem.textStyles),
+		].map(([token, id]) => [id, token]),
+	);
+	const walk = (element: Element) => {
+		const node = element.nodeId ? nodes.get(element.nodeId) : undefined;
+		if (node && element.kind !== "instance" && element.kind !== "owned") {
+			const bind = (
+				prop: Prop | undefined,
+				id: string | undefined,
+				field = "",
+			) => {
+				const token = id && tokenOf.get(id);
+				if (!prop || !token) return;
+				const raw = `var(${cssVariable(token + field)})`;
+				const bound = { ...element, props: { ...element.props, [prop]: raw } };
+				if (
+					resolveProp(bound, prop, tokens) ===
+					resolveProp(element, prop, tokens)
+				)
+					element.props[prop] = raw;
+			};
+			const [fill] = node.fills === "mixed" ? [] : node.fills;
+			bind(
+				FILL_PROPS[element.kind],
+				fill?.type === "SOLID" ? fill.variable : undefined,
+			);
+			const bound = node.bindings ?? {};
+			if (element.kind === "frame") {
+				bind("gap", bound.itemSpacing);
+				bind("padding-top", bound.paddingTop);
+				bind("padding-right", bound.paddingRight);
+				bind("padding-bottom", bound.paddingBottom);
+				bind("padding-left", bound.paddingLeft);
+			}
+			if (element.kind !== "text" && element.kind !== "vector")
+				bind("border-radius", bound.cornerRadius);
+			if (element.kind === "text")
+				bind("font-size", bound.textStyle, ".fontSize");
+		}
+		element.children.forEach(walk);
+	};
+	walk(root);
 }
 
 /**

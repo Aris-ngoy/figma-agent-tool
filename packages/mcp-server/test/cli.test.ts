@@ -4,6 +4,8 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	type DesignerFile,
+	designerFile,
 	designMd,
 	loginScreen,
 	writeFixtureProject,
@@ -32,11 +34,12 @@ function freePort(): number {
 	return port as number;
 }
 
-/** Runs a push/pull/relink command with a fake plugin connecting to its bridge. */
+/** Runs a push/pull/relink/adopt command with a fake plugin connecting to its bridge. */
 async function withPlugin(
 	argv: string[],
 	cli: CliIo,
 	linkId: string | null = null,
+	designerFile?: DesignerFile,
 ) {
 	const port = freePort();
 	const running = runCli([...argv, "--port", String(port), "--wait", "5"], cli);
@@ -44,6 +47,7 @@ async function withPlugin(
 	for (let attempt = 0; !plugin && attempt < 50; attempt++) {
 		plugin = await connectFakePlugin(port, {
 			handshake: { ...handshake, linkId },
+			designerFile,
 		}).catch(() => undefined);
 		if (!plugin) await Bun.sleep(20);
 	}
@@ -252,5 +256,54 @@ describe("figma-agent-tool CLI", () => {
 			expect.stringMatching(/^Copied login \/ bold \(frame 100:\d+\)$/),
 			"Pushed Directions to “Sample App”, page “Explorations”.",
 		]);
+	});
+
+	test("adopt lists the Bridged File's frames, then adopts the ones named once confirmed", async () => {
+		const dir = join(await mkdtemp(join(tmpdir(), "cli-")), "design");
+		const listing = io();
+		expect(
+			(
+				await withPlugin(
+					["adopt", "--dir", dir],
+					listing.cli,
+					null,
+					designerFile,
+				)
+			).code,
+		).toBe(0);
+		expect(listing.out).toContain("  Home (75:1) on “Designs”, 393×852");
+		expect(existsSync(dir)).toBe(false);
+
+		const declined = io([false]);
+		const refused = await withPlugin(
+			["adopt", "Home", "--dir", dir],
+			declined.cli,
+			null,
+			designerFile,
+		);
+		expect(refused.code).toBe(1);
+		expect(declined.err.join("\n")).toContain("Not adopted");
+		expect(existsSync(dir)).toBe(false);
+
+		const { cli, out } = io();
+		const { code, plugin } = await withPlugin(
+			["adopt", "Home", "Task Details", "--dir", dir, "--yes"],
+			cli,
+			null,
+			designerFile,
+		);
+		expect(code).toBe(0);
+		expect(out).toContain("screens/home.html: frame 75:1");
+		expect(out).toContain(
+			"  Figma-owned Element e5: “Card” (75:5) has effects",
+		);
+		expect(out).toContain(
+			"components/app-avatar.json: Linked to “Avatar” (library)",
+		);
+		expect(out.at(-1)).toBe(
+			"Adopted “Sample App”: it's the Linked File, page “Designs” the Screens Page.",
+		);
+		expect(plugin?.screens.linkId).not.toBeNull();
+		expect(existsSync(join(dir, "screens/task-details.html"))).toBe(true);
 	});
 });

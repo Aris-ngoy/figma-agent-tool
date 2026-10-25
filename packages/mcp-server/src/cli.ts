@@ -22,6 +22,7 @@ import {
 	startPreview,
 } from "@figma-agent-tool/preview";
 import { DEFAULT_BRIDGE_PORT, type FileInfo } from "@figma-agent-tool/protocol";
+import { adoptFile } from "./adopt";
 import { type Bridge, BridgeRequestError, startBridge } from "./bridge";
 import {
 	DesignSyncError,
@@ -59,12 +60,15 @@ Commands:
                             Explorations Page instead
   pull                      Pull designers' edits into the Screens
   relink [--yes]            Link the Design Project to the Bridged File instead
+  adopt [<frame>...] [--yes]
+                            Start the Design Project from the Bridged File's
+                            frames (by name or ID); lists them without any
   mcp                       Run the MCP server on stdio
 
 Options:
   --dir <folder>            The Design Project (default: ${DEFAULT_DESIGN_DIR}, or FIGMA_AGENT_DESIGN_DIR)
-  --port <port>             For push, pull and relink: the plugin bridge's port (default ${DEFAULT_BRIDGE_PORT})
-  --wait <seconds>          For push, pull and relink: how long to wait for the plugin (default 60)
+  --port <port>             For push, pull, relink and adopt: the plugin bridge's port (default ${DEFAULT_BRIDGE_PORT})
+  --wait <seconds>          For push, pull, relink and adopt: how long to wait for the plugin (default 60)
 `;
 
 type Args = { positional: string[]; flags: Map<string, string | true> };
@@ -131,6 +135,10 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
 			case "relink":
 				return await withBridge(flags, env, io, (bridge) =>
 					relink(dir, bridge, flags.has("yes"), io),
+				);
+			case "adopt":
+				return await withBridge(flags, env, io, (bridge) =>
+					adopt(dir, bridge, rest, flags.has("yes"), io),
 				);
 			case "mcp":
 				await import("./main");
@@ -450,6 +458,56 @@ async function relink(
 	}
 	const { linkedFile } = await relinkDesignProject(dir, bridge);
 	io.out(`Linked to “${linkedFile.name}”.`);
+	return 0;
+}
+
+async function adopt(
+	dir: string,
+	bridge: Bridge,
+	frames: string[],
+	yes: boolean,
+	io: CliIo,
+): Promise<number> {
+	let result = await adoptFile(dir, bridge, { frames });
+	if (result.status === "choose_frames") {
+		io.out(`Top-level frames of “${result.file.name}”:`);
+		for (const { id, name, page, width, height } of result.frames)
+			io.out(`  ${name} (${id}) on “${page}”, ${width}×${height}`);
+		io.out("Adopt some with: adopt <frame>... (names or IDs)");
+		return 0;
+	}
+	if (result.status === "confirm_adopt") {
+		const screens = result.screens
+			.map(({ screen, frame }) => `“${frame}” as ${screen}`)
+			.join(", ");
+		const question = `Adopt “${result.file.name}” into ${resolve(dir)}, making it the Linked File, with ${screens}?`;
+		if (!(yes || (await ask(io, question)))) {
+			io.err(
+				`${question}\nNot adopted. Run adopt again with --yes to confirm.`,
+			);
+			return 1;
+		}
+		result = await adoptFile(dir, bridge, { frames, confirm: true });
+	}
+	if (result.status !== "adopted") return 1;
+	const { designSystem } = result;
+	io.out(`DESIGN.md: ${designSystem.tokens.length} tokens`);
+	for (const note of designSystem.notAdopted)
+		io.out(`  left in Figma: ${note}`);
+	for (const { component, name, key } of result.components)
+		io.out(
+			`components/${component}.json: Linked to “${name}”${key ? " (library)" : ""}`,
+		);
+	for (const { screen, frameId, figmaOwned } of result.screens) {
+		io.out(`screens/${screen}.html: frame ${frameId}`);
+		for (const layer of figmaOwned)
+			io.out(
+				`  Figma-owned Element ${layer.key}: “${layer.name}” (${layer.nodeId}) ${layer.reason}`,
+			);
+	}
+	io.out(
+		`Adopted “${result.linkedFile.name}”: it's the Linked File, page “${result.screensPage.name}” the Screens Page.`,
+	);
 	return 0;
 }
 

@@ -1,3 +1,4 @@
+export * from "./designer-file";
 export * from "./fake-figma";
 
 // A fixture Design Project both test seams use: the design-project tests,

@@ -224,20 +224,41 @@ async function findLinkedComponent({
 			`Linked Component ${component}: no component with ${key ? `key "${key}" in this file or its enabled libraries` : `ID ${id} in this file`}, so nothing was pushed. Fix components/${component}.json (a published component's or component set's key, or the node ID of one in this file).`,
 		);
 	}
-	// A variant stands for its component set.
-	const root = (
-		node.parent?.type === "COMPONENT_SET" ? node.parent : node
-	) as ComponentRoot;
+	const root = componentRootOf(node as ComponentRoot);
+	return { component, root, info: { component, ...linkedInfo(root) } };
+}
+
+/** A variant stands for its component set. */
+const componentRootOf = (node: ComponentRoot): ComponentRoot =>
+	(node.parent?.type === "COMPONENT_SET" ? node.parent : node) as ComponentRoot;
+
+/** What a Linked Component records of its component set (or lone component). */
+function linkedInfo(
+	root: ComponentRoot,
+): Omit<LinkedComponentInfo, "component"> {
 	return {
-		component,
-		root,
-		info: {
-			component,
-			componentId: root.id,
-			...(root.key && { key: root.key }),
-			...componentDefinitions(root),
-		},
+		componentId: root.id,
+		...(root.key && { key: root.key }),
+		...componentDefinitions(root),
 	};
+}
+
+export async function readComponents({
+	ids,
+}: CommandParams<"read_components">): Promise<
+	CommandResult<"read_components">
+> {
+	const found = await Promise.all(
+		ids.map(async (id) => {
+			const node = await figma.getNodeByIdAsync(id);
+			if (!isComponentRoot(node)) return [];
+			const root = componentRootOf(node as ComponentRoot);
+			return [
+				{ id, name: root.name, remote: root.remote, ...linkedInfo(root) },
+			];
+		}),
+	);
+	return { components: found.flat() };
 }
 
 /** A component set's (or lone component's) properties, as Screens set them. */

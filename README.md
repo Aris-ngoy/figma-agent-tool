@@ -89,8 +89,9 @@ Every tool has a CLI command doing the same thing (`bun packages/mcp-server/src/
 | `push` | `push [<screen>…] [--directions] [--yes]` | Screens → frames on the Screens Page, DESIGN.md → variables and text styles, all updated in place. With `directions`, copies the Screens' Directions to the Explorations Page instead. |
 | `pull` | `pull` | Designers' edits → the Screens and DESIGN.md, merged against the Baseline. |
 | `relink_file` | `relink [--yes]` | Link the Bridged File instead of the Linked File. |
+| `adopt_file` | `adopt [<frame>…] [--yes]` | Start the Design Project from an existing Figma file: its variables and text styles, and the frames chosen. |
 
-The CLI's `push`, `pull` and `relink` host the plugin bridge while they run, so they can't run while the MCP server holds its port; use the MCP tools then.
+The CLI's `push`, `pull`, `relink` and `adopt` host the plugin bridge while they run, so they can't run while the MCP server holds its port; use the MCP tools then.
 
 ### Screens
 
@@ -165,6 +166,14 @@ A **Direction** is an alternative version of a Screen, written next to it in `sc
 - A layer the Screen Subset can't express (effects, gradients, boolean shapes, stars, frames without auto layout, rotated or hidden layers, …) becomes a **Figma-owned Element**: `<figma-owned data-key="e8" data-name="Star" style="width:40px; height:38px"></figma-owned>`, at the layer's place and size. Pull lists each with the reason and caches a PNG export of its layer in `sync/exports/`, fetched again only when a designer changed it. The Preview and Render show that export, and say when it's stale (the Screen resized the element since) or missing. The Agent can move, resize, rename (`data-name`) or delete the element, and Push does the same to the layer, never touching its content; it holds nothing and takes only `width`, `height`, `flex`, `align-self`, `position`, `left` and `top`. Push refuses one Pull didn't make (its `data-key` names no layer).
 - Push turns each Prototype Link into its layer's on-click NAVIGATE, and Pull turns on-click NAVIGATEs to a Screen's frame back into `href` and `data-transition`, merged like any other change. Every other interaction (hover, drag, overlays, other actions, custom easing curves, Motion) is Figma-only: Pull leaves it out of the Screen and Push leaves it as the designers made it, as it does every reaction on a Screen's own frame. `trace_flow` and the handoff tools work on the pushed frames like on any others. A Push of only some Screens is refused when they link to a Screen that has no frame yet.
 - `get_status` reports the Design Project, its Linked File, Screens and Components with Unpulled Changes or Sync Conflicts, and the Design System's (`designSystem`).
+
+### Adopting an existing file
+
+**Adopt** starts a Design Project from a Figma file designers already made, which becomes its Linked File. `adopt_file` without `frames` (CLI `adopt`) lists the Bridged File's top-level frames by page; with them (names or node IDs) it says what it would adopt and asks to confirm (`status: "confirm_adopt"`, then `confirm: true`; CLI `--yes`). Nothing is written before that, and Adopt is refused into a folder that already has a Design Project, or for a frame without auto layout.
+
+- The variables of the file's largest color and number collection become DESIGN.md tokens (`Color/Primary` → `colors.primary`; numbers are `rounded` when named or scoped as radii, `spacing` otherwise), aliases references, the collection's other modes `modes.yaml`, and every text style a `typography` token. Push keeps designers' names for them. What DESIGN.md can't hold as Figma has it (string or boolean variables, other collections) stays in Figma and is listed.
+- Each frame becomes `screens/<frame-name>.html`, with `var(--…)` wherever a layer is bound to an adopted variable or text style and its images in `assets/`. Instances become Linked Components (`components/<name>.json`: the file's own components by node ID, a library's by key), on-click NAVIGATEs between adopted frames Prototype Links, and the rest Figma-owned Elements with cached exports.
+- Frames stay where they are: the first one's page is the Screens Page, and pages and frames not chosen stay the designers'. A Push straight after Adopt changes nothing in Figma but the layers' keys, and a Pull finds nothing to merge.
 
 ### The Design System
 

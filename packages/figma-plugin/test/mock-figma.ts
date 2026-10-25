@@ -628,6 +628,7 @@ export function installMockFigma(
 		const inSet = () =>
 			(node.parent as MockNode | undefined)?.type === "COMPONENT_SET";
 		node.key = "";
+		node.remote = false;
 		Object.defineProperty(node, "componentPropertyDefinitions", {
 			get: () => {
 				if (node.type === "COMPONENT" && inSet())
@@ -1270,6 +1271,8 @@ function toFigmaNode(node: SerializedNode): MockNode {
 	if (node.component) {
 		const { key, description, properties, variantProperties } = node.component;
 		mock.key = key;
+		// The fixture's components are the file's own.
+		mock.remote = false;
 		mock.description = description ?? "";
 		if (node.type === "COMPONENT") {
 			mock.variantProperties = variantProperties ?? null;

@@ -401,3 +401,42 @@ describe("push_screens with Components", () => {
 		expect(figma.undoCommits).toBe(2);
 	});
 });
+
+describe("read_components", () => {
+	test("reads the component set (or lone component) of each node asked for, as Adopt links it", async () => {
+		installMockFigma(document);
+		const result = await send("read_components", {
+			ids: ["3:3", "2:1", "1:2", "9:99"],
+		});
+		expect(result).toEqual({
+			components: [
+				{
+					id: "3:3",
+					name: "Chip",
+					remote: false,
+					componentId: "3:1",
+					key: "ch1p",
+					properties: {
+						size: {
+							type: "VARIANT",
+							default: "Small",
+							options: ["Small", "Large"],
+						},
+					},
+					variants: ["size=Small", "size=Large"],
+				},
+				{
+					id: "2:1",
+					name: "Button",
+					remote: false,
+					componentId: "2:1",
+					key: "c0ffee",
+					properties: {
+						label: { type: "TEXT", default: "Button" },
+						disabled: { type: "BOOLEAN", default: "false" },
+					},
+				},
+			],
+		});
+	});
+});

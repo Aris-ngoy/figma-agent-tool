@@ -36,6 +36,7 @@ import {
 	linkFile,
 	pushExplorations,
 	pushScreens,
+	readComponents,
 	readScreens,
 } from "./screens";
 import { serializeNode } from "./serialize";
@@ -129,6 +130,7 @@ const implementations: CommandImplementations = {
 	push_screens: pushScreens,
 	push_explorations: pushExplorations,
 	read_screens: readScreens,
+	read_components: readComponents,
 	read_design_system: readDesignSystem,
 	link_file: linkFile,
 	get_image: getImage,

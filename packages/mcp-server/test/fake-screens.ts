@@ -6,6 +6,7 @@ import {
 	applyScreenTree,
 	createFakeComponents,
 	createFakeDesignSystem,
+	type DesignerFile,
 } from "@figma-agent-tool/design-project/fixtures";
 import type {
 	BridgeError,
@@ -30,6 +31,8 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 	const designSystem = createFakeDesignSystem(nextId);
 	const components = createFakeComponents(nextId);
 	let linkId: string | null = null;
+	/** Whether designers made a Design System here, which get_design_system then lists. */
+	let designed = false;
 
 	function frameOf(screen: string, frameId: string) {
 		return (
@@ -69,6 +72,41 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 		get linkId() {
 			return linkId;
 		},
+		/**
+		 * A file designers made without the tool, for Adopt, in place of the
+		 * fixture document: its frames on one page, its variables, text styles
+		 * and images, and the components its instances are of.
+		 */
+		addDesignerFile(file: DesignerFile) {
+			const { page } = file;
+			doc.currentPageId = page.id;
+			doc.pages.splice(0, doc.pages.length, {
+				...page,
+				children: file.frames.map(({ id, name, x, y, width, height }) => ({
+					id,
+					name,
+					type: "FRAME",
+					x,
+					y,
+					width,
+					height,
+				})),
+				flows: [],
+			});
+			for (const frame of file.frames)
+				frames.set(frame.id, {
+					screen: "",
+					pageId: page.id,
+					frame: structuredClone(frame),
+				});
+			designSystem.seed(file);
+			designed = true;
+			for (const { componentId, ...component } of file.components)
+				components.addLibraryComponent({ componentId, ...component });
+			for (const [hash, bytes] of Object.entries(file.images))
+				images.set(hash, bytes);
+		},
+
 		/** A Screen's frame, as Figma has it now. */
 		frame(screen: string): SyncedNode {
 			const entry = [...frames.values()].find((e) => e.screen === screen);
@@ -206,6 +244,23 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 					};
 				}),
 			};
+		},
+
+		/** Only once designers made a Design System; the recorded fixture otherwise. */
+		get_design_system(): CommandResult<"get_design_system"> | undefined {
+			if (!designed) return undefined;
+			const { collections, textStyles } = designSystem.listed();
+			return {
+				components: [],
+				styles: { paint: [], text: textStyles, effect: [] },
+				collections,
+			};
+		},
+
+		read_components({
+			ids,
+		}: CommandParams<"read_components">): CommandResult<"read_components"> {
+			return { components: components.read(ids) };
 		},
 
 		read_design_system(

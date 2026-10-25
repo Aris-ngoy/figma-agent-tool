@@ -4,6 +4,7 @@
 // plugin (MCP tests) and the design-project tests share it; the plugin's
 // own tests check the real thing against the mocked `figma` global.
 import {
+	type DesignSystem,
 	type DesignSystemPush,
 	FLOAT_BINDINGS,
 	type LinkedComponentInfo,
@@ -74,6 +75,7 @@ export function applyScreenTree(
 	const instance = (spec: ScreenNode): SyncedNode => {
 		const existing = spec.id ? old.get(spec.id) : undefined;
 		const reuse = existing?.type === "INSTANCE" ? existing : undefined;
+		if (reuse) placed.add(reuse.id);
 		if (!components) throw new Error("No components to make instances of");
 		const node: SyncedNode = {
 			...(reuse
@@ -93,8 +95,7 @@ export function applyScreenTree(
 			name: spec.name ?? (spec.component as string),
 			x: spec.position?.x ?? reuse?.x ?? 0,
 			y: spec.position?.y ?? reuse?.y ?? 0,
-			width: spec.width,
-			height: spec.height,
+			...size(spec, reuse, false),
 			sizing: spec.sizing,
 			instance: components.instance(
 				spec.component as string,
@@ -110,6 +111,7 @@ export function applyScreenTree(
 		if (spec.type === "INSTANCE") return instance(spec);
 		const existing = spec.id ? old.get(spec.id) : undefined;
 		const reuse = existing?.type === spec.type ? existing : undefined;
+		if (reuse) placed.add(reuse.id);
 		const node: SyncedNode = {
 			id: reuse?.id ?? nextId(),
 			key: spec.key,
@@ -118,8 +120,7 @@ export function applyScreenTree(
 			visible: true,
 			x: spec.position?.x ?? reuse?.x ?? 0,
 			y: spec.position?.y ?? reuse?.y ?? 0,
-			width: spec.width,
-			height: spec.height,
+			...size(spec, reuse, isRoot),
 			rotation: 0,
 			opacity: spec.opacity ?? 1,
 			sizing: isRoot ? { horizontal: "FIXED", vertical: "FIXED" } : spec.sizing,
@@ -176,6 +177,26 @@ export function applyScreenTree(
 }
 
 /**
+ * A pushed layer's size: as the tree gives it on fixed axes (a Screen's
+ * frame is fixed), else as the layer has it, which Figma's layout keeps.
+ */
+function size(
+	spec: ScreenNode,
+	reuse: SyncedNode | undefined,
+	isRoot: boolean,
+): { width: number; height: number } {
+	const fixed = (sizing: string) => isRoot || !reuse || sizing === "FIXED";
+	return {
+		width: fixed(spec.sizing.horizontal)
+			? spec.width
+			: (reuse as SyncedNode).width,
+		height: fixed(spec.sizing.vertical)
+			? spec.height
+			: (reuse as SyncedNode).height,
+	};
+}
+
+/**
  * Sets the Prototype Link of each layer a tree pushed (its frame's own
  * reactions are the designers'), as the Plugin does once every frame of a
  * push is in place: links go to `frameOf` their Screen.
@@ -224,7 +245,12 @@ export function applyPrototypeLinks(
 export type FakeComponents = ReturnType<typeof createFakeComponents>;
 
 /** A component in the file or a library, for a Linked Component to find. */
-export type FakeLibraryComponent = Omit<LinkedComponentInfo, "component">;
+export type FakeLibraryComponent = Omit<LinkedComponentInfo, "component"> & {
+	/** Its name in Figma; "Component" when not given. */
+	name?: string;
+	/** A library's, not the file's own. */
+	remote?: boolean;
+};
 
 /**
  * A file's Defined Components, as Push makes them and designers edit them,
@@ -274,6 +300,16 @@ export function createFakeComponents(nextId: () => string) {
 			return node;
 		},
 
+		/** What read_components finds for each node ID: a variant stands for its set. */
+		read(ids: string[]) {
+			return ids.flatMap((id) => {
+				const found = library.get(id.split("/")[0] as string);
+				if (!found || found.componentId !== id.split("/")[0]) return [];
+				const { name = "Component", remote = false, ...info } = found;
+				return [{ id, name, remote, ...structuredClone(info) }];
+			});
+		},
+
 		/** Finds a Linked Component's component; undefined when it isn't there. */
 		resolve({
 			component,
@@ -287,7 +323,8 @@ export function createFakeComponents(nextId: () => string) {
 			const found = library.get(key ?? id ?? "");
 			if (!found) return undefined;
 			linked.set(component, found);
-			return { component, ...structuredClone(found) };
+			const { name: _, remote: __, ...info } = structuredClone(found);
+			return { component, ...info };
 		},
 
 		/** What an instance of a Component with these properties reads as. */
@@ -405,7 +442,7 @@ function bind(
 
 export type FakeDesignSystem = ReturnType<typeof createFakeDesignSystem>;
 
-type FakeVariable = {
+export type FakeVariable = {
 	id: string;
 	name: string;
 	type: "COLOR" | "FLOAT";
@@ -426,6 +463,7 @@ export function createFakeDesignSystem(nextId: () => string) {
 	/** Token path → ID, from the last Push. */
 	const ids = new Map<string, string>();
 	let collectionId: string | undefined;
+	let collectionName = "Design System";
 	/** The collection's modes other than the default, by name → ID. */
 	const modes = new Map<string, string>();
 	let defaultMode: { id: string; name: string } | undefined;
@@ -474,6 +512,71 @@ export function createFakeDesignSystem(nextId: () => string) {
 			const found = [...textStyles.values()].find((s) => s.name === name);
 			if (!found) throw new Error(`No text style ${name}`);
 			return found;
+		},
+
+		/** Variables and text styles designers made, in a collection with these modes (the default first). */
+		seed({
+			collection,
+			variables: made,
+			textStyles: styles,
+		}: {
+			collection: {
+				id: string;
+				name: string;
+				modes: { id: string; name: string }[];
+			};
+			variables: FakeVariable[];
+			textStyles: TextStyleInfo[];
+		}) {
+			collectionId = collection.id;
+			collectionName = collection.name;
+			const [first, ...others] = collection.modes;
+			defaultMode = first && { ...first };
+			for (const { id, name } of others) modes.set(name, id);
+			for (const variable of made)
+				variables.set(variable.id, structuredClone(variable));
+			for (const style of styles)
+				textStyles.set(style.id, structuredClone(style));
+		},
+
+		/** The collection and text styles as get_design_system lists them. */
+		listed(): Pick<DesignSystem, "collections"> & {
+			textStyles: TextStyleInfo[];
+		} {
+			const modeList = [
+				defaultMode ?? { id: "", name: "Mode 1" },
+				...[...modes].map(([name, id]) => ({ id, name })),
+			];
+			return {
+				collections: collectionId
+					? [
+							{
+								id: collectionId,
+								name: collectionName,
+								modes: modeList,
+								defaultMode: modeList[0]?.name as string,
+								variables: [...variables.values()].map((variable) => ({
+									id: variable.id,
+									name: variable.name,
+									type: variable.type,
+									valuesByMode: Object.fromEntries(
+										modeList.map(({ id, name }, index) => [
+											name,
+											structuredClone(
+												index === 0
+													? variable.value
+													: (variable.modes[id] ?? variable.value),
+											),
+										]),
+									),
+								})),
+							},
+						]
+					: [],
+				textStyles: [...textStyles.values()].map((style) =>
+					structuredClone(style),
+				),
+			};
 		},
 
 		push(spec: DesignSystemPush): PushedDesignSystem {

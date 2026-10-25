@@ -19,6 +19,7 @@ import {
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { adoptFile } from "./adopt";
 import { writePngArtifact } from "./artifacts";
 import { type Bridge, BridgeRequestError } from "./bridge";
 import {
@@ -345,6 +346,41 @@ export function registerDesignTools(
 				"merge into components/; Linked Components' own design is never pulled.",
 		},
 		async () => jsonResult(await pullDesignProject(designDir, bridge)),
+		EXPECTED,
+	);
+
+	registerGuardedTool(
+		server,
+		"adopt_file",
+		{
+			description:
+				`Adopt the Bridged File: start the Design Project in ${designDir}/ from frames designers ` +
+				"made, which makes the file the Linked File. Without `frames`, lists the file's top-level " +
+				"frames by page (status choose_frames): ask the user which to adopt. With them, says what " +
+				"would be adopted (status confirm_adopt): ask the user to confirm the file and frames, " +
+				"then call again with confirm. Then the file's variables and text styles become DESIGN.md " +
+				"(other variable modes modes.yaml), each frame a Screen in screens/ bound to those tokens, " +
+				"the components its instances are of Linked Components (components/<name>.json), " +
+				"on-click NAVIGATEs between adopted frames Prototype Links, and layers the Screen Subset " +
+				"can't express Figma-owned Elements. Frames stay where they are (the first one's page is " +
+				"the Screens Page); pages and frames not chosen stay the designers'. A Push straight " +
+				"after changes nothing in Figma. Refused into a folder that already has a Design Project, " +
+				"or for a frame that isn't an auto-layout frame.",
+			inputSchema: {
+				frames: z
+					.array(z.string().min(1))
+					.optional()
+					.describe(
+						"Top-level frames to adopt as Screens, by name or node ID.",
+					),
+				confirm: z
+					.boolean()
+					.default(false)
+					.describe("The user confirmed the file and frames."),
+			},
+		},
+		async ({ frames, confirm }) =>
+			jsonResult(await adoptFile(designDir, bridge, { frames, confirm })),
 		EXPECTED,
 	);
 

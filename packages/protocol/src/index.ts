@@ -2327,6 +2327,23 @@ export const commands = {
 				.default([]),
 		}),
 	},
+	// Adopt: the component sets (or lone components) of nodes instances come
+	// from (a variant stands for its set), as a Linked Component records
+	// them, with their name and whether they're a library's. Nodes that
+	// aren't components are left out.
+	read_components: {
+		params: z.object({ ids: z.array(z.string().min(1)) }),
+		result: z.object({
+			components: z.array(
+				LinkedComponentInfo.omit({ component: true }).extend({
+					// The node ID asked for.
+					id: z.string(),
+					name: z.string(),
+					remote: z.boolean(),
+				}),
+			),
+		}),
+	},
 	// Stores a Design Project's Link ID in the file.
 	link_file: {
 		params: z.object({ linkId: z.string().min(1) }),
