@@ -3,7 +3,8 @@
 // System's tokens as CSS variables (in the Mode asked for), the Screen Size, and a reset that makes
 // CSS behave like Figma's auto layout (no margins or inheritance, children
 // don't shrink, counter-axis alignment starts at flex-start, absolute
-// offsets are from the parent, vectors don't clip their strokes). Figma-owned
+// offsets are from the parent, vectors don't clip their strokes, links
+// aren't underlined). Figma-owned
 // Elements show the export Pull cached of their layer.
 import {
 	checkScreen,
@@ -27,6 +28,8 @@ const RESET = `*, *::before, *::after {
 * { position: relative; }
 html { background: transparent; }
 body { overflow: hidden; }
+a { text-decoration: none; }
+[href] { cursor: pointer; }
 img { display: block; object-fit: cover; }
 svg { display: block; overflow: visible; }
 figma-owned { display: block; }`;

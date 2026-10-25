@@ -1,13 +1,20 @@
 // Screens ↔ the node trees the Plugin applies and reads. Push turns a
 // Screen into ScreenNodes; Pull turns the SyncedNodes it reads back into
 // elements, and is its exact inverse for everything in the Screen Subset.
-import type {
-	Paint,
-	ScreenFill,
-	ScreenNode,
-	SyncedNode,
+import {
+	type Paint,
+	prototypeLink,
+	type ScreenFill,
+	type ScreenNode,
+	type SyncedNode,
 } from "@figma-agent-tool/protocol";
 import { elementBindings, type TokenBindings } from "./design-system";
+import {
+	formatTransition,
+	linkedScreen,
+	parseTransition,
+	screenHref,
+} from "./link";
 import { formatPath, parsePath } from "./path";
 import {
 	defaultName,
@@ -140,6 +147,8 @@ function convert(
 	const bindings =
 		context.bindings && elementBindings(element, r, context.bindings);
 	if (bindings) node.bindings = bindings;
+	const link = screenLink(element);
+	if (link) node.link = link;
 	if (element.kind !== "text") {
 		node.name = element.name ?? defaultName(element, context, isRoot);
 	} else if (element.name !== undefined) {
@@ -189,6 +198,17 @@ function convert(
 		);
 	}
 	return node;
+}
+
+/** A checked element's Prototype Link, as Push sends it. */
+function screenLink(element: Element): ScreenNode["link"] {
+	const screen = element.href && linkedScreen(element.href);
+	if (!screen) return undefined;
+	const parsed = parseTransition(element.transition);
+	return {
+		screen,
+		transition: "transition" in parsed ? parsed.transition : null,
+	};
 }
 
 function fills(
@@ -258,6 +278,8 @@ export type PullContext = ResolveContext & {
 	srcFor: (imageHash: string) => string | undefined;
 	/** The Baseline's version of an element, kept when its layer can't be read. */
 	baseElement: (key: string) => Element | undefined;
+	/** The Screen a frame is (or was) the frame of, for Prototype Links. */
+	screenOf: (frameId: string) => string | undefined;
 };
 
 /** A layer Pull can't express in the Screen Subset, which stays Figma's. */
@@ -357,6 +379,7 @@ function read(
 	set("opacity", node.opacity !== 1 ? String(round(node.opacity)) : undefined);
 	const isDefaultName = node.name === defaultName(element, context, isRoot);
 	if (!isDefaultName) element.name = node.name;
+	if (!isRoot) readLink(node, element, context);
 	if (kind === "frame") {
 		const direction = props["flex-direction"] ?? "row";
 		for (const child of node.children ?? []) {
@@ -389,6 +412,21 @@ function figmaOwnedElement(
 		children: [],
 		nodeId: node.id,
 	};
+}
+
+/** The layer's Prototype Link: its first on-click NAVIGATE to a Screen's frame. */
+function readLink(node: SyncedNode, element: Element, context: PullContext) {
+	for (const reaction of node.reactions ?? []) {
+		const link = prototypeLink(reaction);
+		const screen = link && context.screenOf(link.destinationId);
+		if (!link || !screen) continue;
+		element.href = screenHref(screen);
+		const transition = formatTransition(link.transition);
+		if (transition) element.transition = transition;
+		return;
+	}
+	// An <a> without its link is the element it is.
+	if (element.tag === "a") element.tag = DEFAULT_TAGS[element.kind];
 }
 
 function readPosition(

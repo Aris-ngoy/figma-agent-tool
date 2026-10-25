@@ -41,8 +41,11 @@ import {
 	readExports,
 	readLink,
 	type ScreenFile,
+	type ScreenFrames,
 	saveExports,
 	saveImage,
+	screenFramesOf,
+	screenLinks,
 	screenPush,
 	type Tokens,
 	tokenBindings,
@@ -179,12 +182,15 @@ export async function pushDesignProject(
 		);
 	}
 	const baselines = linkedBaselines(await readBaselines(project), linked);
-	const frames = await readFrames(bridge, screens, baselines);
+	// Every Screen's frame, since the pushed ones may link to any of them.
+	const frames = await readFrames(bridge, project.screens, baselines);
+	const screenFrames = screenFramesOf(baselines, frames);
 	const unpulled = screensWithUnpulledChanges(
 		project,
 		screens,
 		baselines,
 		frames,
+		screenFrames,
 	);
 	if (unpulled.length > 0) {
 		throw new DesignSyncError(
@@ -228,6 +234,15 @@ export async function pushDesignProject(
 				`Push refused: ${screen.file} has Figma-owned Elements (${unlinked.join(", ")}) whose layers aren't in its frame in Figma${frame ? "" : ", which was deleted"}. Only Pull makes Figma-owned Elements, and Push can't recreate a designer's layer: delete them from the Screen (or undo the edit that changed their data-key).`,
 			);
 		}
+		const unpushed = screenLinks(root).filter(
+			(target) =>
+				!screens.some((s) => s.name === target) && !frames.has(target),
+		);
+		if (unpushed.length > 0) {
+			throw new DesignSyncError(
+				`Push refused: ${screen.file} links to ${unpushed.join(", ")}, which ${unpushed.length === 1 ? "has" : "have"} no frame in Figma yet. Push ${unpushed.length === 1 ? "it" : "them"} too.`,
+			);
+		}
 		const push = await screenPush(project, screen, root, baseline, bindings);
 		Object.assign(images, push.images);
 		pushes.push({
@@ -251,6 +266,12 @@ export async function pushDesignProject(
 		})),
 		images,
 		designSystem,
+		frames: Object.fromEntries(
+			[...frames]
+				.filter(([name]) => !screens.some((s) => s.name === name))
+				.map(([name, frame]) => [name, frame.id]),
+		),
+		screenFrames: Object.keys(screenFrames),
 	});
 	await writeLink(project, { ...link, screensPage: result.page });
 	if (result.designSystem) {
@@ -320,12 +341,15 @@ function screensWithUnpulledChanges(
 	screens: ScreenFile[],
 	baselines: Map<string, Baseline>,
 	frames: Map<string, SyncedNode>,
+	screenFrames: ScreenFrames,
 ): ScreenFile[] {
 	return screens.filter((screen) => {
 		const baseline = baselines.get(screen.name);
 		const frame = frames.get(screen.name);
 		return (
-			baseline && frame && hasUnpulledChanges(project, screen, baseline, frame)
+			baseline &&
+			frame &&
+			hasUnpulledChanges(project, screen, baseline, frame, screenFrames)
 		);
 	});
 }
@@ -490,6 +514,7 @@ export async function pullDesignProject(
 		screens,
 		linkedBaselines(baselines, linked),
 	);
+	const screenFrames = screenFramesOf(baselines, frames);
 	const results: PullResult["screens"] = [];
 	for (const screen of checked) {
 		const stored = baselines.get(screen.name) as Baseline;
@@ -521,6 +546,7 @@ export async function pullDesignProject(
 			baseline,
 			frame,
 			fetched,
+			screenFrames,
 		);
 		if (pulled.source !== undefined)
 			await writeFile(screen.path, pulled.source);
@@ -636,6 +662,7 @@ export async function designProjectStatus(
 				project.screens,
 				baselines,
 				frames,
+				screenFramesOf(baselines, frames),
 			).map((screen) => screen.name);
 		} catch {
 			unpulledChanges = null;

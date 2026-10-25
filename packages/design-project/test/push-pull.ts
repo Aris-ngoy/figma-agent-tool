@@ -20,6 +20,7 @@ export async function push(
 	project: DesignProject,
 	screen: ScreenFile,
 	previous?: { frame: SyncedNode; baseline: Baseline },
+	nextId?: () => string,
 ) {
 	const { source } = assignKeys(screen.source);
 	const keyed = { ...screen, source };
@@ -33,7 +34,7 @@ export async function push(
 	);
 	let id = previous ? 100 : 0;
 	const frame = applyScreenTree(tree, previous?.frame, {
-		nextId: () => `9:${++id}`,
+		nextId: nextId ?? (() => `9:${++id}`),
 		imageHash: (name) => `hash-of-${name}`,
 		remove,
 	});
@@ -56,8 +57,9 @@ export function pull(
 	screen: ScreenFile,
 	baseline: Baseline,
 	frame: SyncedNode,
+	screenFrames: Record<string, string> = {},
 ) {
 	const { root } = checkScreen(project, screen);
 	if (!root) throw new Error("Screen doesn't check");
-	return pullScreen(project, screen, root, baseline, frame);
+	return pullScreen(project, screen, root, baseline, frame, {}, screenFrames);
 }

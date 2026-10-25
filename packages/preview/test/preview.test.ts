@@ -11,6 +11,7 @@ import {
 	writeBaseline,
 } from "@figma-agent-tool/design-project";
 import {
+	linkedScreens,
 	loginScreen,
 	logoPng,
 	writeFixtureProject,
@@ -51,6 +52,31 @@ describe("Preview", () => {
 		expect(html).toContain("--typography-title-font-size: 28px;");
 		expect(html).toContain("body { width: 393px; height: 852px; }");
 		expect(html).toContain('<base href="/files/screens/">');
+	});
+
+	test("follows Prototype Links to their Screen, in the same Mode", async () => {
+		const { server } = await preview({
+			"screens/home.html": linkedScreens.home as string,
+			"screens/signup.html": linkedScreens.signup as string,
+			"modes.yaml": modes,
+		});
+		const html = await (
+			await fetch(`${server.url}screens/home?mode=Dark`)
+		).text();
+		expect(html).toContain('<a href="signup.html" data-transition="push left"');
+		expect(html).toContain("a { text-decoration: none; }");
+		const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(
+			([, body]) => body as string,
+		);
+		const links = scripts.find((body) => body.includes('closest("[href]")'));
+		expect(links).toContain(
+			'"/screens/" + encodeURIComponent(screen) + location.search',
+		);
+		// It runs in the browser: here it must at least parse.
+		expect(() => new Function(links as string)).not.toThrow();
+		// The page a link goes to.
+		const signup = await fetch(`${server.url}screens/signup?mode=Dark`);
+		expect(signup.status).toBe(200);
 	});
 
 	test("sizes a Screen that overrides the Screen Size", async () => {

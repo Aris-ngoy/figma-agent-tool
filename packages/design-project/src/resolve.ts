@@ -2,6 +2,7 @@
 // units dropped, defaults filled in. Pull compares elements this way, so
 // `var(--colors-primary)` in the file and `#3366ff` read from Figma match.
 import type { Tokens } from "./design-md";
+import { linkedScreen, resolveTransition } from "./link";
 import { formatPath, parsePath, transformPath } from "./path";
 import type { ScreenSize } from "./project";
 import type { Element, VectorPath } from "./screen";
@@ -20,7 +21,7 @@ export type ResolveContext = {
 	screenSize: ScreenSize;
 };
 
-/** Own fields (not children): `@kind`, `@name`, `@text`, `@src` and props. */
+/** Own fields (not children): `@kind`, `@name`, `@text`, `@src`, a link's `@href` and `@transition`, and props. */
 export type ResolvedElement = Record<string, string>;
 
 export function resolveElement(
@@ -34,6 +35,10 @@ export function resolveElement(
 	};
 	if (element.kind === "text") resolved["@text"] = element.text ?? "";
 	if (element.kind === "image") resolved["@src"] = element.src ?? "";
+	if (element.href !== undefined) {
+		resolved["@href"] = linkedScreen(element.href) ?? element.href;
+		resolved["@transition"] = resolveTransition(element.transition);
+	}
 	for (const prop of PROP_NAMES) {
 		if (!(PROPS[prop].kinds as string[]).includes(element.kind)) continue;
 		resolved[prop] = resolveProp(element, prop, context.tokens);

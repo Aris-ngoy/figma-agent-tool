@@ -4,11 +4,16 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
 	layerByKey,
+	linkedScreens,
 	logoPng,
 	widerScreens,
 	writeFixtureProject,
 } from "@figma-agent-tool/design-project/fixtures";
-import type { SyncedNode } from "@figma-agent-tool/protocol";
+import type {
+	PrototypeGraph,
+	Reaction,
+	SyncedNode,
+} from "@figma-agent-tool/protocol";
 import { handshake } from "@figma-agent-tool/protocol/fixtures";
 import { lint } from "@google/design.md/linter";
 import { startHarness } from "./harness";
@@ -1022,5 +1027,230 @@ describe("Modes", () => {
 				},
 			],
 		});
+	});
+});
+
+describe("Prototype Links", () => {
+	const linkedFiles = {
+		"screens/login.html": null,
+		"screens/home.html": linkedScreens.home as string,
+		"screens/signup.html": linkedScreens.signup as string,
+	};
+
+	/** Home and Sign up pushed once, link confirmed. */
+	async function pushedLinked() {
+		const setup = await pushed(linkedFiles);
+		const home = join(setup.designDir, "screens/home.html");
+		return {
+			...setup,
+			home,
+			readHome: () => readFile(home, "utf8"),
+			homeFrame: () => setup.plugin.screens.frame("home"),
+			signupFrame: () => setup.plugin.screens.frame("signup"),
+		};
+	}
+
+	const hover: Reaction = {
+		trigger: { type: "ON_HOVER" },
+		actions: [
+			{
+				type: "NODE",
+				destinationId: "1:2",
+				navigation: "OVERLAY",
+				transition: null,
+			},
+		],
+	};
+
+	test("Push makes links on-click NAVIGATEs to the linked Screens' frames, instant by default", async () => {
+		const { homeFrame, signupFrame } = await pushedLinked();
+		const [link] = layerByKey(homeFrame(), "e3").reactions ?? [];
+		expect(link).toEqual({
+			trigger: { type: "ON_CLICK" },
+			actions: [
+				{
+					type: "NODE",
+					destinationId: signupFrame().id,
+					navigation: "NAVIGATE",
+					transition: {
+						type: "PUSH",
+						direction: "LEFT",
+						matchLayers: false,
+						easing: { type: "EASE_OUT" },
+						duration: 0.3,
+					},
+				},
+			],
+		});
+		expect(layerByKey(homeFrame(), "e5").reactions).toMatchObject([
+			{ actions: [{ destinationId: signupFrame().id, transition: null }] },
+		]);
+		expect(layerByKey(signupFrame(), "e2").reactions).toMatchObject([
+			{ actions: [{ destinationId: homeFrame().id }] },
+		]);
+	});
+
+	test("trace_flow over the Pushed Screens returns the linked graph", async () => {
+		const { harness, homeFrame, signupFrame } = await pushedLinked();
+		const result = await harness.callTool("trace_flow", {
+			nodeId: homeFrame().id,
+		});
+		expect(result.isError).toBeFalsy();
+		const graph = structured<PrototypeGraph>(result);
+		expect(graph.screens).toEqual([
+			expect.objectContaining({ id: homeFrame().id, name: "home", depth: 0 }),
+			expect.objectContaining({
+				id: signupFrame().id,
+				name: "signup",
+				depth: 1,
+			}),
+		]);
+		expect(
+			graph.edges.map(({ from, nodeName, action, to, transition }) => ({
+				from,
+				nodeName,
+				action,
+				to,
+				transition: transition?.type ?? null,
+			})),
+		).toEqual([
+			{
+				from: homeFrame().id,
+				nodeName: "Sign up",
+				action: "NAVIGATE",
+				to: signupFrame().id,
+				transition: "PUSH",
+			},
+			{
+				from: homeFrame().id,
+				nodeName: "I have an account",
+				action: "NAVIGATE",
+				to: signupFrame().id,
+				transition: null,
+			},
+			{
+				from: homeFrame().id,
+				nodeName: "Rectangle",
+				action: "NAVIGATE",
+				to: homeFrame().id,
+				transition: "DISSOLVE",
+			},
+			{
+				from: signupFrame().id,
+				nodeName: "Back",
+				action: "NAVIGATE",
+				to: homeFrame().id,
+				transition: "SLIDE_OUT",
+			},
+		]);
+		expect(graph.dangling).toEqual([]);
+	});
+
+	test("check rejects links to Screens that don't exist and invalid transitions", async () => {
+		const designDir = await writeFixtureProject({
+			...linkedFiles,
+			"screens/signup.html": `<body style="display:flex">\n  <a href="welcome.html">Welcome</a>\n  <a href="home.html" data-transition="slide-in sideways">Home</a>\n</body>\n`,
+		});
+		const harness = await startHarness({ designDir });
+		const result = await harness.callTool("check_design_project");
+		expect(structured(result)).toMatchObject({
+			ok: false,
+			errors: [
+				{ file: "screens/signup.html", line: 2, rule: "unknown-screen" },
+				{ file: "screens/signup.html", line: 3, rule: "invalid-transition" },
+			],
+		});
+	});
+
+	test("Push refuses a link to a Screen that has no frame yet, unless it's pushed too", async () => {
+		const { harness } = await withProject(linkedFiles);
+		const result = await harness.callTool("push", {
+			confirmLink: true,
+			screens: ["home"],
+		});
+		expect(result.isError).toBe(true);
+		expect(text(result)).toContain(
+			"screens/home.html links to signup, which has no frame in Figma yet",
+		);
+	});
+
+	test("Pull writes a designer's changed transition and new link; Push again keeps the node IDs", async () => {
+		const { harness, designDir, homeFrame, signupFrame, readHome } =
+			await pushedLinked();
+		const button = layerByKey(homeFrame(), "e3");
+		const [link] = button.reactions as [Reaction];
+		Object.assign(link.actions[0] as object, {
+			transition: {
+				type: "SMART_ANIMATE",
+				easing: { type: "EASE_IN_AND_OUT" },
+				duration: 0.4,
+			},
+		});
+		layerByKey(signupFrame(), "e3").reactions = [
+			{
+				trigger: { type: "ON_CLICK" },
+				actions: [
+					{
+						type: "NODE",
+						destinationId: homeFrame().id,
+						navigation: "NAVIGATE",
+						transition: null,
+					},
+				],
+			},
+		];
+		const status = await harness.callTool("get_status");
+		expect(structured(status)).toMatchObject({
+			designProject: { unpulledChanges: ["home", "signup"] },
+		});
+		const result = await harness.callTool("pull");
+		expect(structured(result)).toMatchObject({
+			screens: [
+				{ screen: "home", status: "merged", conflicts: 0 },
+				{ screen: "signup", status: "merged", conflicts: 0 },
+			],
+		});
+		expect(await readHome()).toContain(
+			'href="signup.html" data-transition="smart-animate 400ms ease-in-out"',
+		);
+		const signup = await readFile(
+			join(designDir, "screens/signup.html"),
+			"utf8",
+		);
+		expect(signup).toContain('<p data-key="e3" href="home.html">');
+		const before = [ids(homeFrame()), ids(signupFrame())];
+		const again = await harness.callTool("push");
+		expect(again.isError).toBeFalsy();
+		expect([ids(homeFrame()), ids(signupFrame())]).toEqual(before);
+		expect(structured(await harness.callTool("pull"))).toMatchObject({
+			screens: [{ status: "unchanged" }, { status: "unchanged" }],
+		});
+	});
+
+	test("Figma-only reactions on Pushed layers survive later Pushes, and Pull finds nothing new", async () => {
+		const { harness, home, homeFrame, readHome } = await pushedLinked();
+		const title = layerByKey(homeFrame(), "e2");
+		title.reactions = [hover];
+		const button = layerByKey(homeFrame(), "e3");
+		button.reactions = [hover, ...(button.reactions ?? [])];
+		const frameReaction: Reaction = { ...hover, trigger: { type: "ON_DRAG" } };
+		homeFrame().reactions = [frameReaction];
+		expect(structured(await harness.callTool("pull"))).toMatchObject({
+			screens: [{ status: "unchanged" }, { status: "unchanged" }],
+		});
+		await writeFile(
+			home,
+			(await readHome())
+				.replace("Home</h1>", "Welcome</h1>")
+				.replace(' data-transition="push left"', ""),
+		);
+		const result = await harness.callTool("push");
+		expect(result.isError).toBeFalsy();
+		expect(layerByKey(homeFrame(), "e2").reactions).toEqual([hover]);
+		expect(layerByKey(homeFrame(), "e3").reactions).toMatchObject([
+			hover,
+			{ actions: [{ navigation: "NAVIGATE", transition: null }] },
+		]);
+		expect(homeFrame().reactions).toEqual([frameReaction]);
 	});
 });

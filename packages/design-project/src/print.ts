@@ -86,6 +86,9 @@ function openTag(element: Element): string {
 	const attributes: [string, string][] = [];
 	if (element.key) attributes.push(["data-key", element.key]);
 	if (element.name !== undefined) attributes.push(["data-name", element.name]);
+	if (element.href !== undefined) attributes.push(["href", element.href]);
+	if (element.transition !== undefined)
+		attributes.push(["data-transition", element.transition]);
 	if (element.src !== undefined) attributes.push(["src", element.src]);
 	if (element.viewBox !== undefined)
 		attributes.push(["viewBox", element.viewBox]);

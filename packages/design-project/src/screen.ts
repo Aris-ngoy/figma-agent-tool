@@ -2,6 +2,7 @@
 // the Screen Subset with errors that name the file, element and rule.
 import type { Tokens } from "./design-md";
 import { type HtmlElement, parseHtml } from "./html";
+import { linkedScreen, parseTransition } from "./link";
 import { parsePath } from "./path";
 import {
 	FIGMA_OWNED_TAG,
@@ -31,6 +32,10 @@ export type Element = {
 	viewBox?: string;
 	/** A vector's paths: `d` as written, and `fill-rule` when set. */
 	paths?: VectorPath[];
+	/** Its Prototype Link: `href` to another Screen, as written. */
+	href?: string;
+	/** `data-transition`: how the Prototype Link animates, as written. */
+	transition?: string;
 	children: Element[];
 	/** Where it starts in the file; not part of the element's content. */
 	line?: number;
@@ -65,15 +70,26 @@ export type ScreenContext = {
 	tokens: Tokens;
 	/** Whether an image `src` (relative to the Screen file) exists. */
 	imageExists: (src: string) => boolean;
+	/** Whether the Design Project has a Screen by this name, for links. */
+	screenExists: (name: string) => boolean;
 };
 
 const ATTRIBUTES = new Set(["data-key", "data-name", "style"]);
 
+const LINK_ATTRIBUTES = ["href", "data-transition"];
+
 /** Attributes only some kinds take. */
-const KIND_ATTRIBUTES: Partial<Record<Kind, string[]>> = {
-	image: ["src"],
-	vector: ["viewbox", "xmlns"],
+const KIND_ATTRIBUTES: Record<Kind, string[]> = {
+	frame: LINK_ATTRIBUTES,
+	text: LINK_ATTRIBUTES,
+	rect: LINK_ATTRIBUTES,
+	image: ["src", ...LINK_ATTRIBUTES],
+	vector: ["viewbox", "xmlns", ...LINK_ATTRIBUTES],
+	owned: [],
 };
+
+/** The tag of a Prototype Link that is a frame, text or rectangle. */
+const LINK_TAG = "a";
 
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
@@ -148,7 +164,7 @@ class Builder {
 			children: [],
 			line: html.line,
 		};
-		this.attributes(html, path, element);
+		this.attributes(html, path, element, parent === undefined);
 		// Sizes are only worth checking on an element that is otherwise valid.
 		const valid = this.errors.length === before;
 		if (kind === "text") element.text = this.text(html, path);
@@ -171,7 +187,18 @@ class Builder {
 		const isRoot = parent === undefined;
 		if (html.tag === "svg" && !isRoot) return "vector";
 		if (html.tag === FIGMA_OWNED_TAG && !isRoot) return "owned";
-		if (html.tag === "div" || (isRoot && html.tag === "body")) {
+		const holdsText = html.children.some(
+			(child) =>
+				(child.type === "text" && child.text.trim()) ||
+				(child.type === "element" && child.tag === "br"),
+		);
+		if (html.tag === LINK_TAG && !isRoot && display === undefined && holdsText)
+			return "text";
+		if (
+			html.tag === "div" ||
+			html.tag === LINK_TAG ||
+			(isRoot && html.tag === "body")
+		) {
 			if (display === "flex") return "frame";
 			if (display !== undefined) {
 				this.error(
@@ -197,23 +224,28 @@ class Builder {
 			html,
 			path,
 			"unknown-element",
-			`<${html.tag}> isn't in the Screen Subset. Use <div style="display:flex"> for frames, <div> for rectangles, <p>, <span> or <h1>–<h6> for text, <img> for images and <svg> with <path>s for vectors.`,
+			`<${html.tag}> isn't in the Screen Subset. Use <div style="display:flex"> for frames, <div> for rectangles, <p>, <span> or <h1>–<h6> for text, <img> for images, <svg> with <path>s for vectors and <a href> for links to other Screens.`,
 		);
 		return "rect";
 	}
 
-	private attributes(html: HtmlElement, path: string, element: Element) {
+	private attributes(
+		html: HtmlElement,
+		path: string,
+		element: Element,
+		isRoot: boolean,
+	) {
 		for (const { name, value } of html.attributes) {
 			const valid =
 				ATTRIBUTES.has(name) ||
-				KIND_ATTRIBUTES[element.kind]?.includes(name) ||
-				false;
+				(KIND_ATTRIBUTES[element.kind].includes(name) &&
+					!(isRoot && LINK_ATTRIBUTES.includes(name)));
 			if (!valid || (name === "xmlns" && value !== SVG_NAMESPACE)) {
 				this.error(
 					html,
 					path,
 					"unknown-attribute",
-					`The \`${name}\` attribute isn't in the Screen Subset. Elements take \`style\`, \`data-name\` (the layer name), \`data-key\` (written by Push); <img> takes \`src\` and <svg> \`viewBox\`.`,
+					`The \`${name}\` attribute isn't in the Screen Subset${isRoot || element.kind === "owned" ? ` on ${describeKind(element)}` : ""}. Elements take \`style\`, \`data-name\` (the layer name), \`data-key\` (written by Push), and \`href\` and \`data-transition\` (a Prototype Link; not <body> or Figma-owned Elements); <img> takes \`src\` and <svg> \`viewBox\`.`,
 				);
 				continue;
 			}
@@ -222,7 +254,10 @@ class Builder {
 			if (name === "src") element.src = value;
 			if (name === "viewbox") this.viewBox(html, path, element, value);
 			if (name === "style") this.style(html, path, element, value);
+			if (name === "href") element.href = value;
+			if (name === "data-transition") element.transition = value;
 		}
+		this.link(html, path, element);
 		if (element.kind === "image") this.image(html, path, element);
 		if (element.kind === "owned" && !element.key) {
 			this.error(
@@ -232,6 +267,49 @@ class Builder {
 				"A Figma-owned Element refers to its layer in Figma by the `data-key` Pull gave it. Restore it, or delete the element (Push then deletes the layer).",
 			);
 		}
+	}
+
+	/** A Prototype Link goes to a Screen of the Design Project, with a transition Figma has. */
+	private link(html: HtmlElement, path: string, element: Element) {
+		const { href, transition } = element;
+		if (href === undefined) {
+			if (transition !== undefined) {
+				this.error(
+					html,
+					path,
+					"invalid-transition",
+					"`data-transition` is how a Prototype Link animates: add an `href` to the Screen it goes to, or remove it.",
+				);
+			}
+			if (html.tag === LINK_TAG) {
+				this.error(
+					html,
+					path,
+					"missing-link",
+					'An <a> is a Prototype Link: give it an `href` to another Screen (`href="signup.html"`), or use a <div> or <p>.',
+				);
+			}
+			return;
+		}
+		const screen = linkedScreen(href);
+		if (screen === undefined) {
+			this.error(
+				html,
+				path,
+				"invalid-link",
+				`\`href="${href}"\` isn't a Screen: Prototype Links go to another Screen of the Design Project by its file name, as in \`href="signup.html"\`.`,
+			);
+		} else if (!this.context.screenExists(screen)) {
+			this.error(
+				html,
+				path,
+				"unknown-screen",
+				`\`href="${href}"\` links to the Screen ${screen}, which the Design Project doesn't have (no screens/${screen}.html).`,
+			);
+		}
+		const parsed = parseTransition(transition);
+		if ("problem" in parsed)
+			this.error(html, path, "invalid-transition", parsed.problem);
 	}
 
 	private key(html: HtmlElement, path: string, element: Element, key: string) {

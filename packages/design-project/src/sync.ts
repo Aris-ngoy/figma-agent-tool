@@ -176,6 +176,7 @@ export function baselineRoot(screen: ScreenFile, baseline: Baseline): Element {
 	const { root } = parseScreen(screen.file, baseline.source, {
 		tokens: tokensFrom(baseline.tokens),
 		imageExists: () => true,
+		screenExists: () => true,
 	});
 	if (!root) throw new Error(`The Baseline of ${screen.file} doesn't parse.`);
 	return root;
@@ -410,13 +411,33 @@ function imageExtension(bytes: Uint8Array): string {
 	return "png";
 }
 
+/**
+ * Frame ID → the Screen it is the frame of, for every frame a Screen has or
+ * had: Prototype Links are the on-click NAVIGATEs to these.
+ */
+export type ScreenFrames = Record<string, string>;
+
+/** The Screens' frames: as their Baselines recorded them, and as Figma has them now. */
+export function screenFramesOf(
+	baselines: Map<string, Baseline>,
+	frames: Map<string, SyncedNode>,
+): ScreenFrames {
+	return Object.fromEntries([
+		...[...baselines].map(([name, baseline]) => [baseline.frameId, name]),
+		...[...frames].map(([name, frame]) => [frame.id, name]),
+	]);
+}
+
 /** A frame read as a Screen against its Baseline; layers outside the subset are listed. */
 export function readFrame(
 	project: DesignProject,
 	screen: ScreenFile,
 	baseline: Baseline,
 	frame: SyncedNode,
-	local?: Element,
+	{
+		local,
+		screenFrames = {},
+	}: { local?: Element; screenFrames?: ScreenFrames } = {},
 ): { root?: Element; figmaOwned: FigmaOwnedLayer[] } {
 	const base = baselineRoot(screen, baseline);
 	const ids = new Set<string>();
@@ -453,6 +474,8 @@ export function readFrame(
 		},
 		srcFor: (imageHash) => srcs.get(imageHash),
 		baseElement: (key) => baseByKey.get(key),
+		screenOf: (frameId) =>
+			frameId === frame.id ? screen.name : screenFrames[frameId],
 	});
 }
 
@@ -504,8 +527,11 @@ export function hasUnpulledChanges(
 	screen: ScreenFile,
 	baseline: Baseline,
 	frame: SyncedNode,
+	screenFrames: ScreenFrames = {},
 ): boolean {
-	const { root } = readFrame(project, screen, baseline, frame);
+	const { root } = readFrame(project, screen, baseline, frame, {
+		screenFrames,
+	});
 	if (!root) return true;
 	const base = baselineRoot(screen, baseline);
 	return !sameElement(
@@ -540,6 +566,7 @@ export function pullScreen(
 	baseline: Baseline,
 	frame: SyncedNode,
 	fetchedImages: Record<string, { src: string; record: ImageRecord }> = {},
+	screenFrames: ScreenFrames = {},
 ): ScreenPull {
 	const images = { ...baseline.images };
 	for (const { src, record } of Object.values(fetchedImages))
@@ -550,7 +577,7 @@ export function pullScreen(
 		screen,
 		withImages,
 		frame,
-		local,
+		{ local, screenFrames },
 	);
 	if (!figma) {
 		return { changed: false, baseline, conflicts: 0, figmaOwned };

@@ -25,6 +25,17 @@ const LIVE_RELOAD = `<script>
 new EventSource("/events").onmessage = () => location.reload();
 </script>`;
 
+/** Clicking a Prototype Link shows its Screen, in the same Mode, as Figma's prototype does. */
+const PROTOTYPE_LINKS = `<script>
+document.addEventListener("click", (event) => {
+  const link = event.target.closest("[href]");
+  if (!link) return;
+  event.preventDefault();
+  const screen = link.getAttribute("href").replace(/\\.html$/, "");
+  location.href = "/screens/" + encodeURIComponent(screen) + location.search;
+});
+</script>`;
+
 export type Preview = { url: string; port: number; stop(): void };
 
 export function startPreview({
@@ -93,7 +104,7 @@ export function startPreview({
 				return html(
 					screenDocument(project, screen, {
 						baseUrl: "/files/screens/",
-						head: LIVE_RELOAD,
+						head: `${LIVE_RELOAD}\n${PROTOTYPE_LINKS}`,
 						figmaOwned: await figmaOwnedOf(project, screen),
 						mode,
 					}),

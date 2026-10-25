@@ -2,6 +2,7 @@ export * from "./design-md";
 export * from "./design-system";
 export * from "./exports";
 export * from "./keys";
+export * from "./link";
 export * from "./lint";
 export * from "./merge";
 export * from "./modes";

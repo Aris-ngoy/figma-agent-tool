@@ -8,6 +8,7 @@ import {
 	type FlowNode,
 	flowStartError,
 	type SerializedNode,
+	type SyncedNode,
 } from "@figma-agent-tool/protocol";
 import {
 	type DocumentFixture,
@@ -17,7 +18,13 @@ import {
 
 type Page = DocumentFixture["pages"][number];
 
-export function createFakeFlows(doc: DocumentFixture) {
+/** Frames Push made (see fake-screens), by ID, with the page they're on. */
+type PushedFrames = Map<string, { pageId: string; frame: SyncedNode }>;
+
+export function createFakeFlows(
+	doc: DocumentFixture,
+	pushed: PushedFrames = new Map(),
+) {
 	const pageRef = (page: Page) => ({ id: page.id, name: page.name });
 
 	const pageFlows = (page: Page) =>
@@ -50,6 +57,41 @@ export function createFakeFlows(doc: DocumentFixture) {
 					]
 				: [];
 		return [...own, ...(node.children ?? []).flatMap(subtreeReactions)];
+	}
+
+	function pushedReactions(node: SyncedNode): FlowNode["reactions"] {
+		const own = node.reactions?.length
+			? [
+					{
+						nodeId: node.id,
+						nodeName: node.name,
+						reactions: structuredClone(node.reactions),
+					},
+				]
+			: [];
+		return [...own, ...(node.children ?? []).flatMap(pushedReactions)];
+	}
+
+	/** A layer of a pushed frame, as get_flow_nodes reports it. */
+	function pushedFlowNode(id: string): FlowNode | undefined {
+		const find = (node: SyncedNode): SyncedNode | undefined =>
+			node.id === id ? node : (node.children ?? []).map(find).find(Boolean);
+		for (const { pageId, frame } of pushed.values()) {
+			const node = find(frame);
+			const page = doc.pages.find((p) => p.id === pageId);
+			if (!node || !page) continue;
+			return {
+				id,
+				name: node.name,
+				type: node.type,
+				page: pageRef(page),
+				topLevel: node === frame,
+				width: node.width,
+				height: node.height,
+				reactions: pushedReactions(node),
+			};
+		}
+		return undefined;
 	}
 
 	return {
@@ -95,7 +137,9 @@ export function createFakeFlows(doc: DocumentFixture) {
 				const node = findNode(id, doc);
 				const page = pageOf(id);
 				if (!node || !page) {
-					missing.push(id);
+					const layer = pushedFlowNode(id);
+					if (layer) nodes.push(layer);
+					else missing.push(id);
 					continue;
 				}
 				nodes.push({

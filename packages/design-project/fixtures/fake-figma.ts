@@ -6,6 +6,7 @@
 import {
 	type DesignSystemPush,
 	FLOAT_BINDINGS,
+	linkReaction,
 	type Paint,
 	type PushedDesignSystem,
 	type ScreenFill,
@@ -14,6 +15,7 @@ import {
 	type SyncedNode,
 	type TextStyleInfo,
 	type VariableValue,
+	withPrototypeLink,
 } from "@figma-agent-tool/protocol";
 
 export function applyScreenTree(
@@ -96,6 +98,8 @@ export function applyScreenTree(
 				...(spec.type === "FRAME" && { inLayout: true }),
 			};
 		}
+		// Its reactions are the designers' until applyPrototypeLinks.
+		if (reuse?.reactions) node.reactions = structuredClone(reuse.reactions);
 		if (spec.clips !== undefined) node.clips = spec.clips;
 		if (spec.vector) node.vector = structuredClone(spec.vector);
 		if (spec.position) node.absolute = { horizontal: "MIN", vertical: "MIN" };
@@ -126,6 +130,52 @@ export function applyScreenTree(
 	};
 	const frame = apply(tree, true);
 	return designSystem ? designSystem.resolve(frame) : frame;
+}
+
+/**
+ * Sets the Prototype Link of each layer a tree pushed (its frame's own
+ * reactions are the designers'), as the Plugin does once every frame of a
+ * push is in place: links go to `frameOf` their Screen.
+ */
+export function applyPrototypeLinks(
+	frame: SyncedNode,
+	tree: ScreenNode,
+	{
+		frameOf,
+		screenFrames,
+	}: {
+		frameOf: (screen: string) => string | undefined;
+		/** Every frame a Screen has or had, besides those of the push. */
+		screenFrames: Iterable<string>;
+	},
+) {
+	const layers = new Map<string, SyncedNode>();
+	const index = (node: SyncedNode) => {
+		if (node.key) layers.set(node.key, node);
+		node.children?.forEach(index);
+	};
+	frame.children?.forEach(index);
+	const frames = new Set(screenFrames);
+	const walk = (spec: ScreenNode) => {
+		const node = layers.get(spec.key);
+		if (node && spec.type !== "OWNED") {
+			const { link } = spec;
+			const destination = link && frameOf(link.screen);
+			if (link && !destination)
+				throw new Error(`No frame for Screen ${link.screen}`);
+			const reactions = withPrototypeLink(
+				node.reactions ?? [],
+				destination
+					? linkReaction(destination, link?.transition ?? null)
+					: undefined,
+				frames,
+			);
+			if (reactions.length > 0) node.reactions = reactions;
+			else delete node.reactions;
+		}
+		spec.children?.forEach(walk);
+	};
+	tree.children?.forEach(walk);
 }
 
 /** Records a pushed layer's bindings by variable and style ID, as Figma reads them. */

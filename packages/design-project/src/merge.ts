@@ -198,6 +198,13 @@ function takeField(merged: Element, figma: Element, field: string) {
 		case "@paths":
 			merged.paths = figma.paths;
 			return;
+		case "@href":
+			merged.href = figma.href;
+			if (merged.href === undefined) merged.tag = figma.tag;
+			return;
+		case "@transition":
+			merged.transition = figma.transition;
+			return;
 		default: {
 			const prop = field as keyof Element["props"];
 			const value = figma.props[prop];

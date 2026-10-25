@@ -68,6 +68,8 @@ export function registerDesignTools(
 				"a DESIGN.md Design System to fill in, screens/ for Screens and assets/ for images. " +
 				"Screens are single <body> HTML files in the Screen Subset; DESIGN.md tokens are " +
 				"CSS variables named after their path (var(--colors-primary), var(--spacing-md)). " +
+				'Link Screens into a prototype with href="other-screen.html" on any element (or <a href>), ' +
+				'animated by data-transition (instant by default; "push left", "smart-animate 400ms ease-in-out", …). ' +
 				"Other Modes (dark, …) go in an optional modes.yaml next to DESIGN.md: " +
 				'`default: Light` names DESIGN.md\'s Mode, and `modes: { Dark: { colors: { surface: "#111111" } } }` ' +
 				"gives colors, spacing and rounded tokens other values in a Mode.",
@@ -234,7 +236,9 @@ export function registerDesignTools(
 				"updates, in place, keeping node IDs) an auto-layout frame on the Screens Page, and " +
 				"DESIGN.md's colors, spacing and rounded tokens become variables (typography: text " +
 				"styles), updated in place too, with a variable mode per Mode in modes.yaml. Fills, spacing, radii and text written with a token's " +
-				"var(--…) are bound to its variable or style. One undo step. Writes a data-key into " +
+				"var(--…) are bound to its variable or style. Prototype Links (href) become on-click " +
+				"NAVIGATEs to their Screen's frame; other interactions designers made stay as they are. " +
+				"One undo step. Writes a data-key into " +
 				"every element. The first Push asks to confirm the Bridged File before linking it " +
 				"(status confirm_link): ask the user, then call again with confirmLink. Refused " +
 				"while the Bridged File isn't the Linked File, a Screen or DESIGN.md fails Check or " +

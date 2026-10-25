@@ -132,14 +132,15 @@ function fakeDocument(): FakeDocument {
 	const copy = structuredClone(document);
 	let created = 0;
 	const nextId = () => createdNodeId(++created);
+	const screens = createFakeScreens(copy, nextId);
 	return {
 		document: copy,
 		editor: createFakeEditor(copy, nextId),
 		reactions: createFakeReactions(copy),
-		flows: createFakeFlows(copy),
+		flows: createFakeFlows(copy, screens.frames),
 		motion: createFakeMotion(copy),
 		restructure: createFakeRestructure(copy, nextId),
-		screens: createFakeScreens(copy, nextId),
+		screens,
 	};
 }
 

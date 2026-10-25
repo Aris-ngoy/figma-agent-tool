@@ -92,6 +92,27 @@ export const widerScreens: Record<string, string> = {
 `,
 };
 
+/**
+ * Two Screens linked into a prototype: `<a>` frames, text and rectangles,
+ * and an `href` on a <div>, with and without transitions.
+ */
+export const linkedScreens: Record<string, string> = {
+	home: `<body style="display:flex; flex-direction:column; gap:16px; padding:24px">
+  <h1>Home</h1>
+  <a href="signup.html" data-transition="push left" data-name="Sign up" style="display:flex; padding:12px; background-color:#3366ff">
+    <p style="color:#ffffff">Sign up</p>
+  </a>
+  <a href="signup.html">I have an account</a>
+  <div href="home.html" data-transition="dissolve 200ms ease-in-out" style="width:40px; height:40px; background-color:#dddddd"></div>
+</body>
+`,
+	signup: `<body style="display:flex; flex-direction:column; padding:24px">
+  <a href="home.html" data-transition="slide-out right 0.25s" data-name="Back" style="width:24px; height:24px; background-color:#111111"></a>
+  <p>Create your account</p>
+</body>
+`,
+};
+
 export const logoPng = framePng;
 
 export const projectConfig = {

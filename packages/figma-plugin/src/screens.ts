@@ -8,12 +8,14 @@ import {
 	type CommandParams,
 	type CommandResult,
 	FLOAT_BINDINGS,
+	linkReaction,
 	type Paint as PaintInfo,
 	type ScreenFill,
 	type ScreenNode,
 	SYNC_KEYS,
 	SYNC_NAMESPACE,
 	type SyncedNode,
+	withPrototypeLink,
 } from "@figma-agent-tool/protocol";
 import { fontKey, loadFonts } from "./edit";
 import {
@@ -22,6 +24,7 @@ import {
 	type Deadline,
 	NO_DEADLINE,
 } from "./errors";
+import { type ReactiveNode, readReactions } from "./reactions";
 import { cornerRadius, paint, round, text } from "./serialize";
 import {
 	type AppliedDesignSystem,
@@ -56,15 +59,20 @@ export async function pushScreens(
 		screens,
 		images,
 		designSystem: tokens,
+		frames: linkedFrames,
+		screenFrames,
 	}: CommandParams<"push_screens">,
 	deadline: Deadline = NO_DEADLINE,
 ): Promise<CommandResult<"push_screens">> {
 	const found = new Map<string, BaseNode>();
-	const ids = screens.flatMap(({ frameId, tree, remove }) => [
-		...(frameId ? [frameId] : []),
-		...treeIds(tree),
-		...remove,
-	]);
+	const ids = [
+		...screens.flatMap(({ frameId, tree, remove }) => [
+			...(frameId ? [frameId] : []),
+			...treeIds(tree),
+			...remove,
+		]),
+		...Object.values(linkedFrames),
+	];
 	const [page, loadedTokens] = await Promise.all([
 		findPage(pageRef),
 		tokens && loadDesignSystem(tokens),
@@ -86,6 +94,7 @@ export async function pushScreens(
 			`Font "${fontKey(missing)}" isn't available in this file, so nothing was pushed. Install it, or use another font-family / font-weight in the Screen.`,
 		);
 	}
+	checkLinks(screens, linkedFrames, found);
 	checkDeadline(deadline);
 
 	// Synchronous from here on: the document changes all at once.
@@ -112,8 +121,16 @@ export async function pushScreens(
 		applier.apply(frame, tree, true);
 		return { screen, frame };
 	});
-	// Only styles are set asynchronously, once the layers are in place.
+	// Only styles and reactions are set asynchronously, once the layers are
+	// in place and every linked frame exists.
 	await applier.applyTextStyles();
+	const pushedFrames = new Map(
+		frames.map(({ screen, frame }) => [screen, frame.id]),
+	);
+	await applier.applyLinks(
+		(screen) => pushedFrames.get(screen) ?? linkedFrames[screen],
+		new Set([...screenFrames, ...pushedFrames.values()]),
+	);
 	figma.commitUndo();
 	return {
 		page: { id: screensPage.id, name: screensPage.name },
@@ -196,6 +213,29 @@ function placeNewFrame(page: PageNode): FrameNode {
 	return frame;
 }
 
+/** Every Prototype Link goes to a Screen of this push or to a frame in the file. */
+function checkLinks(
+	screens: CommandParams<"push_screens">["screens"],
+	linkedFrames: Record<string, string>,
+	found: Map<string, BaseNode>,
+) {
+	const pushed = new Set(screens.map(({ screen }) => screen));
+	const walk = (node: ScreenNode) => {
+		const screen = node.link?.screen;
+		if (screen !== undefined && !pushed.has(screen)) {
+			const frame = found.get(linkedFrames[screen] ?? "");
+			if (frame?.type !== "FRAME" || frame.removed) {
+				throw new CommandError(
+					"invalid_destination",
+					`Layer ${node.key} links to the Screen ${screen}, whose frame ${linkedFrames[screen] ? `${linkedFrames[screen]} isn't in this file` : "wasn't given"}, so nothing was pushed. Push ${screen} too.`,
+				);
+			}
+		}
+		node.children?.forEach(walk);
+	};
+	for (const { tree } of screens) walk(tree);
+}
+
 function treeIds(tree: ScreenNode): string[] {
 	return [
 		...(tree.id ? [tree.id] : []),
@@ -241,6 +281,8 @@ const FLOAT_FIELDS = {
 
 class Applier {
 	private readonly textStyles: [TextNode, TextStyle | undefined][] = [];
+	/** Pushed layers below their frames, and the Prototype Link each should have. */
+	private readonly links: [ReactiveNode, ScreenNode["link"]][] = [];
 
 	constructor(
 		private readonly found: Map<string, BaseNode>,
@@ -256,8 +298,33 @@ class Applier {
 		}
 	}
 
+	/**
+	 * Gives each pushed layer its Prototype Link to `frameOf` its Screen, or
+	 * none; the frames' own reactions and every other reaction stay.
+	 */
+	async applyLinks(
+		frameOf: (screen: string) => string | undefined,
+		screenFrames: ReadonlySet<string>,
+	) {
+		for (const [node, link] of this.links) {
+			const destination = link && frameOf(link.screen);
+			const current = readReactions(node);
+			const next = withPrototypeLink(
+				current,
+				link && destination
+					? linkReaction(destination, link.transition)
+					: undefined,
+				screenFrames,
+			);
+			if (JSON.stringify(next) === JSON.stringify(current)) continue;
+			// Our schema mirrors the Plugin API's; it only types `readonly` looser.
+			await node.setReactionsAsync(next as unknown as Reaction[]);
+		}
+	}
+
 	apply(node: Layer, spec: ScreenNode, isRoot: boolean) {
 		node.setSharedPluginData(SYNC_NAMESPACE, SYNC_KEYS.element, spec.key);
+		if (!isRoot) this.links.push([node, spec.link]);
 		this.unbind(node, spec);
 		if (spec.name !== undefined) node.name = spec.name;
 		else if (node.type === "TEXT") node.autoRename = true;
@@ -534,6 +601,8 @@ export function readNode(node: SceneNode): SyncedNode {
 	}
 	const bindings = readBindings(node);
 	if (bindings) out.bindings = bindings;
+	if ("reactions" in node && node.reactions.length > 0)
+		out.reactions = readReactions(node);
 	if ("children" in node) {
 		out.children = (node as Container).children.map((child) =>
 			readNode(child as SceneNode),

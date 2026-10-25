@@ -251,6 +251,7 @@ export function checkScreen(
 			const path = imagePath(project, screen, src);
 			return path !== undefined && existsSync(path);
 		},
+		screenExists: (name) => project.screens.some((s) => s.name === name),
 	});
 	return { ...screen, root, errors };
 }

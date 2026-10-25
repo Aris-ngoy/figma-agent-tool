@@ -808,6 +808,114 @@ export const Reaction = z.object({
 });
 export type Reaction = z.infer<typeof Reaction>;
 
+/** Transitions a Screen's Prototype Link can give: preset easings, no matched layers. */
+export const SCREEN_TRANSITION_TYPES = [
+	"DISSOLVE",
+	"SMART_ANIMATE",
+	"SCROLL_ANIMATE",
+	"MOVE_IN",
+	"MOVE_OUT",
+	"PUSH",
+	"SLIDE_IN",
+	"SLIDE_OUT",
+] as const;
+
+export const SCREEN_EASINGS = [
+	"EASE_IN",
+	"EASE_OUT",
+	"EASE_IN_AND_OUT",
+	"LINEAR",
+	"EASE_IN_BACK",
+	"EASE_OUT_BACK",
+	"EASE_IN_AND_OUT_BACK",
+	"GENTLE",
+	"QUICK",
+	"BOUNCY",
+	"SLOW",
+] as const;
+
+/**
+ * Where a reaction goes and how, when it's one a Screen can write as a
+ * Prototype Link: on click, one NAVIGATE to a frame, with no transition or
+ * one Screens can express. Undefined for every other reaction, which stays
+ * Figma-only.
+ */
+export function prototypeLink(
+	reaction: Reaction,
+): { destinationId: string; transition: Transition | null } | undefined {
+	const [action, ...more] = reaction.actions;
+	if (reaction.trigger?.type !== "ON_CLICK" || more.length > 0) return;
+	if (action?.type !== "NODE" || action.navigation !== "NAVIGATE") return;
+	const { destinationId, transition } = action;
+	if (!destinationId) return;
+	if (transition) {
+		const types: readonly string[] = SCREEN_TRANSITION_TYPES;
+		const easings: readonly string[] = SCREEN_EASINGS;
+		if (!types.includes(transition.type)) return;
+		if (!easings.includes(transition.easing.type)) return;
+		if ("matchLayers" in transition && transition.matchLayers) return;
+	}
+	return { destinationId, transition };
+}
+
+/** The on-click NAVIGATE reaction a Prototype Link pushes as. */
+export function linkReaction(
+	destinationId: string,
+	transition: Transition | null,
+): Reaction {
+	return {
+		trigger: { type: "ON_CLICK" },
+		actions: [
+			{ type: "NODE", destinationId, navigation: "NAVIGATE", transition },
+		],
+	};
+}
+
+type PrototypeLink = NonNullable<ReturnType<typeof prototypeLink>>;
+
+/** Whether two Prototype Links go to the same frame the same way, durations to the millisecond. */
+function sameLink(a: PrototypeLink, b: PrototypeLink): boolean {
+	const key = ({ transition }: PrototypeLink) =>
+		JSON.stringify(
+			transition && {
+				...transition,
+				duration: Math.round(transition.duration * 1000),
+			},
+		);
+	return a.destinationId === b.destinationId && key(a) === key(b);
+}
+
+/**
+ * A layer's reactions with its Prototype Link replaced by `link` (removed
+ * when undefined). Prototype Links are the on-click NAVIGATEs to a Screen's
+ * frame (`screenFrames`); every other reaction stays as it is, in its place.
+ * An unchanged link is kept as Figma has it.
+ */
+export function withPrototypeLink(
+	reactions: Reaction[],
+	link: Reaction | undefined,
+	screenFrames: ReadonlySet<string>,
+): Reaction[] {
+	const linkOf = (reaction: Reaction) => {
+		const decoded = prototypeLink(reaction);
+		return decoded && screenFrames.has(decoded.destinationId)
+			? decoded
+			: undefined;
+	};
+	const index = reactions.findIndex((reaction) => linkOf(reaction));
+	const current =
+		index === -1 ? undefined : linkOf(reactions[index] as Reaction);
+	const wanted = link && prototypeLink(link);
+	if (current && wanted && sameLink(current, wanted)) {
+		return reactions.filter((reaction, i) => i === index || !linkOf(reaction));
+	}
+	const others = reactions.filter((reaction) => !linkOf(reaction));
+	if (!link) return others;
+	// Where the old link was (nothing before it is one), else last.
+	const at = index === -1 ? others.length : index;
+	return [...others.slice(0, at), link, ...others.slice(at)];
+}
+
 /** Which reactions `remove_reactions` removes; every given field must match. */
 export const ReactionMatch = z.object({
 	trigger: z.enum(TRIGGER_TYPES).optional(),
@@ -1691,8 +1799,18 @@ export type ScreenNode = {
 	};
 	// Fields bound to the Design System, by token path.
 	bindings?: ScreenBindings;
+	// Its Prototype Link: an on-click NAVIGATE to this Screen's frame. Without
+	// one, Push removes the layer's Prototype Link; other reactions stay.
+	link?: ScreenLink;
 	children?: ScreenNode[];
 };
+
+const ScreenLink = z.object({
+	screen: z.string().min(1),
+	// Null is instant.
+	transition: Transition.nullable(),
+});
+type ScreenLink = z.infer<typeof ScreenLink>;
 
 /** A layer as Push wants it; the whole state, not a patch. */
 export const ScreenNode: z.ZodType<ScreenNode> = z
@@ -1722,6 +1840,7 @@ export const ScreenNode: z.ZodType<ScreenNode> = z
 			})
 			.optional(),
 		bindings: ScreenBindings.optional(),
+		link: ScreenLink.optional(),
 		get children() {
 			return z.array(ScreenNode).optional();
 		},
@@ -1780,6 +1899,8 @@ export type SyncedNode = {
 	text?: TextInfo;
 	// Variable and text style IDs; a fill's variable is on the fill.
 	bindings?: Omit<ScreenBindings, "fill">;
+	// Its prototype reactions, when it has any.
+	reactions?: Reaction[];
 	children?: SyncedNode[];
 };
 
@@ -1819,6 +1940,7 @@ export const SyncedNode: z.ZodType<SyncedNode> = z.object({
 		.optional(),
 	text: TextInfo.optional(),
 	bindings: ScreenBindings.omit({ fill: true }).optional(),
+	reactions: z.array(Reaction).optional(),
 	get children() {
 		return z.array(SyncedNode).optional();
 	},
@@ -2012,6 +2134,11 @@ export const commands = {
 				.min(1),
 			// Image bytes (base64) by the name IMAGE fills give in `image`.
 			images: z.record(z.string(), z.base64()).default({}),
+			// Prototype Links: the frames of Screens outside this push that
+			// links go to, by Screen; and every frame a Screen has (or had), so
+			// the plugin knows which on-click NAVIGATEs are Prototype Links.
+			frames: z.record(z.string(), z.string().min(1)).default({}),
+			screenFrames: z.array(z.string().min(1)).default([]),
 			// Applied first, so the trees' bindings can refer to its tokens.
 			designSystem: DesignSystemPush.optional(),
 		}),

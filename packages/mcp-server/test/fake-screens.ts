@@ -2,6 +2,7 @@
 // applied in place with the same rules as the real plugin (shared with the
 // design-project tests), so tests can edit them as a designer would.
 import {
+	applyPrototypeLinks,
 	applyScreenTree,
 	createFakeDesignSystem,
 } from "@figma-agent-tool/design-project/fixtures";
@@ -49,6 +50,8 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 			screens,
 			images: bytes,
 			designSystem: tokens,
+			frames: linkedFrames,
+			screenFrames,
 		}: CommandParams<"push_screens">): CommandResult<"push_screens"> {
 			let target =
 				doc.pages.find((p) => p.id === page.id) ??
@@ -65,22 +68,36 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 			}
 			const pageId = target.id;
 			const pushed = tokens && designSystem.push(tokens);
+			const applied = screens.map(({ screen, frameId, tree, remove }) => {
+				const previous = frameId ? frames.get(frameId) : undefined;
+				const frame = applyScreenTree(tree, previous?.frame, {
+					nextId,
+					imageHash: (name) => hashes[name] as string,
+					designSystem,
+					remove,
+				});
+				if (previous) frames.delete(previous.frame.id);
+				frames.set(frame.id, { screen, pageId, frame });
+				return { screen, tree, frame };
+			});
+			// Links once every frame of the push is in place, as the Plugin does.
+			const pushedFrames = new Map(
+				applied.map(({ screen, frame }) => [screen, frame.id]),
+			);
+			for (const { tree, frame } of applied) {
+				applyPrototypeLinks(frame, tree, {
+					frameOf: (screen) => pushedFrames.get(screen) ?? linkedFrames[screen],
+					screenFrames: [...screenFrames, ...pushedFrames.values()],
+				});
+			}
 			return {
 				page: { id: target.id, name: target.name },
 				images: hashes,
 				...(pushed && { designSystem: pushed }),
-				screens: screens.map(({ screen, frameId, tree, remove }) => {
-					const previous = frameId ? frames.get(frameId) : undefined;
-					const frame = applyScreenTree(tree, previous?.frame, {
-						nextId,
-						imageHash: (name) => hashes[name] as string,
-						designSystem,
-						remove,
-					});
-					if (previous) frames.delete(previous.frame.id);
-					frames.set(frame.id, { screen, pageId, frame });
-					return { screen, frame: structuredClone(frame) };
-				}),
+				screens: applied.map(({ screen, frame }) => ({
+					screen,
+					frame: structuredClone(frame),
+				})),
 			};
 		},
 
