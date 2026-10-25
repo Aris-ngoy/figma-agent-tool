@@ -3,8 +3,14 @@
 // has an exact Figma equivalent; see nodes.ts for the mapping.
 import type { Tokens } from "./design-md";
 
-/** What an element becomes in Figma: a frame, text, a rectangle or an image. */
-export type Kind = "frame" | "text" | "rect" | "image";
+/**
+ * What an element becomes in Figma: a frame, text, a rectangle, an image or
+ * a vector; or a Figma-owned Element, which stands for a layer the Screen
+ * Subset can't express.
+ */
+export type Kind = "frame" | "text" | "rect" | "image" | "vector" | "owned";
+
+export const FIGMA_OWNED_TAG = "figma-owned";
 
 export const TEXT_TAGS = new Set([
 	"p",
@@ -23,6 +29,8 @@ export const DEFAULT_TAGS: Record<Kind, string> = {
 	text: "p",
 	rect: "div",
 	image: "img",
+	vector: "svg",
+	owned: FIGMA_OWNED_TAG,
 };
 
 /** The layer name Figma gets for an element without `data-name`. */
@@ -30,12 +38,17 @@ export const DEFAULT_NAMES: Record<Exclude<Kind, "text">, string> = {
 	frame: "Frame",
 	rect: "Rectangle",
 	image: "Image",
+	vector: "Vector",
+	// Its layer's name is always written.
+	owned: "",
 };
 
 type ValueType =
 	| "length"
+	| "offset"
 	| "size"
 	| "color"
+	| "paint"
 	| "opacity"
 	| "font-family"
 	| "font-weight"
@@ -46,7 +59,12 @@ type PropSpec = { kinds: Kind[]; type: ValueType; default?: string };
 
 const LAYOUT: Kind[] = ["frame"];
 const BOXES: Kind[] = ["frame", "rect", "image"];
-const ALL: Kind[] = ["frame", "text", "rect", "image"];
+/** Figma-owned Elements take only these: their place and size. */
+const SIZED: Kind[] = [...BOXES, "vector", "owned"];
+const PLACED: Kind[] = [...SIZED, "text"];
+const ALL: Kind[] = PLACED.filter((kind) => kind !== "owned");
+/** Vectors can't fill their parent: Figma would scale their paths. */
+const STRETCHY: Kind[] = ["frame", "text", "rect", "image", "owned"];
 
 /**
  * Longhand properties in the order Screens are printed. `display: flex` is
@@ -63,6 +81,11 @@ export const PROPS = {
 		type: { keywords: ["nowrap", "wrap"] },
 		default: "nowrap",
 	},
+	overflow: {
+		kinds: LAYOUT,
+		type: { keywords: ["visible", "hidden"] },
+		default: "visible",
+	},
 	"justify-content": {
 		kinds: LAYOUT,
 		type: { keywords: ["flex-start", "center", "flex-end", "space-between"] },
@@ -78,15 +101,33 @@ export const PROPS = {
 	"padding-right": { kinds: LAYOUT, type: "length", default: "0" },
 	"padding-bottom": { kinds: LAYOUT, type: "length", default: "0" },
 	"padding-left": { kinds: LAYOUT, type: "length", default: "0" },
-	width: { kinds: ALL, type: "size" },
-	height: { kinds: BOXES, type: "size" },
-	flex: { kinds: ALL, type: { keywords: ["1"] } },
-	"align-self": { kinds: ALL, type: { keywords: ["stretch"] } },
+	position: { kinds: PLACED, type: { keywords: ["absolute"] } },
+	left: { kinds: PLACED, type: "offset" },
+	top: { kinds: PLACED, type: "offset" },
+	width: { kinds: PLACED, type: "size" },
+	height: { kinds: SIZED, type: "size" },
+	flex: { kinds: STRETCHY, type: { keywords: ["1"] } },
+	"align-self": { kinds: STRETCHY, type: { keywords: ["stretch"] } },
 	"background-color": {
 		kinds: BOXES.filter((kind) => kind !== "image"),
 		type: "color",
 	},
 	"border-radius": { kinds: BOXES, type: "radius", default: "0" },
+	"border-width": { kinds: BOXES, type: "length", default: "0" },
+	"border-color": { kinds: BOXES, type: "color" },
+	fill: { kinds: ["vector"], type: "paint", default: "#000000" },
+	stroke: { kinds: ["vector"], type: "paint", default: "none" },
+	"stroke-width": { kinds: ["vector"], type: "length", default: "1" },
+	"stroke-linecap": {
+		kinds: ["vector"],
+		type: { keywords: ["butt", "round", "square"] },
+		default: "butt",
+	},
+	"stroke-linejoin": {
+		kinds: ["vector"],
+		type: { keywords: ["miter", "round", "bevel"] },
+		default: "miter",
+	},
 	opacity: { kinds: ALL, type: "opacity", default: "1" },
 	color: { kinds: ["text"], type: "color", default: "#000000" },
 	"font-family": { kinds: ["text"], type: "font-family", default: "Inter" },
@@ -117,6 +158,7 @@ export const PROP_NAMES = Object.keys(PROPS) as Prop[];
 export const SHORTHANDS: Record<string, Prop[]> = {
 	padding: ["padding-top", "padding-right", "padding-bottom", "padding-left"],
 	background: ["background-color"],
+	border: ["border-width", "border-color"],
 };
 
 const VAR = /^var\((--[a-zA-Z0-9_-]+)\)$/;
@@ -178,6 +220,8 @@ function normalize(type: ValueType, value: string): string | undefined {
 			const px = length(value);
 			return px !== undefined && px >= 0 ? String(px) : undefined;
 		}
+		case "offset":
+			return length(value)?.toString();
 		case "size": {
 			const px = length(value);
 			return px !== undefined && px > 0 ? String(px) : undefined;
@@ -193,6 +237,8 @@ function normalize(type: ValueType, value: string): string | undefined {
 		}
 		case "color":
 			return hexColor(value);
+		case "paint":
+			return value === "none" ? value : hexColor(value);
 		case "opacity": {
 			const number = Number(value);
 			return value !== "" && number >= 0 && number <= 1
@@ -236,9 +282,11 @@ function describe(type: ValueType): string {
 	}
 	return {
 		length: "use a length in px (or 0), or a spacing token",
+		offset: "use a length in px (negative too), or a spacing token",
 		size: "use a positive length in px, or a token",
 		radius: "use one to four lengths in px, or a rounded token",
 		color: "use a #rrggbb or #rgb color, or a colors token",
+		paint: "use `none`, a #rrggbb or #rgb color, or a colors token",
 		opacity: "use a number from 0 to 1",
 		"font-family": "use a font family name, or a typography token",
 		"font-weight": "use 100, 200, … 900, or a typography token",

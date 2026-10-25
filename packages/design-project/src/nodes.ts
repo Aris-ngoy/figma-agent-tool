@@ -8,10 +8,18 @@ import type {
 	SyncedNode,
 } from "@figma-agent-tool/protocol";
 import { elementBindings, type TokenBindings } from "./design-system";
-import { defaultName, type ResolveContext, resolveElement } from "./resolve";
+import { formatPath, parsePath } from "./path";
+import {
+	defaultName,
+	type ResolveContext,
+	resolveElement,
+	resolveProp,
+	vectorGeometry,
+} from "./resolve";
 import type { Element } from "./screen";
 import {
 	DEFAULT_TAGS,
+	FIGMA_OWNED_TAG,
 	fontStyle,
 	type Kind,
 	type Prop,
@@ -25,6 +33,11 @@ export type PushContext = ResolveContext & {
 	imageFill: (src: string, scaleMode: "FILL" | "FIT") => ScreenFill;
 	/** The Design System's variables and text styles elements bind to. */
 	bindings?: TokenBindings;
+	/**
+	 * Whether the Screen moved, resized or renamed a Figma-owned Element
+	 * (or put it in another frame) since the Baseline.
+	 */
+	placed?: (element: Element, parent: Element | undefined) => boolean;
 };
 
 const PRIMARY_ALIGN = {
@@ -52,7 +65,20 @@ const NODE_TYPES = {
 	text: "TEXT",
 	rect: "RECTANGLE",
 	image: "RECTANGLE",
+	vector: "VECTOR",
+	owned: "OWNED",
 } as const;
+
+const STROKE_CAPS = { butt: "NONE", round: "ROUND", square: "SQUARE" } as const;
+
+const STROKE_JOINS = {
+	miter: "MITER",
+	round: "ROUND",
+	bevel: "BEVEL",
+} as const;
+
+/** Layers that read as a kind of element (images are rectangles). */
+const SUPPORTED_TYPES = ["FRAME", "TEXT", "RECTANGLE", "VECTOR"];
 
 /** The node tree a checked Screen with keys on every element pushes as. */
 export function toScreenNode(root: Element, context: PushContext): ScreenNode {
@@ -61,28 +87,51 @@ export function toScreenNode(root: Element, context: PushContext): ScreenNode {
 
 function convert(
 	element: Element,
-	parentDirection: string | undefined,
+	parent: Element | undefined,
 	context: PushContext,
 ): ScreenNode {
-	const isRoot = parentDirection === undefined;
+	const isRoot = parent === undefined;
+	const parentDirection =
+		parent && resolveProp(parent, "flex-direction", context.tokens);
 	const r = resolveElement(element, context, isRoot);
 	const key = element.key;
 	if (!key)
 		throw new Error("Push gives every element a key before converting it.");
 	const row = parentDirection === "row";
+	const absolute = r.position === "absolute";
 	const sizing = (axis: "width" | "height") => {
 		if (isRoot) return "FIXED" as const;
 		const main = (axis === "width") === row;
-		if (main ? r.flex === "1" : r["align-self"] === "stretch")
+		if (!absolute && (main ? r.flex === "1" : r["align-self"] === "stretch"))
 			return "FILL" as const;
 		return r[axis] ? ("FIXED" as const) : ("HUG" as const);
 	};
-	const node: ScreenNode = {
-		key,
-		type: NODE_TYPES[element.kind],
+	const geometry = {
 		width: Number(r.width) || 100,
 		height: Number(r.height) || 100,
 		sizing: { horizontal: sizing("width"), vertical: sizing("height") },
+		...(absolute && { position: { x: Number(r.left), y: Number(r.top) } }),
+	};
+	if (element.kind === "owned") {
+		const id = context.nodeIds[key];
+		if (!id) throw new Error(`Figma-owned Element ${key} has no layer.`);
+		const owned: ScreenNode = {
+			key,
+			id,
+			type: "OWNED",
+			fills: [],
+			...geometry,
+		};
+		if (context.placed?.(element, parent)) {
+			owned.place = true;
+			if (element.name) owned.name = element.name;
+		}
+		return owned;
+	}
+	const node: ScreenNode = {
+		key,
+		type: NODE_TYPES[element.kind],
+		...geometry,
 		fills: fills(element, r, context),
 		opacity: Number(r.opacity),
 	};
@@ -92,9 +141,15 @@ function convert(
 	if (bindings) node.bindings = bindings;
 	if (element.kind !== "text") {
 		node.name = element.name ?? defaultName(element, context, isRoot);
-		node.cornerRadius = cornerRadius(r["border-radius"] as string);
 	} else if (element.name !== undefined) {
 		node.name = element.name;
+	}
+	if (r["border-radius"] !== undefined)
+		node.cornerRadius = cornerRadius(r["border-radius"]);
+	const stroke = screenStroke(element, r);
+	if (stroke) node.stroke = stroke;
+	if (element.kind === "vector") {
+		node.vector = { paths: vectorGeometry(element, r).paths };
 	}
 	if (element.kind === "text") {
 		node.text = {
@@ -127,8 +182,9 @@ function convert(
 				COUNTER_ALIGN[r["align-items"] as keyof typeof COUNTER_ALIGN],
 			wrap: r["flex-wrap"] === "wrap",
 		};
+		node.clips = isRoot || r.overflow === "hidden";
 		node.children = element.children.map((child) =>
-			convert(child, r["flex-direction"], context),
+			convert(child, element, context),
 		);
 	}
 	return node;
@@ -149,11 +205,35 @@ function fills(
 					r["object-fit"] === "contain" ? "FIT" : "FILL",
 				),
 			];
+		case "vector":
+			return r.fill !== "none"
+				? [{ type: "SOLID", color: r.fill as string }]
+				: [];
 		default:
 			return r["background-color"]
 				? [{ type: "SOLID", color: r["background-color"] }]
 				: [];
 	}
+}
+
+/** A border as an inside stroke; a vector's stroke centered, as SVG draws it. */
+function screenStroke(
+	element: Element,
+	r: Record<string, string>,
+): ScreenNode["stroke"] {
+	if (element.kind === "vector") {
+		if (r.stroke === "none") return undefined;
+		return {
+			color: r.stroke as string,
+			weight: Number(r["stroke-width"]),
+			align: "CENTER",
+			cap: STROKE_CAPS[r["stroke-linecap"] as keyof typeof STROKE_CAPS],
+			join: STROKE_JOINS[r["stroke-linejoin"] as keyof typeof STROKE_JOINS],
+		};
+	}
+	const weight = Number(r["border-width"]);
+	if (!weight || !r["border-color"]) return undefined;
+	return { color: r["border-color"], weight, align: "INSIDE" };
 }
 
 function cornerRadius(radius: string): ScreenNode["cornerRadius"] {
@@ -180,34 +260,41 @@ export type PullContext = ResolveContext & {
 };
 
 /** A layer Pull can't express in the Screen Subset, which stays Figma's. */
-export type UnsupportedLayer = { nodeId: string; name: string; reason: string };
+export type FigmaOwnedLayer = {
+	/** Its Figma-owned Element's key; none for a Screen's own frame. */
+	key?: string;
+	nodeId: string;
+	name: string;
+	reason: string;
+};
 
 /** The Screen a frame reads as; layers outside the subset are listed. */
 export function fromSyncedNode(
 	frame: SyncedNode,
 	context: PullContext,
-): { root?: Element; unsupported: UnsupportedLayer[] } {
-	const unsupported: UnsupportedLayer[] = [];
-	const root = read(frame, undefined, context, unsupported);
-	return { root, unsupported };
+): { root?: Element; figmaOwned: FigmaOwnedLayer[] } {
+	const figmaOwned: FigmaOwnedLayer[] = [];
+	const root = read(frame, undefined, context, figmaOwned);
+	return { root, figmaOwned };
 }
 
 function read(
 	node: SyncedNode,
 	parentDirection: string | undefined,
 	context: PullContext,
-	unsupported: UnsupportedLayer[],
+	figmaOwned: FigmaOwnedLayer[],
 ): Element | undefined {
 	const isRoot = parentDirection === undefined;
 	const key = context.keyFor(node);
 	const reason = unsupportedReason(node, context);
 	if (reason || (isRoot && node.type !== "FRAME")) {
-		unsupported.push({
+		figmaOwned.push({
 			nodeId: node.id,
 			name: node.name,
 			reason: reason ?? "isn't a frame",
 		});
-		// A pushed layer the designer took outside the subset keeps its element.
+		if (!isRoot) return figmaOwnedElement(node, key, parentDirection, context);
+		// A Screen is a frame, so one that isn't keeps its Baseline.
 		const base = key ? context.baseElement(key) : undefined;
 		return base && { ...structuredClone(base), nodeId: node.id };
 	}
@@ -225,6 +312,8 @@ function read(
 	};
 	if (key) element.key = key;
 	if (kind === "frame") readLayout(node, set);
+	if (kind === "frame" && !isRoot && node.clips) set("overflow", "hidden");
+	readPosition(node, set);
 	readSize(node, kind, parentDirection, context, set);
 	const [fill] = node.fills as Paint[];
 	if (kind === "text") {
@@ -253,26 +342,95 @@ function read(
 	} else if (kind === "image" && fill?.type === "IMAGE") {
 		element.src = context.srcFor(fill.imageHash as string);
 		set("object-fit", fill.scaleMode === "FIT" ? "contain" : undefined);
+	} else if (kind === "vector") {
+		readVector(node, element, set);
 	} else if (fill?.type === "SOLID") {
 		set("background-color", fill.color);
 	}
-	if (kind !== "text") set("border-radius", radius(node.cornerRadius));
+	if (kind !== "text" && kind !== "vector")
+		set("border-radius", radius(node.cornerRadius));
+	if (kind !== "text" && kind !== "vector" && node.stroke) {
+		set("border-width", px(node.stroke.weight as number));
+		set("border-color", (node.stroke.paint as { color: string }).color);
+	}
 	set("opacity", node.opacity !== 1 ? String(round(node.opacity)) : undefined);
 	const isDefaultName = node.name === defaultName(element, context, isRoot);
 	if (!isDefaultName) element.name = node.name;
 	if (kind === "frame") {
 		const direction = props["flex-direction"] ?? "row";
 		for (const child of node.children ?? []) {
-			const childElement = read(child, direction, context, unsupported);
+			const childElement = read(child, direction, context, figmaOwned);
 			if (childElement) element.children.push(childElement);
 		}
 	}
 	return element;
 }
 
+/** A Figma-owned Element for a layer: its place and size, and its name. */
+function figmaOwnedElement(
+	node: SyncedNode,
+	key: string | undefined,
+	parentDirection: string,
+	context: PullContext,
+): Element {
+	const props: Element["props"] = {};
+	const set = (prop: Prop, value: string | undefined) => {
+		if (value !== undefined) props[prop] = value;
+	};
+	readPosition(node, set);
+	readSize(node, "owned", parentDirection, context, set);
+	return {
+		kind: "owned",
+		tag: FIGMA_OWNED_TAG,
+		...(key && { key }),
+		name: node.name,
+		props,
+		children: [],
+		nodeId: node.id,
+	};
+}
+
+function readPosition(
+	node: SyncedNode,
+	set: (prop: Prop, value: string | undefined) => void,
+) {
+	if (!node.absolute) return;
+	set("position", "absolute");
+	set("left", px(node.x));
+	set("top", px(node.y));
+}
+
+function readVector(
+	node: SyncedNode,
+	element: Element,
+	set: (prop: Prop, value: string | undefined) => void,
+) {
+	const [fill] = node.fills as Paint[];
+	const color = fill?.type === "SOLID" ? fill.color : "none";
+	set("fill", color !== "#000000" ? color : undefined);
+	const { stroke } = node;
+	if (stroke?.paint.type === "SOLID") {
+		set("stroke", stroke.paint.color);
+		set(
+			"stroke-width",
+			stroke.weight !== 1 ? px(stroke.weight as number) : undefined,
+		);
+		const cap = keyOf(STROKE_CAPS, stroke.cap as string);
+		set("stroke-linecap", cap !== "butt" ? cap : undefined);
+		const join = keyOf(STROKE_JOINS, stroke.join as string);
+		set("stroke-linejoin", join !== "miter" ? join : undefined);
+	}
+	element.paths = (node.vector?.paths ?? []).map(({ data, windingRule }) => {
+		const commands = parsePath(data);
+		const d = "problem" in commands ? data : formatPath(commands);
+		return windingRule === "EVENODD" ? { d, fillRule: "evenodd" } : { d };
+	});
+}
+
 function kindOf(node: SyncedNode): Kind {
 	if (node.type === "TEXT") return "text";
 	if (node.type === "FRAME") return "frame";
+	if (node.type === "VECTOR") return "vector";
 	const [fill] = node.fills as Paint[];
 	return fill?.type === "IMAGE" ? "image" : "rect";
 }
@@ -282,12 +440,21 @@ function unsupportedReason(
 	node: SyncedNode,
 	context: PullContext,
 ): string | undefined {
-	if (!["FRAME", "TEXT", "RECTANGLE"].includes(node.type))
-		return `is a ${node.type}`;
+	if (!SUPPORTED_TYPES.includes(node.type)) return `is a ${node.type}`;
 	if (!node.visible) return "is hidden";
 	if (node.rotation !== 0) return "is rotated";
-	if (node.strokes > 0) return "has strokes";
+	if (
+		node.absolute &&
+		(node.absolute.horizontal !== "MIN" || node.absolute.vertical !== "MIN")
+	)
+		return "is pinned to its parent's right, bottom or center";
+	const stroke = strokeReason(node);
+	if (stroke) return stroke;
 	if (node.effects > 0) return "has effects";
+	if (node.type === "VECTOR") {
+		const vector = vectorReason(node);
+		if (vector) return vector;
+	}
 	if (node.type === "FRAME") {
 		const mode = node.layout?.mode;
 		if (mode !== "HORIZONTAL" && mode !== "VERTICAL")
@@ -329,6 +496,52 @@ function unsupportedReason(
 			return `uses the font style ${text.fontName.style}`;
 		if (node.sizing?.vertical === "FIXED") return "is text with a fixed height";
 	}
+	return undefined;
+}
+
+/** Why a layer's strokes aren't a border or an SVG stroke, if they aren't. */
+function strokeReason(node: SyncedNode): string | undefined {
+	const { stroke } = node;
+	if (node.strokes === 0 || !stroke) return undefined;
+	if (node.type === "TEXT") return "has strokes on text";
+	if (node.strokes > 1) return "has more than one stroke";
+	const { paint } = stroke;
+	if (
+		paint.type !== "SOLID" ||
+		paint.visible === false ||
+		(paint.opacity ?? 1) !== 1
+	)
+		return "has a stroke that isn't one solid color";
+	if (stroke.weight === "mixed")
+		return "has strokes of different widths per side";
+	if (stroke.dashed) return "has a dashed stroke";
+	const align = node.type === "VECTOR" ? "CENTER" : "INSIDE";
+	if (stroke.align !== align)
+		return `has a stroke aligned ${stroke.align.toLowerCase()}, where Screens draw it ${align.toLowerCase()}`;
+	if (node.type === "FRAME" && stroke.inLayout === false)
+		return "has a stroke that doesn't take up room in its auto layout";
+	if (
+		node.type === "VECTOR" &&
+		(!Object.values(STROKE_CAPS).includes(stroke.cap as never) ||
+			!Object.values(STROKE_JOINS).includes(stroke.join as never))
+	)
+		return "has stroke caps or joins SVG doesn't draw";
+	return undefined;
+}
+
+/** Why a vector isn't expressible as an <svg>, if it isn't. */
+function vectorReason(node: SyncedNode): string | undefined {
+	const paths = node.vector?.paths ?? [];
+	if (paths.length === 0) return "is a vector network without paths";
+	if (paths.some(({ data }) => "problem" in parsePath(data)))
+		return "has paths Pull couldn't read";
+	const filled = node.fills !== "mixed" && node.fills.length > 0;
+	if (filled && paths.some(({ windingRule }) => windingRule === "NONE"))
+		return "has open paths Figma doesn't fill";
+	if (node.cornerRadius !== 0) return "rounds its corners";
+	const { sizing } = node;
+	if (sizing?.horizontal === "FILL" || sizing?.vertical === "FILL")
+		return "stretches to fill its parent, scaling its paths";
 	return undefined;
 }
 
@@ -375,8 +588,8 @@ function readSize(
 		const main = (axis === "width") === row;
 		if (sizing === "FILL")
 			set(main ? "flex" : "align-self", main ? "1" : "stretch");
-		// Rectangles can't hug; text heights always do.
-		else if (sizing === "FIXED" || kind === "rect" || kind === "image") {
+		// Rectangles and vectors can't hug; text heights always do.
+		else if (sizing === "FIXED" || (kind !== "frame" && kind !== "text")) {
 			if (!(kind === "text" && axis === "height")) set(axis, px(node[axis]));
 		}
 	}

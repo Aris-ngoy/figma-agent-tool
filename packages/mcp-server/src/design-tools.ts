@@ -8,6 +8,7 @@ import {
 } from "@figma-agent-tool/design-project";
 import {
 	DEFAULT_PREVIEW_PORT,
+	exportNote,
 	type Preview,
 	RenderError,
 	renderScreen,
@@ -123,8 +124,10 @@ export function registerDesignTools(
 		{
 			description:
 				"Render a Screen to a PNG exactly as the Preview shows it (headless Chromium, " +
-				"downloaded on first use), into the artifacts folder. Returns its path and size; " +
-				"set `inline` to also get the image.",
+				"downloaded on first use), into the artifacts folder. Returns its path and size, " +
+				"and its Figma-owned Elements, drawn from the exports Pull cached (`export`: " +
+				"current, stale once the Screen resized one, or missing); set `inline` to also " +
+				"get the image.",
 			inputSchema: {
 				screen: z
 					.string()
@@ -135,17 +138,33 @@ export function registerDesignTools(
 					.default(false)
 					.describe("Also return the image inline. Costs context."),
 			},
-			outputSchema: { path: z.string(), width: z.number(), height: z.number() },
+			outputSchema: {
+				path: z.string(),
+				width: z.number(),
+				height: z.number(),
+				figmaOwned: z.array(
+					z.object({
+						key: z.string(),
+						name: z.string().optional(),
+						export: z.enum(["current", "stale", "missing"]),
+						note: z.string().optional(),
+					}),
+				),
+			},
 		},
 		async ({ screen: name, inline }) => {
 			const project = await loadProject(designDir);
 			const screen = findScreen(project, name);
-			const { png } = await renderScreen(project, screen, { screenshot });
-			const structuredContent = await writePngArtifact(
-				artifactsDir,
-				`screen-${name}`,
-				png,
-			);
+			const { png, figmaOwned } = await renderScreen(project, screen, {
+				screenshot,
+			});
+			const structuredContent = {
+				...(await writePngArtifact(artifactsDir, `screen-${name}`, png)),
+				figmaOwned: figmaOwned.map(({ src: _, ...owned }) => {
+					const note = exportNote(owned);
+					return note ? { ...owned, note } : owned;
+				}),
+			};
 			const result: CallToolResult = jsonResult(structuredContent);
 			if (inline) {
 				result.content.push({

@@ -9,7 +9,12 @@ import {
 	type DesignProject,
 	loadProject,
 } from "@figma-agent-tool/design-project";
-import { screenDocument, screenSize } from "./document";
+import {
+	exportNote,
+	figmaOwnedOf,
+	screenDocument,
+	screenSize,
+} from "./document";
 
 export const DEFAULT_PREVIEW_PORT = 4321;
 
@@ -79,6 +84,7 @@ export function startPreview({
 					screenDocument(project, screen, {
 						baseUrl: "/files/screens/",
 						head: LIVE_RELOAD,
+						figmaOwned: await figmaOwnedOf(project, screen),
 					}),
 				);
 			}
@@ -120,12 +126,16 @@ function html(body: string): Response {
 
 async function indexPage(project: DesignProject): Promise<string> {
 	const { errors } = await checkProject(project);
-	const screens = project.screens.map((screen) => {
+	const screens = project.screens.map(async (screen) => {
 		const { width, height } = screenSize(project, screen);
 		const screenErrors = errors.filter((error) => error.file === screen.file);
+		const notes = (await figmaOwnedOf(project, screen)).flatMap((owned) => {
+			const note = exportNote(owned);
+			return note ? [note] : [];
+		});
 		return `<section>
 <h2>${escapeHtml(screen.name)} <small>${width}×${height}</small></h2>
-${errorList(screenErrors)}
+${errorList(screenErrors)}${noteList(notes)}
 <iframe src="/screens/${encodeURIComponent(screen.name)}" width="${width}" height="${height}" title="${escapeHtml(screen.name)}"></iframe>
 </section>`;
 	});
@@ -143,13 +153,14 @@ main { display: flex; flex-wrap: wrap; gap: 32px; align-items: flex-start; }
 h2 { font-size: 14px; margin: 0 0 8px; } small { color: #666; font-weight: normal; }
 iframe { border: 0; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.2); }
 ul { color: #b00020; margin: 0 0 8px; padding-left: 18px; }
+ul.notes { color: #8a5a00; }
 </style>
 ${LIVE_RELOAD}
 </head>
 <body>
 ${designMdErrors}
 <main>
-${screens.join("\n") || "<p>No Screens yet: add HTML files to screens/.</p>"}
+${(await Promise.all(screens)).join("\n") || "<p>No Screens yet: add HTML files to screens/.</p>"}
 </main>
 </body>
 </html>
@@ -163,6 +174,12 @@ function errorList(errors: CheckError[]): string {
 			`<li>line ${error.line}${error.element ? ` ${escapeHtml(error.element)}` : ""}: ${escapeHtml(error.message)} <code>${error.rule}</code></li>`,
 	);
 	return `<ul>${items.join("")}</ul>`;
+}
+
+function noteList(notes: string[]): string {
+	if (notes.length === 0) return "";
+	const items = notes.map((note) => `<li>${escapeHtml(note)}</li>`);
+	return `<ul class="notes">${items.join("")}</ul>`;
 }
 
 function escapeHtml(text: string): string {

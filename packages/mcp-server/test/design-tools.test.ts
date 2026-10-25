@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
 	layerByKey,
 	logoPng,
+	widerScreens,
 	writeFixtureProject,
 } from "@figma-agent-tool/design-project/fixtures";
 import type { SyncedNode } from "@figma-agent-tool/protocol";
@@ -26,10 +27,15 @@ function structured<T = Record<string, unknown>>(result: Result): T {
 }
 
 /** A harness on the fixture Design Project, with a plugin connected. */
-async function withProject(overrides: Record<string, string | null> = {}) {
+async function withProject(
+	overrides: Record<string, string | null> = {},
+	pluginOptions: Parameters<
+		Awaited<ReturnType<typeof startHarness>>["connectFakePlugin"]
+	>[0] = {},
+) {
 	const designDir = await writeFixtureProject(overrides);
 	const harness = await startHarness({ designDir });
-	const plugin = await harness.connectFakePlugin();
+	const plugin = await harness.connectFakePlugin(pluginOptions);
 	const login = join(designDir, "screens/login.html");
 	return {
 		harness,
@@ -41,8 +47,11 @@ async function withProject(overrides: Record<string, string | null> = {}) {
 }
 
 /** Pushed once, link confirmed. */
-async function pushed(overrides: Record<string, string | null> = {}) {
-	const setup = await withProject(overrides);
+async function pushed(
+	overrides: Record<string, string | null> = {},
+	pluginOptions: Parameters<typeof withProject>[1] = {},
+) {
+	const setup = await withProject(overrides, pluginOptions);
 	const result = await setup.harness.callTool("push", { confirmLink: true });
 	expect(result.isError).toBeFalsy();
 	return { ...setup, frame: () => setup.plugin.screens.frame("login") };
@@ -308,7 +317,7 @@ describe("pull", () => {
 		const result = await harness.callTool("pull");
 		expect(structured(result)).toMatchObject({
 			screens: [
-				{ screen: "login", status: "unchanged", conflicts: 0, unsupported: [] },
+				{ screen: "login", status: "unchanged", conflicts: 0, figmaOwned: [] },
 			],
 		});
 		expect(await read()).toBe(before);
@@ -668,5 +677,190 @@ components:
 				line: 8,
 			}),
 		);
+	});
+});
+
+describe("wider Screen Subset", () => {
+	test.each(Object.keys(widerScreens))(
+		"%s: Push then Pull round-trips byte for byte",
+		async (name) => {
+			const { harness, designDir } = await pushed({
+				"screens/login.html": widerScreens[name] as string,
+			});
+			const before = await readFile(join(designDir, "screens/login.html"));
+			const result = await harness.callTool("pull");
+			expect(structured(result)).toMatchObject({
+				screens: [{ status: "unchanged", figmaOwned: [] }],
+			});
+			expect(await readFile(join(designDir, "screens/login.html"))).toEqual(
+				before,
+			);
+		},
+	);
+});
+
+describe("Figma-owned Elements", () => {
+	/** Login pushed, a star drawn in its frame, and Pulled; exports counted. */
+	async function pulledStar() {
+		const exported: string[] = [];
+		const setup = await pushed(
+			{},
+			{
+				exportPng: (nodeId) => {
+					exported.push(nodeId);
+					return logoPng;
+				},
+			},
+		);
+		const star: SyncedNode = {
+			...structuredClone(layerByKey(setup.frame(), "e7")),
+			id: "9:60",
+			key: null,
+			type: "STAR",
+			name: "Star",
+			width: 40,
+			height: 38,
+			sizing: { horizontal: "FIXED", vertical: "FIXED" },
+			fills: [{ type: "SOLID", color: "#ffcc00" }],
+		};
+		setup.frame().children?.push(star);
+		const result = await setup.harness.callTool("pull");
+		return { ...setup, exported, result, star };
+	}
+
+	const starIn = (frame: SyncedNode) =>
+		frame.children?.find((layer) => layer.id === "9:60");
+
+	test("Pull writes a layer outside the Screen Subset as a Figma-owned Element and caches its export", async () => {
+		const pulled = await pulledStar();
+		expect(structured(pulled.result)).toMatchObject({
+			screens: [
+				{
+					status: "merged",
+					figmaOwned: [
+						{ key: "e8", nodeId: "9:60", name: "Star", reason: "is a STAR" },
+					],
+				},
+			],
+		});
+		expect(await pulled.read()).toContain(
+			'<figma-owned data-key="e8" data-name="Star" style="width:40px; height:38px"></figma-owned>',
+		);
+		expect(pulled.exported).toEqual(["9:60"]);
+		const png = join(pulled.designDir, "sync/exports/login/e8.png");
+		expect((await readFile(png)).toString("base64")).toBe(logoPng);
+		const check = await pulled.harness.callTool("check_design_project");
+		expect(structured(check)).toMatchObject({ ok: true });
+	});
+
+	test("Push leaves its layer as the designers made it, and Pull then finds nothing new", async () => {
+		const pulled = await pulledStar();
+		const before = structuredClone(starIn(pulled.frame()));
+		const source = await pulled.read();
+		await writeFile(
+			pulled.login,
+			source.replace("Welcome back", "Hello again"),
+		);
+		const result = await pulled.harness.callTool("push");
+		expect(result.isError).toBeFalsy();
+		expect({ ...starIn(pulled.frame()), key: null }).toEqual({
+			...(before as SyncedNode),
+			key: null,
+		});
+		const again = await pulled.harness.callTool("pull");
+		expect(structured(again)).toMatchObject({
+			screens: [{ status: "unchanged" }],
+		});
+		// The export is current: no need to fetch it again.
+		expect(pulled.exported).toEqual(["9:60"]);
+	});
+
+	test("Push moves and resizes its layer when the Screen did", async () => {
+		const pulled = await pulledStar();
+		await writeFile(
+			pulled.login,
+			(await pulled.read()).replace(
+				'style="width:40px; height:38px"',
+				'style="position:absolute; left:4px; top:8px; width:60px; height:38px"',
+			),
+		);
+		const result = await pulled.harness.callTool("push");
+		expect(result.isError).toBeFalsy();
+		expect(starIn(pulled.frame())).toMatchObject({
+			type: "STAR",
+			width: 60,
+			x: 4,
+			y: 8,
+			fills: [{ type: "SOLID", color: "#ffcc00" }],
+		});
+	});
+
+	test("Pull fetches its export again once a designer changed the layer", async () => {
+		const pulled = await pulledStar();
+		(starIn(pulled.frame()) as SyncedNode).fills = [
+			{ type: "SOLID", color: "#00ff00" },
+		];
+		const result = await pulled.harness.callTool("pull");
+		expect(structured(result)).toMatchObject({
+			screens: [{ status: "unchanged" }],
+		});
+		expect(pulled.exported).toEqual(["9:60", "9:60"]);
+	});
+
+	test("deleting it in the Screen deletes its layer on Push, and its export", async () => {
+		const pulled = await pulledStar();
+		await writeFile(
+			pulled.login,
+			(await pulled.read()).replace(/\n {2}<figma-owned[^\n]*/, ""),
+		);
+		const result = await pulled.harness.callTool("push");
+		expect(result.isError).toBeFalsy();
+		expect(starIn(pulled.frame())).toBeUndefined();
+		expect(
+			existsSync(join(pulled.designDir, "sync/exports/login/e8.png")),
+		).toBe(false);
+	});
+
+	test("Push refuses a Figma-owned Element Pull didn't make", async () => {
+		const pulled = await pulledStar();
+		await writeFile(
+			pulled.login,
+			(await pulled.read()).replace('data-key="e8"', 'data-key="e99"'),
+		);
+		const result = await pulled.harness.callTool("push");
+		expect(result.isError).toBe(true);
+		expect(text(result)).toContain("Figma-owned Elements (e99)");
+	});
+
+	test("render_screen shows it from its cached export, and says when that's stale or missing", async () => {
+		const pulled = await pulledStar();
+		const shots: string[] = [];
+		const harness = await startHarness({
+			designDir: pulled.designDir,
+			screenshot: async (htmlPath, pngPath) => {
+				shots.push(await readFile(htmlPath, "utf8"));
+				await writeFile(pngPath, Buffer.from(logoPng, "base64"));
+			},
+		});
+		const render = () => harness.callTool("render_screen", { screen: "login" });
+		expect(structured(await render())).toMatchObject({
+			figmaOwned: [{ key: "e8", name: "Star", export: "current" }],
+		});
+		expect(shots[0]).toContain("../sync/exports/login/e8.png");
+
+		await writeFile(
+			pulled.login,
+			(await pulled.read()).replace("width:40px", "width:80px"),
+		);
+		const stale = await render();
+		expect(structured(stale)).toMatchObject({
+			figmaOwned: [{ key: "e8", export: "stale" }],
+		});
+		expect(text(stale)).toContain("stale");
+
+		await rm(join(pulled.designDir, "sync/exports"), { recursive: true });
+		expect(structured(await render())).toMatchObject({
+			figmaOwned: [{ key: "e8", export: "missing" }],
+		});
 	});
 });

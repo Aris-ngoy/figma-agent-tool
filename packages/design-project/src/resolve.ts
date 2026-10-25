@@ -2,6 +2,7 @@
 // units dropped, defaults filled in. Pull compares elements this way, so
 // `var(--colors-primary)` in the file and `#3366ff` read from Figma match.
 import type { Tokens } from "./design-md";
+import { formatPath, parsePath, transformPath } from "./path";
 import type { ScreenSize } from "./project";
 import type { Element } from "./screen";
 import {
@@ -41,7 +42,85 @@ export function resolveElement(
 		resolved.width ||= String(context.screenSize.width);
 		resolved.height ||= String(context.screenSize.height);
 	}
+	if (element.kind === "vector") {
+		const { paths, scale } = vectorGeometry(element, resolved);
+		resolved["@paths"] = paths
+			.map((path) => `${path.windingRule} ${path.data}`)
+			.join(" | ");
+		resolved["stroke-width"] = String(
+			round(Number(resolved["stroke-width"]) * scale),
+		);
+	}
 	return resolved;
+}
+
+export type VectorPathData = {
+	data: string;
+	windingRule: "NONZERO" | "EVENODD";
+};
+
+/**
+ * A vector's paths in its own pixels, as Figma holds them: its viewBox
+ * scales and centers them in its size, as a browser does, and scales its
+ * stroke by `scale`.
+ */
+export function vectorGeometry(
+	element: Element,
+	resolved: { width?: string; height?: string },
+): { paths: VectorPathData[]; scale: number } {
+	const [width, height] = [Number(resolved.width), Number(resolved.height)];
+	const [minX = 0, minY = 0, boxWidth = width, boxHeight = height] =
+		element.viewBox
+			?.trim()
+			.split(/[\s,]+/)
+			.map(Number) ?? [];
+	const scale = Math.min(width / boxWidth, height / boxHeight);
+	const dx = (width - boxWidth * scale) / 2 - minX * scale;
+	const dy = (height - boxHeight * scale) / 2 - minY * scale;
+	const paths = (element.paths ?? []).flatMap((path) => {
+		const commands = parsePath(path.d);
+		if ("problem" in commands) return [];
+		return [
+			{
+				data: formatPath(transformPath(commands, scale, dx, dy)),
+				windingRule:
+					path.fillRule === "evenodd"
+						? ("EVENODD" as const)
+						: ("NONZERO" as const),
+			},
+		];
+	});
+	return { paths, scale };
+}
+
+/**
+ * The same vector without a viewBox: paths in its own pixels and its stroke
+ * width scaled, as Pull writes vectors.
+ */
+export function withoutViewBox(
+	element: Element,
+	context: ResolveContext,
+): Element {
+	if (element.viewBox === undefined) return element;
+	const resolved = resolveElement(element, context, false);
+	const { paths } = vectorGeometry(element, resolved);
+	const props = { ...element.props };
+	if (props["stroke-width"] !== undefined)
+		props["stroke-width"] = `${resolved["stroke-width"]}px`;
+	return {
+		...element,
+		viewBox: undefined,
+		props,
+		paths: paths.map(({ data, windingRule }) =>
+			windingRule === "EVENODD"
+				? { d: data, fillRule: "evenodd" }
+				: { d: data },
+		),
+	};
+}
+
+function round(value: number): number {
+	return Math.round(value * 100) / 100;
 }
 
 export function resolveProp(

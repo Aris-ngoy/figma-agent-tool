@@ -3,7 +3,12 @@
 // changes to an element's own styles, text and name merge field by field,
 // children merge as lists. Where both sides changed the same thing
 // differently, the result holds a Sync Conflict for the Agent to resolve.
-import { type ResolveContext, resolveElement, sameElement } from "./resolve";
+import {
+	type ResolveContext,
+	resolveElement,
+	sameElement,
+	withoutViewBox,
+} from "./resolve";
 import type { Element } from "./screen";
 
 export type MergeResult = { root: Element; conflicts: number };
@@ -44,21 +49,33 @@ class Merger {
 			resolveElement(figma, contexts.figma, isRoot),
 		];
 		if (l["@kind"] !== f["@kind"]) {
-			if (f["@kind"] === b["@kind"]) return local;
-			if (l["@kind"] === b["@kind"]) return figma;
+			// One side replaced the element: fine unless the other changed it.
+			if (
+				f["@kind"] === b["@kind"] &&
+				!this.changed(base, figma, contexts.figma)
+			)
+				return local;
+			if (
+				l["@kind"] === b["@kind"] &&
+				!this.changed(base, local, contexts.local)
+			)
+				return figma;
 			return this.conflict(local, figma);
 		}
-		const merged: Element = {
-			...local,
-			props: { ...local.props },
-			children: [],
-		};
-		let conflicting = false;
-		for (const field of new Set([...Object.keys(l), ...Object.keys(f)])) {
+		const fields = [...new Set([...Object.keys(l), ...Object.keys(f)])];
+		const taken = fields.filter((field) => {
 			const [fromBase, fromLocal, fromFigma] = [b[field], l[field], f[field]];
-			if (fromFigma === fromBase || fromLocal === fromFigma) continue;
-			if (fromLocal === fromBase) takeField(merged, figma, field);
-			else conflicting = true;
+			return fromFigma !== fromBase && fromLocal !== fromFigma;
+		});
+		const conflicting = taken.some((field) => l[field] !== b[field]);
+		// Figma's paths are in the vector's own pixels, as Pull writes them.
+		const geometry = taken.some(
+			(field) => field === "@paths" || field === "stroke-width",
+		);
+		const mine = geometry ? withoutViewBox(local, contexts.local) : local;
+		const merged: Element = { ...mine, props: { ...mine.props }, children: [] };
+		if (!conflicting) {
+			for (const field of taken) takeField(merged, figma, field);
 		}
 		if (merged.kind === "frame") {
 			merged.children = this.children(
@@ -177,6 +194,9 @@ function takeField(merged: Element, figma: Element, field: string) {
 			return;
 		case "@src":
 			merged.src = figma.src;
+			return;
+		case "@paths":
+			merged.paths = figma.paths;
 			return;
 		default: {
 			const prop = field as keyof Element["props"];

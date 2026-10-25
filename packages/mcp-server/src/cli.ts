@@ -14,6 +14,7 @@ import {
 	loadProject,
 } from "@figma-agent-tool/design-project";
 import {
+	exportNote,
 	RenderError,
 	renderScreen,
 	startPreview,
@@ -195,10 +196,17 @@ async function render(
 		);
 		return 1;
 	}
-	const { png, width, height } = await renderScreen(project, screen);
+	const { png, width, height, figmaOwned } = await renderScreen(
+		project,
+		screen,
+	);
 	const out = resolve(String(flags.get("out") ?? `${screen.name}.png`));
 	await writeFile(out, png);
 	io.out(`Rendered ${screen.file} at ${width}×${height} to ${out}`);
+	for (const owned of figmaOwned) {
+		const note = exportNote(owned);
+		if (note) io.out(`  ${note}`);
+	}
 	return 0;
 }
 
@@ -308,9 +316,9 @@ async function pull(dir: string, bridge: Bridge, io: CliIo): Promise<number> {
 				? `, ${screen.conflicts} Sync Conflict${screen.conflicts === 1 ? "" : "s"}`
 				: "";
 		io.out(`${screen.screen}: ${screen.status}${conflicts}`);
-		for (const layer of screen.unsupported) {
+		for (const layer of screen.figmaOwned) {
 			io.out(
-				`  kept in Figma: “${layer.name}” (${layer.nodeId}) ${layer.reason}`,
+				`  ${layer.key ? `Figma-owned Element ${layer.key}` : "kept in Figma"}: “${layer.name}” (${layer.nodeId}) ${layer.reason}`,
 			);
 		}
 	}

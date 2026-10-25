@@ -86,7 +86,7 @@ The CLI's `push`, `pull` and `relink` host the plugin bridge while they run, so 
 
 ### Screens
 
-A Screen is one `<body>` element in the basic **Screen Subset**, where everything has an exact Figma equivalent:
+A Screen is one `<body>` element in the **Screen Subset**, where everything has an exact Figma equivalent:
 
 ```html
 <body style="display:flex; flex-direction:column; gap:var(--spacing-md); padding:24px; background:var(--colors-surface)">
@@ -102,7 +102,9 @@ A Screen is one `<body>` element in the basic **Screen Subset**, where everythin
 - `<body>` is the Screen's frame, at the project's Screen Size unless it sets both `width` and `height`.
 - `<div style="display:flex">` is an auto-layout frame (`flex-direction`, `gap`, `padding`, `justify-content`, `align-items`, `flex-wrap`); a `<div>` without children or `display` is a rectangle; `<p>`, `<span>` and `<h1>`–`<h6>` are text (`<br>` for line breaks); `<img>` is a rectangle with an image fill (`object-fit: cover | contain`).
 - Sizes: a `px` width or height is fixed, none hugs the content, `flex: 1` fills the parent's main axis and `align-self: stretch` its cross axis.
-- Boxes take `background`, `border-radius` and `opacity`; text takes `color`, `font-family`, `font-size`, `font-weight`, `font-style` and `text-align`. There's no inheritance: text styles go on text elements.
+- Boxes take `background`, `border-radius`, `opacity` and a solid border (`border: 1px solid #dddddd`, or `border-width` with `border-color`: an inside stroke that takes up room in auto layout); frames take `overflow: hidden` (clip content). Text takes `color`, `font-family`, `font-size`, `font-weight`, `font-style` and `text-align`. There's no inheritance: text styles go on text elements.
+- `position: absolute` with `left` and `top` (both, in px, negative too) takes an element out of its parent's auto layout at that offset (absolute position in Figma, pinned top left). It can't fill its parent.
+- `<svg>` with `<path d="…">`s (`fill-rule` optional) is a vector layer: `width` and `height` are required, `viewBox` scales the paths as a browser does, and its style takes `fill`, `stroke`, `stroke-width`, `stroke-linecap` and `stroke-linejoin`. Paths use M, L, H, V, C, S, Q, T and Z (no arcs). Pull writes vectors in their own pixels, without a `viewBox`.
 - `data-name` names the layer. Push writes a `data-key` into each element, which links it to its layer: leave it, and don't copy it onto another element.
 - DESIGN.md's tokens are CSS variables named after their path: `colors.primary` is `var(--colors-primary)`, `typography.title.fontSize` is `var(--typography-title-font-size)`.
 
@@ -120,7 +122,7 @@ A Screen is one `<body>` element in the basic **Screen Subset**, where everythin
   >>>>>>> Figma
   ```
 
-- Layers the basic subset can't express (vectors, effects, strokes, frames without auto layout, …) stay in Figma untouched and are listed by Pull; Figma-owned Elements for them come later.
+- A layer the Screen Subset can't express (effects, gradients, boolean shapes, stars, frames without auto layout, rotated or hidden layers, …) becomes a **Figma-owned Element**: `<figma-owned data-key="e8" data-name="Star" style="width:40px; height:38px"></figma-owned>`, at the layer's place and size. Pull lists each with the reason and caches a PNG export of its layer in `sync/exports/`, fetched again only when a designer changed it. The Preview and Render show that export, and say when it's stale (the Screen resized the element since) or missing. The Agent can move, resize, rename (`data-name`) or delete the element, and Push does the same to the layer, never touching its content; it holds nothing and takes only `width`, `height`, `flex`, `align-self`, `position`, `left` and `top`. Push refuses one Pull didn't make (its `data-key` names no layer).
 - `get_status` reports the Design Project, its Linked File, Screens with Unpulled Changes or Sync Conflicts, and the Design System's (`designSystem`).
 
 ### The Design System

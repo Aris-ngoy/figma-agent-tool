@@ -53,6 +53,17 @@ function printElement(element: Element, depth: number): string[] {
 			];
 		case "image":
 			return [open];
+		case "vector":
+			return [
+				open,
+				...(element.paths ?? []).map((path) => {
+					const rule = path.fillRule
+						? ` fill-rule="${escapeAttribute(path.fillRule)}"`
+						: "";
+					return `${indent}  <path d="${escapeAttribute(path.d)}"${rule} />`;
+				}),
+				`${indent}</${element.tag}>`,
+			];
 		default:
 			if (!hasChildren) return [`${open}</${element.tag}>`];
 			return [
@@ -76,6 +87,8 @@ function openTag(element: Element): string {
 	if (element.key) attributes.push(["data-key", element.key]);
 	if (element.name !== undefined) attributes.push(["data-name", element.name]);
 	if (element.src !== undefined) attributes.push(["src", element.src]);
+	if (element.viewBox !== undefined)
+		attributes.push(["viewBox", element.viewBox]);
 	const style = printStyle(element);
 	if (style) attributes.push(["style", style]);
 	const printed = attributes.map(

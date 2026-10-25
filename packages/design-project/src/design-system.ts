@@ -309,6 +309,8 @@ export function elementBindings(
 		) {
 			set("textStyle", style.token);
 		}
+	} else if (element.kind === "vector") {
+		set("fill", token("fill"));
 	} else {
 		if (element.kind !== "image") set("fill", token("background-color"));
 		set("cornerRadius", token("border-radius"));

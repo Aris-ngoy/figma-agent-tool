@@ -79,6 +79,8 @@ class ParseError extends Error {
 
 class Parser {
 	private at = 0;
+	/** How many <svg> elements the parser is inside. */
+	private svgDepth = 0;
 
 	constructor(private readonly source: string) {}
 
@@ -171,7 +173,8 @@ class Parser {
 			this.skipSpace();
 			if (this.source.startsWith("/>", this.at)) {
 				this.at += 2;
-				if (!VOID_ELEMENTS.has(tag)) {
+				// Inside <svg>, as in XML, any element may close itself.
+				if (!VOID_ELEMENTS.has(tag) && this.svgDepth === 0) {
 					this.fail(
 						`<${tag} /> can't be self-closing; close it with </${tag}>.`,
 						start,
@@ -188,7 +191,9 @@ class Parser {
 			element.attributes.push(this.parseAttribute());
 		}
 		if (VOID_ELEMENTS.has(tag)) return element;
+		if (tag === "svg") this.svgDepth++;
 		element.children = this.parseChildren(element);
+		if (tag === "svg") this.svgDepth--;
 		return element;
 	}
 

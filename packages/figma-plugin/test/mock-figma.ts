@@ -405,7 +405,10 @@ export function installMockFigma(
 		byId.set(node.id, node);
 		sharedPluginData(node);
 		if (node.type === "TEXT") autoRename(node);
-		if (node.type !== "PAGE") guardSizing(node);
+		if (node.type !== "PAGE") {
+			guardSizing(node);
+			guardPositioning(node);
+		}
 		// Every canvas node exports the fixture PNG; tests check the settings.
 		node.exportAsync = async (settings: unknown) => {
 			exports.push({ nodeId: node.id, settings });
@@ -779,6 +782,20 @@ export function installMockFigma(
 				...newGeometry,
 				fills: [{ type: "SOLID", color: "#d9d9d9" }],
 			}),
+		createVector: () =>
+			create({
+				name: "Vector",
+				type: "VECTOR",
+				...newGeometry,
+				fills: [],
+			}),
+		createStar: () =>
+			create({
+				name: "Star",
+				type: "STAR",
+				...newGeometry,
+				fills: [{ type: "SOLID", color: "#ffcc00" }],
+			}),
 		createText: () =>
 			create({
 				name: "Text",
@@ -866,6 +883,24 @@ function guardSizing(node: MockNode) {
 	}
 }
 
+/** Like Figma: only children of auto-layout frames can be positioned absolutely. */
+function guardPositioning(node: MockNode) {
+	let positioning = "AUTO";
+	Object.defineProperty(node, "layoutPositioning", {
+		enumerable: true,
+		get: () => positioning,
+		set: (value: string) => {
+			const parent = node.parent as MockNode | undefined;
+			if (value === "ABSOLUTE" && (parent?.layoutMode ?? "NONE") === "NONE") {
+				throw new Error(
+					"ABSOLUTE can only be set on children of auto-layout frames",
+				);
+			}
+			positioning = value;
+		},
+	});
+}
+
 /**
  * Like Figma with dynamic-page access: `reactions` is read-only and
  * `setReactionsAsync` writes. Reads also carry the deprecated `action`.
@@ -951,6 +986,11 @@ function toFigmaNode(node: SerializedNode): MockNode {
 			mock.width = width;
 			mock.height = height;
 		},
+		strokeAlign: "INSIDE",
+		strokeCap: "NONE",
+		strokeJoin: "MITER",
+		dashPattern: [],
+		constraints: { horizontal: "MIN", vertical: "MIN" },
 		effects: [],
 		effectStyleId: node.styles?.effect ?? "",
 		boundVariables: Object.fromEntries(
@@ -985,11 +1025,16 @@ function toFigmaNode(node: SerializedNode): MockNode {
 			primaryAxisAlignItems: layout?.primaryAxisAlignItems ?? "MIN",
 			counterAxisAlignItems: layout?.counterAxisAlignItems ?? "MIN",
 			layoutWrap: layout?.wrap ? "WRAP" : "NO_WRAP",
+			// Figma's default for new frames.
+			clipsContent: true,
+			strokesIncludedInLayout: false,
 			layoutSizingHorizontal: layout?.sizing.horizontal ?? "FIXED",
 			layoutSizingVertical: layout?.sizing.vertical ?? "FIXED",
 		});
 		mock.children = node.children.map(toFigmaNode);
 	}
+	if (node.type === "VECTOR") mock.vectorPaths = [];
+	if (node.type === "STAR") mock.pointCount = 5;
 	sources.set(mock, node);
 	if (node.component) {
 		const { key, description, properties, variantProperties } = node.component;

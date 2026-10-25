@@ -30,7 +30,7 @@ import {
 } from "./tokens";
 
 type Container = BaseNode & ChildrenMixin;
-type Layer = FrameNode | TextNode | RectangleNode;
+type Layer = FrameNode | TextNode | RectangleNode | VectorNode;
 
 const shared = (node: BaseNode, key: string) =>
 	node.getSharedPluginData(SYNC_NAMESPACE, key);
@@ -60,9 +60,10 @@ export async function pushScreens(
 	deadline: Deadline = NO_DEADLINE,
 ): Promise<CommandResult<"push_screens">> {
 	const found = new Map<string, BaseNode>();
-	const ids = screens.flatMap(({ frameId, tree }) => [
+	const ids = screens.flatMap(({ frameId, tree, remove }) => [
 		...(frameId ? [frameId] : []),
 		...treeIds(tree),
+		...remove,
 	]);
 	const [page, loadedTokens] = await Promise.all([
 		findPage(pageRef),
@@ -97,7 +98,11 @@ export async function pushScreens(
 		]),
 	);
 	const applier = new Applier(found, hashes, designSystem);
-	const frames = screens.map(({ screen, frameId, tree }) => {
+	const frames = screens.map(({ screen, frameId, tree, remove }) => {
+		for (const id of remove) {
+			const layer = found.get(id);
+			if (layer && !layer.removed && layer.id !== frameId) layer.remove();
+		}
 		const existing = frameId ? found.get(frameId) : undefined;
 		const frame =
 			existing?.type === "FRAME" && !existing.removed
@@ -277,7 +282,14 @@ class Applier {
 		node.fills = spec.fills.map((fill, index) =>
 			this.paint(fill, index === 0 ? spec.bindings?.fill : undefined),
 		);
-		if (node.type !== "TEXT") {
+		applyStroke(node, spec);
+		if (node.type === "FRAME") node.clipsContent = spec.clips ?? false;
+		if (node.type === "VECTOR" && spec.vector) {
+			// Sized first: resizing a vector scales its paths.
+			place(node, spec, isRoot);
+			node.vectorPaths = spec.vector.paths;
+		}
+		if (node.type !== "TEXT" && node.type !== "VECTOR") {
 			const radius = spec.cornerRadius ?? 0;
 			if (typeof radius === "number") node.cornerRadius = radius;
 			else {
@@ -288,17 +300,7 @@ class Applier {
 			}
 		}
 		node.opacity = spec.opacity ?? 1;
-		const { horizontal, vertical } = isRoot
-			? { horizontal: "FIXED", vertical: "FIXED" }
-			: spec.sizing;
-		node.resize(
-			horizontal === "FIXED" ? spec.width : node.width,
-			vertical === "FIXED" ? spec.height : node.height,
-		);
-		if (!isRoot) {
-			node.layoutSizingHorizontal = spec.sizing.horizontal;
-			node.layoutSizingVertical = spec.sizing.vertical;
-		}
+		if (node.type !== "VECTOR") place(node, spec, isRoot);
 		this.bind(node, spec);
 		if (node.type === "FRAME") this.children(node, spec.children ?? []);
 	}
@@ -349,15 +351,36 @@ class Applier {
 			const child = this.layerFor(spec);
 			if (parent.children[index] !== child) parent.insertChild(index, child);
 			kept.add(child);
-			this.apply(child, spec, false);
+			if (spec.type === "OWNED") this.keep(child, spec);
+			else this.apply(child as Layer, spec, false);
 		});
 		for (const child of [...parent.children]) {
 			if (!kept.has(child) && shared(child, SYNC_KEYS.element)) child.remove();
 		}
 	}
 
-	private layerFor(spec: ScreenNode): Layer {
+	/**
+	 * A Figma-owned Element's layer: only its key, and with `place` its name,
+	 * size and position, are the Screen's; its content stays the designers'.
+	 */
+	private keep(node: SceneNode, spec: ScreenNode) {
+		node.setSharedPluginData(SYNC_NAMESPACE, SYNC_KEYS.element, spec.key);
+		if (!spec.place) return;
+		if (spec.name !== undefined) node.name = spec.name;
+		if ("resize" in node && "layoutSizingHorizontal" in node) {
+			place(node, spec, false);
+		}
+	}
+
+	private layerFor(spec: ScreenNode): SceneNode {
 		const existing = spec.id ? this.found.get(spec.id) : undefined;
+		if (spec.type === "OWNED") {
+			if (existing && !existing.removed) return existing as SceneNode;
+			throw new CommandError(
+				"node_not_found",
+				`The layer ${spec.id} of Figma-owned Element ${spec.key} isn't in the file any more, so nothing was pushed. Pull first.`,
+			);
+		}
 		if (existing && !existing.removed && existing.type === spec.type) {
 			return existing as Layer;
 		}
@@ -368,6 +391,8 @@ class Applier {
 				return figma.createText();
 			case "RECTANGLE":
 				return figma.createRectangle();
+			case "VECTOR":
+				return figma.createVector();
 		}
 	}
 
@@ -390,6 +415,58 @@ class Applier {
 				: (this.hashes[fill.image] as string);
 		return { type: "IMAGE", imageHash, scaleMode: fill.scaleMode };
 	}
+}
+
+type Placeable = SceneNode &
+	LayoutMixin & {
+		resize(width: number, height: number): void;
+	};
+
+/** Sizes a layer, and places it in or out of its parent's auto layout. */
+function place(node: Placeable, spec: ScreenNode, isRoot: boolean) {
+	const { horizontal, vertical } = isRoot
+		? { horizontal: "FIXED", vertical: "FIXED" }
+		: spec.sizing;
+	node.resize(
+		horizontal === "FIXED" ? spec.width : node.width,
+		vertical === "FIXED" ? spec.height : node.height,
+	);
+	if (isRoot) return;
+	position(node, spec);
+	node.layoutSizingHorizontal = spec.sizing.horizontal;
+	node.layoutSizingVertical = spec.sizing.vertical;
+}
+
+/** `position: absolute` is absolute position, pinned to the top left. */
+function position(node: Placeable, spec: ScreenNode) {
+	if (!spec.position) {
+		node.layoutPositioning = "AUTO";
+		return;
+	}
+	node.layoutPositioning = "ABSOLUTE";
+	node.x = spec.position.x;
+	node.y = spec.position.y;
+	if ("constraints" in node) {
+		node.constraints = { horizontal: "MIN", vertical: "MIN" };
+	}
+}
+
+/** A border (inside, taking up room in auto layout) or an SVG stroke. */
+function applyStroke(node: Layer, spec: ScreenNode) {
+	const { stroke } = spec;
+	if (!stroke) {
+		if (node.strokes.length > 0) node.strokes = [];
+		return;
+	}
+	node.strokes = [{ type: "SOLID", color: rgb(stroke.color), opacity: 1 }];
+	node.strokeWeight = stroke.weight;
+	node.strokeAlign = stroke.align;
+	node.dashPattern = [];
+	if (node.type === "VECTOR") {
+		node.strokeCap = stroke.cap ?? "NONE";
+		node.strokeJoin = stroke.join ?? "MITER";
+	}
+	if (node.type === "FRAME") node.strokesIncludedInLayout = true;
 }
 
 /** A layer and everything in it, as Pull reads it. */
@@ -415,6 +492,23 @@ export function readNode(node: SceneNode): SyncedNode {
 		out.sizing = {
 			horizontal: node.layoutSizingHorizontal,
 			vertical: node.layoutSizingVertical,
+		};
+	}
+	if ("layoutPositioning" in node && node.layoutPositioning === "ABSOLUTE") {
+		out.absolute =
+			"constraints" in node
+				? node.constraints
+				: { horizontal: "MIN", vertical: "MIN" };
+	}
+	const stroke = readStroke(node);
+	if (stroke) out.stroke = stroke;
+	if (node.type === "FRAME") out.clips = node.clipsContent;
+	if (node.type === "VECTOR") {
+		out.vector = {
+			paths: node.vectorPaths.map(({ data, windingRule }) => ({
+				data,
+				windingRule,
+			})),
 		};
 	}
 	if (node.type === "FRAME") {
@@ -446,6 +540,25 @@ export function readNode(node: SceneNode): SyncedNode {
 		);
 	}
 	return out;
+}
+
+/** How a layer's first stroke is drawn. */
+function readStroke(node: SceneNode): SyncedNode["stroke"] {
+	if (!("strokes" in node) || node.strokes.length === 0) return undefined;
+	const mixed = (value: unknown) =>
+		value === figma.mixed ? ("mixed" as const) : value;
+	const first = node.strokes[0] as Paint;
+	return {
+		paint: paint(first),
+		weight: mixed(node.strokeWeight) as number | "mixed",
+		align: node.strokeAlign,
+		cap: ("strokeCap" in node ? mixed(node.strokeCap) : "NONE") as string,
+		join: ("strokeJoin" in node ? mixed(node.strokeJoin) : "MITER") as string,
+		dashed: "dashPattern" in node && node.dashPattern.length > 0,
+		...(node.type === "FRAME" && {
+			inLayout: node.strokesIncludedInLayout,
+		}),
+	};
 }
 
 /** The variables and text style a layer is bound to, by ID. */

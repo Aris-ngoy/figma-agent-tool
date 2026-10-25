@@ -1466,6 +1466,11 @@ export const SYNC_KEYS = {
 
 const ScreenSizing = z.object({ horizontal: Sizing, vertical: Sizing });
 
+const Constraints = z.object({
+	horizontal: z.string(),
+	vertical: z.string(),
+});
+
 const ScreenLayout = z.object({
 	mode: z.enum(["HORIZONTAL", "VERTICAL"]),
 	itemSpacing: z.number(),
@@ -1600,12 +1605,36 @@ export const SyncedDesignSystem = z.object({
 });
 export type SyncedDesignSystem = z.infer<typeof SyncedDesignSystem>;
 
+const VectorPaths = z.array(
+	z.object({
+		// Absolute M, L, C, Q and Z commands, in the layer's own coordinates.
+		data: z.string(),
+		windingRule: z.enum(["NONZERO", "EVENODD"]),
+	}),
+);
+
+/**
+ * A solid stroke: INSIDE on boxes (taking up room in auto layout, like a
+ * CSS border), CENTER on vectors (like an SVG stroke).
+ */
+const ScreenStroke = z.object({
+	color: HexColor,
+	weight: z.number().positive(),
+	align: z.enum(["INSIDE", "CENTER"]),
+	cap: z.enum(["NONE", "ROUND", "SQUARE"]).optional(),
+	join: z.enum(["MITER", "ROUND", "BEVEL"]).optional(),
+});
+
 export type ScreenNode = {
 	// The layer to update in place; absent to create one.
 	id?: string;
 	// The Screen element's stable key, stored in the layer's shared plugin data.
 	key: string;
-	type: "FRAME" | "TEXT" | "RECTANGLE";
+	// OWNED: a Figma-owned Element's layer `id`, of any type, which Push
+	// leaves as it is apart from placing it in the tree and, with `place`,
+	// naming, sizing and positioning it like any layer.
+	type: "FRAME" | "TEXT" | "RECTANGLE" | "VECTOR" | "OWNED";
+	place?: boolean;
 	// Absent on TEXT: Figma names it after its characters.
 	name?: string;
 	// The size on FIXED axes.
@@ -1613,10 +1642,17 @@ export type ScreenNode = {
 	height: number;
 	// Ignored on the top-level frame, which is FIXED.
 	sizing: z.infer<typeof ScreenSizing>;
+	// Absolutely positioned in its auto-layout parent, at this offset.
+	position?: { x: number; y: number };
 	layout?: z.infer<typeof ScreenLayout>;
 	fills: ScreenFill[];
+	// No stroke when absent.
+	stroke?: z.infer<typeof ScreenStroke>;
+	// Frames: whether they clip their content.
+	clips?: boolean;
 	cornerRadius?: z.infer<typeof CornerRadius>;
 	opacity?: number;
+	vector?: { paths: z.infer<typeof VectorPaths> };
 	text?: {
 		characters: string;
 		fontName: z.infer<typeof FontName>;
@@ -1629,30 +1665,51 @@ export type ScreenNode = {
 };
 
 /** A layer as Push wants it; the whole state, not a patch. */
-export const ScreenNode: z.ZodType<ScreenNode> = z.object({
-	id: z.string().min(1).optional(),
-	key: z.string().min(1),
-	type: z.enum(["FRAME", "TEXT", "RECTANGLE"]),
-	name: z.string().optional(),
-	width: z.number().positive(),
-	height: z.number().positive(),
-	sizing: ScreenSizing,
-	layout: ScreenLayout.optional(),
-	fills: z.array(ScreenFill),
-	cornerRadius: CornerRadius.optional(),
-	opacity: z.number().min(0).max(1).optional(),
-	text: z
-		.object({
-			characters: z.string(),
-			fontName: FontName,
-			fontSize: z.number().positive(),
-			textAlignHorizontal: z.enum(["LEFT", "CENTER", "RIGHT", "JUSTIFIED"]),
-		})
-		.optional(),
-	bindings: ScreenBindings.optional(),
-	get children() {
-		return z.array(ScreenNode).optional();
-	},
+export const ScreenNode: z.ZodType<ScreenNode> = z
+	.object({
+		id: z.string().min(1).optional(),
+		key: z.string().min(1),
+		type: z.enum(["FRAME", "TEXT", "RECTANGLE", "VECTOR", "OWNED"]),
+		place: z.boolean().optional(),
+		name: z.string().optional(),
+		width: z.number().positive(),
+		height: z.number().positive(),
+		sizing: ScreenSizing,
+		position: z.object({ x: z.number(), y: z.number() }).optional(),
+		layout: ScreenLayout.optional(),
+		fills: z.array(ScreenFill),
+		stroke: ScreenStroke.optional(),
+		clips: z.boolean().optional(),
+		cornerRadius: CornerRadius.optional(),
+		opacity: z.number().min(0).max(1).optional(),
+		vector: z.object({ paths: VectorPaths }).optional(),
+		text: z
+			.object({
+				characters: z.string(),
+				fontName: FontName,
+				fontSize: z.number().positive(),
+				textAlignHorizontal: z.enum(["LEFT", "CENTER", "RIGHT", "JUSTIFIED"]),
+			})
+			.optional(),
+		bindings: ScreenBindings.optional(),
+		get children() {
+			return z.array(ScreenNode).optional();
+		},
+	})
+	.refine(
+		(node) => node.type !== "OWNED" || node.id !== undefined,
+		"An OWNED node names the layer it keeps by `id`.",
+	);
+
+const SyncedStroke = z.object({
+	paint: Paint,
+	weight: z.union([z.number(), Mixed]),
+	align: z.string(),
+	cap: z.union([z.string(), Mixed]),
+	join: z.union([z.string(), Mixed]),
+	dashed: z.boolean(),
+	// Frames: whether strokes take up room in auto layout.
+	inLayout: z.boolean().optional(),
 });
 
 export type SyncedNode = {
@@ -1669,6 +1726,8 @@ export type SyncedNode = {
 	rotation: number;
 	opacity: number;
 	sizing?: z.infer<typeof ScreenSizing>;
+	// Absolutely positioned in its auto-layout parent: its constraints.
+	absolute?: z.infer<typeof Constraints>;
 	// Frames only; mode NONE is a frame without auto layout.
 	layout?: Omit<
 		z.infer<typeof ScreenLayout>,
@@ -1680,8 +1739,14 @@ export type SyncedNode = {
 	};
 	fills: Paint[] | "mixed";
 	strokes: number;
+	// How the first stroke is drawn; present when there are strokes.
+	stroke?: z.infer<typeof SyncedStroke>;
+	// Frames: whether they clip their content.
+	clips?: boolean;
 	effects: number;
 	cornerRadius: z.infer<typeof CornerRadius>;
+	// Vectors: their paths; windingRule NONE is an open, unfilled path.
+	vector?: { paths: { data: string; windingRule: string }[] };
 	text?: TextInfo;
 	// Variable and text style IDs; a fill's variable is on the fill.
 	bindings?: Omit<ScreenBindings, "fill">;
@@ -1705,6 +1770,7 @@ export const SyncedNode: z.ZodType<SyncedNode> = z.object({
 	rotation: z.number(),
 	opacity: z.number(),
 	sizing: ScreenSizing.optional(),
+	absolute: Constraints.optional(),
 	layout: ScreenLayout.extend({
 		mode: z.string(),
 		primaryAxisAlignItems: z.string(),
@@ -1712,8 +1778,15 @@ export const SyncedNode: z.ZodType<SyncedNode> = z.object({
 	}).optional(),
 	fills: z.union([z.array(Paint), Mixed]),
 	strokes: z.number().int(),
+	stroke: SyncedStroke.optional(),
+	clips: z.boolean().optional(),
 	effects: z.number().int(),
 	cornerRadius: CornerRadius,
+	vector: z
+		.object({
+			paths: z.array(z.object({ data: z.string(), windingRule: z.string() })),
+		})
+		.optional(),
 	text: TextInfo.optional(),
 	bindings: ScreenBindings.omit({ fill: true }).optional(),
 	get children() {
@@ -1902,6 +1975,8 @@ export const commands = {
 						screen: z.string().min(1),
 						frameId: z.string().min(1).optional(),
 						tree: ScreenNode,
+						// Layers to delete: those of elements the Screen deleted.
+						remove: z.array(z.string().min(1)).default([]),
 					}),
 				)
 				.min(1),

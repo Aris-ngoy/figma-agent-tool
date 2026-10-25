@@ -16,9 +16,10 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type {
 	DesignProject,
+	FigmaOwnedPreview,
 	ScreenFile,
 } from "@figma-agent-tool/design-project";
-import { screenDocument, screenSize } from "./document";
+import { figmaOwnedOf, screenDocument, screenSize } from "./document";
 
 export class RenderError extends Error {}
 
@@ -33,21 +34,35 @@ export async function renderScreen(
 	project: DesignProject,
 	screen: ScreenFile,
 	{ screenshot = chromeScreenshot }: { screenshot?: Screenshotter } = {},
-): Promise<{ png: Uint8Array; width: number; height: number }> {
+): Promise<{
+	png: Uint8Array;
+	width: number;
+	height: number;
+	/** Its Figma-owned Elements, shown from their exports. */
+	figmaOwned: FigmaOwnedPreview[];
+}> {
 	const size = screenSize(project, screen);
+	const figmaOwned = await figmaOwnedOf(project, screen);
 	const scratch = await mkdtemp(join(tmpdir(), "figma-agent-render-"));
 	try {
 		const htmlPath = join(scratch, "screen.html");
 		const pngPath = join(scratch, "screen.png");
 		const baseUrl = pathToFileURL(`${dirname(screen.path)}/`).href;
-		await writeFile(htmlPath, screenDocument(project, screen, { baseUrl }));
+		await writeFile(
+			htmlPath,
+			screenDocument(project, screen, { baseUrl, figmaOwned }),
+		);
 		await screenshot(htmlPath, pngPath, size);
 		if (!existsSync(pngPath)) {
 			throw new RenderError(
 				`The browser didn't write a screenshot of ${screen.file}.`,
 			);
 		}
-		return { png: new Uint8Array(await readFile(pngPath)), ...size };
+		return {
+			png: new Uint8Array(await readFile(pngPath)),
+			...size,
+			figmaOwned,
+		};
 	} finally {
 		await rm(scratch, { recursive: true, force: true });
 	}

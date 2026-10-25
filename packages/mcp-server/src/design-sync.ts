@@ -18,8 +18,11 @@ import {
 	designSystemChanges,
 	designSystemPush,
 	type Element,
+	exportsToFetch,
 	type FigmaDesignSystem,
+	type FigmaOwnedLayer,
 	figmaDesignSystem,
+	figmaOwnedElements,
 	figmaTokens,
 	followFrame,
 	hasUnpulledChanges,
@@ -33,14 +36,16 @@ import {
 	pushedImageRecords,
 	readBaselines,
 	readDesignSystemBaseline,
+	readExports,
 	readLink,
 	type ScreenFile,
+	saveExports,
 	saveImage,
 	screenPush,
 	type Tokens,
 	tokenBindings,
-	type UnsupportedLayer,
 	unknownImages,
+	unlinkedFigmaOwned,
 	withTokens,
 	writeBaseline,
 	writeDesignSystemBaseline,
@@ -195,6 +200,9 @@ export async function pushDesignProject(
 		tree: ScreenNode;
 		sources: Record<string, PushedImage>;
 		frameId?: string;
+		remove: string[];
+		/** Keys of its Figma-owned Elements. */
+		figmaOwned: string[];
 	}[] = [];
 	const images: Record<string, string> = {};
 	for (const original of screens) {
@@ -211,6 +219,12 @@ export async function pushDesignProject(
 			frame && previous
 				? followFrame(project, screen, previous, frame)
 				: undefined;
+		const unlinked = unlinkedFigmaOwned(root, baseline);
+		if (unlinked.length > 0) {
+			throw new DesignSyncError(
+				`Push refused: ${screen.file} has Figma-owned Elements (${unlinked.join(", ")}) whose layers aren't in its frame in Figma${frame ? "" : ", which was deleted"}. Only Pull makes Figma-owned Elements, and Push can't recreate a designer's layer: delete them from the Screen (or undo the edit that changed their data-key).`,
+			);
+		}
 		const push = await screenPush(project, screen, root, baseline, bindings);
 		Object.assign(images, push.images);
 		pushes.push({
@@ -218,14 +232,19 @@ export async function pushDesignProject(
 			tree: push.tree,
 			sources: push.sources,
 			frameId: baseline?.frameId,
+			remove: push.remove,
+			figmaOwned: figmaOwnedElements(root, baseline?.nodes ?? {}).map(
+				({ key }) => key,
+			),
 		});
 	}
 	const result = await bridge.request("push_screens", {
 		page: { id: link.screensPage.id || undefined, name: link.screensPage.name },
-		screens: pushes.map(({ screen, frameId, tree }) => ({
+		screens: pushes.map(({ screen, frameId, tree, remove }) => ({
 			screen: screen.name,
 			frameId,
 			tree,
+			remove,
 		})),
 		images,
 		designSystem,
@@ -246,6 +265,8 @@ export async function pushDesignProject(
 			push.screen.name,
 			baselineAfterPush(project, push.screen.source, frame, records),
 		);
+		// Exports of Figma-owned Elements the Screen deleted go with their layers.
+		await saveExports(project, push.screen.name, [], push.figmaOwned);
 		pushed.push({
 			screen: push.screen.name,
 			frameId: frame.id,
@@ -385,7 +406,7 @@ export type PullResult = {
 		status: "merged" | "unchanged" | "missing";
 		conflicts: number;
 		/** Layers kept in Figma because the Screen Subset can't express them. */
-		unsupported: UnsupportedLayer[];
+		figmaOwned: FigmaOwnedLayer[];
 	}[];
 	conflicts: number;
 };
@@ -461,7 +482,7 @@ export async function pullDesignProject(
 				screen: screen.name,
 				status: "missing",
 				conflicts: 0,
-				unsupported: [],
+				figmaOwned: [],
 			});
 			continue;
 		}
@@ -485,13 +506,14 @@ export async function pullDesignProject(
 		);
 		if (pulled.source !== undefined)
 			await writeFile(screen.path, pulled.source);
+		await fetchExports(project, screen.name, frame, pulled.figmaOwned, bridge);
 		if (JSON.stringify(pulled.baseline) !== JSON.stringify(stored))
 			await writeBaseline(project, screen.name, pulled.baseline);
 		results.push({
 			screen: screen.name,
 			status: pulled.changed ? "merged" : "unchanged",
 			conflicts: pulled.conflicts,
-			unsupported: pulled.unsupported,
+			figmaOwned: pulled.figmaOwned,
 		});
 	}
 	return {
@@ -503,6 +525,32 @@ export async function pullDesignProject(
 			designSystem.conflicts,
 		),
 	};
+}
+
+/** Caches an export of each Figma-owned Element's layer a designer made or changed. */
+async function fetchExports(
+	project: DesignProject,
+	screen: string,
+	frame: SyncedNode,
+	figmaOwned: FigmaOwnedLayer[],
+	bridge: Bridge,
+) {
+	const exports = await readExports(project, screen);
+	const fetched = [];
+	for (const { key, node } of exportsToFetch(frame, figmaOwned, exports)) {
+		try {
+			// Twice the Screen's pixels, so the Preview stays sharp.
+			const { png } = await bridge.request("export_node_image", {
+				nodeId: node.id,
+				scale: 2,
+			});
+			fetched.push({ key, node, png: Buffer.from(png, "base64") });
+		} catch {
+			// The Preview says the export is missing; the next Pull tries again.
+		}
+	}
+	const keys = figmaOwned.flatMap(({ key }) => (key ? [key] : []));
+	await saveExports(project, screen, fetched, keys);
 }
 
 /** Links the Design Project to the Bridged File instead, forgetting the old file's frames. */

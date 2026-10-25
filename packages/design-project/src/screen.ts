@@ -2,7 +2,9 @@
 // the Screen Subset with errors that name the file, element and rule.
 import type { Tokens } from "./design-md";
 import { type HtmlElement, parseHtml } from "./html";
+import { parsePath } from "./path";
 import {
+	FIGMA_OWNED_TAG,
 	type Kind,
 	PROPS,
 	type Prop,
@@ -25,6 +27,10 @@ export type Element = {
 	text?: string;
 	/** An image's `src`, relative to the Screen file. */
 	src?: string;
+	/** A vector's `viewBox`, as written. */
+	viewBox?: string;
+	/** A vector's paths: `d` as written, and `fill-rule` when set. */
+	paths?: VectorPath[];
 	children: Element[];
 	/** Where it starts in the file; not part of the element's content. */
 	line?: number;
@@ -43,6 +49,8 @@ export type SyncConflict =
 	| { kind: "element"; local: Element | null; figma: Element | null }
 	| { kind: "tag"; local: Element; figma: Element };
 
+export type VectorPath = { d: string; fillRule?: "nonzero" | "evenodd" };
+
 export type CheckError = {
 	/** Relative to the Design Project. */
 	file: string;
@@ -59,7 +67,15 @@ export type ScreenContext = {
 	imageExists: (src: string) => boolean;
 };
 
-const ATTRIBUTES = new Set(["data-key", "data-name", "style", "src"]);
+const ATTRIBUTES = new Set(["data-key", "data-name", "style"]);
+
+/** Attributes only some kinds take. */
+const KIND_ATTRIBUTES: Partial<Record<Kind, string[]>> = {
+	image: ["src"],
+	vector: ["viewbox", "xmlns"],
+};
+
+const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
 const KEY = /^[A-Za-z0-9_-]+$/;
 
@@ -153,6 +169,8 @@ class Builder {
 		if (TEXT_TAGS.has(html.tag)) return "text";
 		if (html.tag === "img") return "image";
 		const isRoot = parent === undefined;
+		if (html.tag === "svg" && !isRoot) return "vector";
+		if (html.tag === FIGMA_OWNED_TAG && !isRoot) return "owned";
 		if (html.tag === "div" || (isRoot && html.tag === "body")) {
 			if (display === "flex") return "frame";
 			if (display !== undefined) {
@@ -179,31 +197,41 @@ class Builder {
 			html,
 			path,
 			"unknown-element",
-			`<${html.tag}> isn't in the Screen Subset. Use <div style="display:flex"> for frames, <div> for rectangles, <p>, <span> or <h1>–<h6> for text, and <img> for images.`,
+			`<${html.tag}> isn't in the Screen Subset. Use <div style="display:flex"> for frames, <div> for rectangles, <p>, <span> or <h1>–<h6> for text, <img> for images and <svg> with <path>s for vectors.`,
 		);
 		return "rect";
 	}
 
 	private attributes(html: HtmlElement, path: string, element: Element) {
 		for (const { name, value } of html.attributes) {
-			if (
-				!ATTRIBUTES.has(name) ||
-				(name === "src" && element.kind !== "image")
-			) {
+			const valid =
+				ATTRIBUTES.has(name) ||
+				KIND_ATTRIBUTES[element.kind]?.includes(name) ||
+				false;
+			if (!valid || (name === "xmlns" && value !== SVG_NAMESPACE)) {
 				this.error(
 					html,
 					path,
 					"unknown-attribute",
-					`The \`${name}\` attribute isn't in the Screen Subset. Elements take \`style\`, \`data-name\` (the layer name), \`data-key\` (written by Push) and, on <img>, \`src\`.`,
+					`The \`${name}\` attribute isn't in the Screen Subset. Elements take \`style\`, \`data-name\` (the layer name), \`data-key\` (written by Push); <img> takes \`src\` and <svg> \`viewBox\`.`,
 				);
 				continue;
 			}
 			if (name === "data-key") this.key(html, path, element, value);
 			if (name === "data-name") element.name = value;
 			if (name === "src") element.src = value;
+			if (name === "viewbox") this.viewBox(html, path, element, value);
 			if (name === "style") this.style(html, path, element, value);
 		}
 		if (element.kind === "image") this.image(html, path, element);
+		if (element.kind === "owned" && !element.key) {
+			this.error(
+				html,
+				path,
+				"missing-key",
+				"A Figma-owned Element refers to its layer in Figma by the `data-key` Pull gave it. Restore it, or delete the element (Push then deletes the layer).",
+			);
+		}
 	}
 
 	private key(html: HtmlElement, path: string, element: Element, key: string) {
@@ -252,14 +280,9 @@ class Builder {
 				);
 				continue;
 			}
-			const values = name === "padding" ? expandBox(value) : [value];
-			if (!values) {
-				this.error(
-					html,
-					path,
-					"invalid-value",
-					`\`padding: ${value}\` needs one to four lengths.`,
-				);
+			const values = expandShorthand(name, value, this.context.tokens);
+			if ("problem" in values) {
+				this.error(html, path, "invalid-value", values.problem);
 				continue;
 			}
 			longhands.forEach((prop, index) => {
@@ -324,8 +347,130 @@ class Builder {
 		return collapseWhitespace(text);
 	}
 
+	private viewBox(
+		html: HtmlElement,
+		path: string,
+		element: Element,
+		value: string,
+	) {
+		const numbers = value
+			.trim()
+			.split(/[\s,]+/)
+			.map(Number);
+		const [, , width = 0, height = 0] = numbers;
+		if (
+			numbers.length !== 4 ||
+			numbers.some(Number.isNaN) ||
+			width <= 0 ||
+			height <= 0
+		) {
+			this.error(
+				html,
+				path,
+				"invalid-value",
+				`\`viewBox="${value}"\` needs four numbers: min-x, min-y, and a positive width and height.`,
+			);
+			return;
+		}
+		element.viewBox = value;
+	}
+
+	/** A vector's <path>s: `d` and `fill-rule` only. */
+	private paths(html: HtmlElement, path: string, element: Element) {
+		const before = this.errors.length;
+		const paths: VectorPath[] = [];
+		for (const child of html.children) {
+			if (child.type === "text") {
+				if (child.text.trim()) {
+					this.error(
+						html,
+						path,
+						"text-outside-text-element",
+						"An <svg> holds only <path>s: text isn't part of a vector.",
+					);
+				}
+				continue;
+			}
+			const childPath = `${path} > ${child.tag}`;
+			if (child.tag !== "path") {
+				this.error(
+					child,
+					childPath,
+					"unknown-element",
+					`<${child.tag}> isn't in the Screen Subset: an <svg> holds only <path>s (Figma's vector paths).`,
+				);
+				continue;
+			}
+			const vectorPath = this.path(child, childPath);
+			if (vectorPath) paths.push(vectorPath);
+		}
+		if (paths.length === 0 && this.errors.length === before) {
+			this.error(
+				html,
+				path,
+				"invalid-path",
+				"An <svg> needs at least one <path> with a `d`.",
+			);
+		}
+		element.paths = paths;
+	}
+
+	private path(html: HtmlElement, path: string): VectorPath | undefined {
+		let d: string | undefined;
+		let fillRule: VectorPath["fillRule"];
+		for (const { name, value } of html.attributes) {
+			if (name === "d") d = value;
+			else if (
+				name === "fill-rule" &&
+				(value === "nonzero" || value === "evenodd")
+			)
+				fillRule = value;
+			else {
+				this.error(
+					html,
+					path,
+					name === "fill-rule" ? "invalid-value" : "unknown-attribute",
+					name === "fill-rule"
+						? `\`fill-rule="${value}"\` isn't in the Screen Subset: use \`nonzero\` or \`evenodd\`.`
+						: `The \`${name}\` attribute isn't in the Screen Subset: a <path> takes \`d\` and \`fill-rule\`; colors and strokes go in the <svg>'s style.`,
+				);
+			}
+		}
+		if (html.children.length > 0) {
+			this.error(html, path, "invalid-path", "A <path> holds nothing.");
+		}
+		if (d === undefined) {
+			this.error(html, path, "invalid-path", "A <path> needs a `d`.");
+			return undefined;
+		}
+		const parsed = parsePath(d);
+		if ("problem" in parsed) {
+			this.error(html, path, "invalid-path", parsed.problem);
+			return undefined;
+		}
+		return fillRule ? { d, fillRule } : { d };
+	}
+
 	/** Builds the children; false when the element can't hold them. */
 	private children(html: HtmlElement, path: string, element: Element): boolean {
+		if (element.kind === "vector") {
+			this.paths(html, path, element);
+			return true;
+		}
+		if (element.kind === "owned") {
+			const content = html.children.some(
+				(child) => child.type === "element" || child.text.trim(),
+			);
+			if (content) {
+				this.error(
+					html,
+					path,
+					"figma-owned-content",
+					"A Figma-owned Element stands for a layer only designers edit in Figma, so it holds nothing. Place and size it with `style`.",
+				);
+			}
+			return !content;
+		}
 		const elements = html.children.filter((child) => child.type === "element");
 		const textChild = html.children.find(
 			(child) => child.type === "text" && child.text.trim(),
@@ -363,12 +508,17 @@ class Builder {
 	) {
 		const { props } = element;
 		if (!parent) {
-			if (props.flex || props["align-self"]) {
+			if (
+				props.flex ||
+				props["align-self"] ||
+				props.position ||
+				props.overflow
+			) {
 				this.error(
 					html,
 					path,
 					"unknown-property",
-					"<body> is the Screen's top-level frame, so `flex` and `align-self` don't apply to it.",
+					"<body> is the Screen's top-level frame, so `flex`, `align-self`, `position` and `overflow` don't apply to it (it always clips its content).",
 				);
 			}
 			if ((props.width === undefined) !== (props.height === undefined)) {
@@ -381,12 +531,22 @@ class Builder {
 			}
 			return;
 		}
+		if (!this.checkPosition(html, path, element)) return;
 		const row = (parent.props["flex-direction"] ?? "row") !== "column";
 		const fills = {
 			width: row ? props.flex === "1" : props["align-self"] === "stretch",
 			height: row ? props["align-self"] === "stretch" : props.flex === "1",
 		};
 		for (const axis of ["width", "height"] as const) {
+			if (fills[axis] && props.position) {
+				this.error(
+					html,
+					path,
+					"conflicting-size",
+					"An element with `position: absolute` is out of auto layout, so it can't fill its parent (`flex: 1` / `align-self: stretch`). Give it a size, or none to hug its content.",
+				);
+				return;
+			}
 			if (fills[axis] && props[axis] !== undefined) {
 				this.error(
 					html,
@@ -397,7 +557,18 @@ class Builder {
 				return;
 			}
 		}
-		if (element.kind === "rect" || element.kind === "image") {
+		if (
+			(props["border-width"] !== undefined) !==
+			(props["border-color"] !== undefined)
+		) {
+			this.error(
+				html,
+				path,
+				"invalid-value",
+				"A border needs both a width and a color: `border: 1px solid #dddddd`, or `border-width` with `border-color`.",
+			);
+		}
+		if (element.kind !== "frame" && element.kind !== "text") {
 			const missing = (["width", "height"] as const).filter(
 				(axis) => props[axis] === undefined && !fills[axis],
 			);
@@ -419,6 +590,37 @@ class Builder {
 			);
 		}
 	}
+
+	/** `left` and `top` place an absolutely positioned element, and it needs both. */
+	private checkPosition(
+		html: HtmlElement,
+		path: string,
+		element: Element,
+	): boolean {
+		const { props } = element;
+		const offsets = (["left", "top"] as const).filter(
+			(prop) => props[prop] !== undefined,
+		);
+		if (!props.position && offsets.length > 0) {
+			this.error(
+				html,
+				path,
+				"invalid-value",
+				`\`${offsets.join("` and `")}\` place an element with \`position: absolute\` (absolute position in Figma), so add it or remove them.`,
+			);
+			return false;
+		}
+		if (props.position && offsets.length < 2) {
+			this.error(
+				html,
+				path,
+				"position-required",
+				"An element with `position: absolute` needs both `left` and `top`: its offset from its parent's top-left corner.",
+			);
+			return false;
+		}
+		return true;
+	}
 }
 
 function attribute(html: HtmlElement, name: string): string | undefined {
@@ -439,6 +641,38 @@ export function styleDeclarations(style: string): [string, string][] {
 				declaration.slice(colon + 1).trim(),
 			];
 		});
+}
+
+/** The longhand values of a property as written, or a problem. */
+function expandShorthand(
+	name: string,
+	value: string,
+	tokens: Tokens,
+): string[] | { problem: string } {
+	if (name === "padding") {
+		return (
+			expandBox(value) ?? {
+				problem: `\`padding: ${value}\` needs one to four lengths.`,
+			}
+		);
+	}
+	if (name === "border") {
+		const parts = splitValues(value);
+		const problem = {
+			problem: `\`border: ${value}\` isn't in the Screen Subset: write a width, \`solid\` and a color, as in \`border: 1px solid #dddddd\` (an inside stroke in Figma).`,
+		};
+		const [solid, ...rest] = [
+			...parts.filter((part) => part === "solid"),
+			...parts.filter((part) => part !== "solid"),
+		];
+		if (solid !== "solid" || rest.length !== 2) return problem;
+		const width = rest.find(
+			(part) => "value" in resolveValue("border-width", part, tokens),
+		);
+		const color = rest.find((part) => part !== width);
+		return width && color ? [width, color] : problem;
+	}
+	return [value];
 }
 
 /** CSS box shorthand values as top, right, bottom, left. */
@@ -463,9 +697,14 @@ function collapseWhitespace(text: string): string {
 }
 
 function kindName(kind: Kind): string {
-	return { frame: "frames", text: "text", rect: "rectangles", image: "images" }[
-		kind
-	];
+	return {
+		frame: "frames",
+		text: "text",
+		rect: "rectangles",
+		image: "images",
+		vector: "vectors",
+		owned: "Figma-owned Elements",
+	}[kind];
 }
 
 function describeKind(element: Element): string {
@@ -474,5 +713,7 @@ function describeKind(element: Element): string {
 		text: `text (<${element.tag}>)`,
 		rect: "a rectangle (<div> without display:flex)",
 		image: "an image (<img>)",
+		vector: "a vector (<svg>)",
+		owned: "a Figma-owned Element (which only takes its place and size)",
 	}[element.kind];
 }

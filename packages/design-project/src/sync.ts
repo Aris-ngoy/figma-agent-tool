@@ -15,10 +15,15 @@ import type { Tokens } from "./design-md";
 import type { DesignSystemBaseline, TokenBindings } from "./design-system";
 import { assignElementKeys, elementKeys } from "./keys";
 import { mergeScreen } from "./merge";
-import { fromSyncedNode, toScreenNode, type UnsupportedLayer } from "./nodes";
+import { type FigmaOwnedLayer, fromSyncedNode, toScreenNode } from "./nodes";
 import { printScreen } from "./print";
 import { type DesignProject, imagePath, type ScreenFile } from "./project";
-import { type ResolveContext, resolveProp, sameElement } from "./resolve";
+import {
+	type ResolveContext,
+	resolveProp,
+	sameElement,
+	sameOwn,
+} from "./resolve";
 import { type Element, parseScreen } from "./screen";
 import { type Kind, PROP_NAMES, variableName } from "./subset";
 
@@ -107,12 +112,11 @@ export async function readBaselines(project: {
 	return new Map(entries);
 }
 
-/** Forgets every Screen's frame and the Design System's variables, as a re-link to another file does. */
+/** Forgets every Screen's frame (and its exports) and the Design System's variables, as a re-link to another file does. */
 export async function clearBaselines(project: { dir: string }) {
-	await rm(join(project.dir, "sync", "screens"), {
-		recursive: true,
-		force: true,
-	});
+	for (const dir of ["screens", "exports"]) {
+		await rm(join(project.dir, "sync", dir), { recursive: true, force: true });
+	}
 	await rm(designSystemPath(project), { force: true });
 }
 
@@ -202,6 +206,8 @@ export async function screenPush(
 	images: Record<string, string>;
 	/** How each `src` is pushed. */
 	sources: Record<string, PushedImage>;
+	/** Layers of elements the Screen deleted since the Baseline. */
+	remove: string[];
 }> {
 	const images: Record<string, string> = {};
 	const sources: Record<string, PushedImage> = {};
@@ -233,8 +239,77 @@ export async function screenPush(
 			const { sha256: _, ...fill } = sources[src] as PushedImage;
 			return { type: "IMAGE", scaleMode, ...fill } as ScreenFill;
 		},
+		placed: baseline ? placedSince(project, screen, baseline) : () => true,
 	});
-	return { tree, images, sources };
+	const keys = new Set(elementKeys(root));
+	const remove = Object.entries(baseline?.nodes ?? {}).flatMap(([key, id]) =>
+		keys.has(key) ? [] : [id],
+	);
+	return { tree, images, sources, remove };
+}
+
+/** Whether the Screen moved, resized or renamed an element since the Baseline. */
+function placedSince(
+	project: DesignProject,
+	screen: ScreenFile,
+	baseline: Baseline,
+): (element: Element, parent: Element | undefined) => boolean {
+	const base = baselineRoot(screen, baseline);
+	const byKey = elementsByKey(base);
+	const parents = new Map<string, string | undefined>();
+	const walk = (element: Element) => {
+		for (const child of element.children) {
+			if (child.key) parents.set(child.key, element.key);
+			walk(child);
+		}
+	};
+	walk(base);
+	const contexts = {
+		a: baselineContext(project, screen, baseline),
+		b: resolveContext(project, screen),
+	};
+	return (element, parent) => {
+		const was = element.key ? byKey.get(element.key) : undefined;
+		return (
+			!was ||
+			parents.get(element.key as string) !== parent?.key ||
+			!sameOwn(was, element, contexts, false)
+		);
+	};
+}
+
+/** The Figma-owned Elements in a Screen, with the layers they stand for. */
+export function figmaOwnedElements(
+	root: Element,
+	nodes: Record<string, string>,
+): { key: string; nodeId: string; element: Element }[] {
+	const owned: { key: string; nodeId: string; element: Element }[] = [];
+	const walk = (element: Element) => {
+		const nodeId = element.key && nodes[element.key];
+		if (element.kind === "owned" && element.key && nodeId)
+			owned.push({ key: element.key, nodeId, element });
+		element.children.forEach(walk);
+	};
+	walk(root);
+	return owned;
+}
+
+/** Keys of Figma-owned Elements whose layer the Baseline doesn't know: Pull didn't make them. */
+export function unlinkedFigmaOwned(
+	root: Element,
+	baseline: Baseline | undefined,
+): string[] {
+	const linked = new Set(
+		figmaOwnedElements(root, baseline?.nodes ?? {}).map(({ key }) => key),
+	);
+	const unlinked: string[] = [];
+	const walk = (element: Element) => {
+		if (element.kind === "owned" && !linked.has(element.key ?? ""))
+			unlinked.push(element.key ?? "");
+		element.children.forEach(walk);
+	};
+	walk(root);
+	return unlinked;
 }
 
 /** The Figma image each `src` became, given the hashes the Plugin made from sent bytes. */
@@ -342,7 +417,7 @@ export function readFrame(
 	baseline: Baseline,
 	frame: SyncedNode,
 	local?: Element,
-): { root?: Element; unsupported: UnsupportedLayer[] } {
+): { root?: Element; figmaOwned: FigmaOwnedLayer[] } {
 	const base = baselineRoot(screen, baseline);
 	const ids = new Set<string>();
 	const collect = (node: SyncedNode) => {
@@ -451,7 +526,7 @@ export type ScreenPull = {
 	source?: string;
 	baseline: Baseline;
 	conflicts: number;
-	unsupported: UnsupportedLayer[];
+	figmaOwned: FigmaOwnedLayer[];
 };
 
 /**
@@ -470,7 +545,7 @@ export function pullScreen(
 	for (const { src, record } of Object.values(fetchedImages))
 		images[src] = record;
 	const withImages = { ...baseline, images };
-	const { root: figma, unsupported } = readFrame(
+	const { root: figma, figmaOwned } = readFrame(
 		project,
 		screen,
 		withImages,
@@ -478,8 +553,20 @@ export function pullScreen(
 		local,
 	);
 	if (!figma) {
-		return { changed: false, baseline, conflicts: 0, unsupported };
+		return { changed: false, baseline, conflicts: 0, figmaOwned };
 	}
+	const withKeys = () => {
+		const keys = new Map<string, string>();
+		const walk = (element: Element) => {
+			if (element.nodeId && element.key) keys.set(element.nodeId, element.key);
+			element.children.forEach(walk);
+		};
+		walk(figma);
+		return figmaOwned.map((layer) => {
+			const key = keys.get(layer.nodeId);
+			return key ? { key, ...layer } : layer;
+		});
+	};
 	const base = baselineRoot(screen, baseline);
 	const contexts = {
 		base: baselineContext(project, screen, baseline),
@@ -491,7 +578,7 @@ export function pullScreen(
 			changed: false,
 			baseline: followFrame(project, screen, baseline, frame),
 			conflicts: 0,
-			unsupported,
+			figmaOwned: withKeys(),
 		};
 	}
 	const merged = mergeScreen(base, local, figma, contexts);
@@ -510,7 +597,7 @@ export function pullScreen(
 			images,
 		},
 		conflicts: merged.conflicts,
-		unsupported,
+		figmaOwned: withKeys(),
 	};
 }
 

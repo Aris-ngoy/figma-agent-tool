@@ -35,7 +35,8 @@ export function assignKeys(source: string): { source: string; added: number } {
 		for (const node of list) {
 			if (node.type !== "element" || node.tag === "br") continue;
 			elements.push(node);
-			walk(node.children);
+			// A vector's paths are part of it, not elements.
+			if (node.tag !== "svg") walk(node.children);
 		}
 	};
 	walk(nodes);

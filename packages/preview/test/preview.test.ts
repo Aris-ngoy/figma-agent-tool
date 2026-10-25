@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { loadProject, type ScreenFile } from "@figma-agent-tool/design-project";
+import {
+	type Baseline,
+	loadProject,
+	type ScreenFile,
+	saveExports,
+	writeBaseline,
+} from "@figma-agent-tool/design-project";
 import {
 	loginScreen,
 	logoPng,
@@ -88,6 +94,78 @@ describe("Preview", () => {
 		]);
 		expect(decoder.decode(next.value)).toContain("data: reload");
 		await reader.cancel();
+	});
+});
+
+/** The login Screen with a Figma-owned Element whose export Pull cached. */
+async function withFigmaOwned() {
+	const owned =
+		'<figma-owned data-key="e8" data-name="Star" style="width:40px; height:38px"></figma-owned>';
+	const dir = await writeFixtureProject({
+		"screens/login.html": loginScreen.replace("</body>", `  ${owned}\n</body>`),
+	});
+	const project = { dir };
+	await writeBaseline(project, "login", {
+		nodes: { e8: "9:60" },
+	} as unknown as Baseline);
+	const star = { id: "9:60", width: 40, height: 38 } as never;
+	const png = Buffer.from(logoPng, "base64");
+	await saveExports(project, "login", [{ key: "e8", node: star, png }], ["e8"]);
+	return dir;
+}
+
+describe("Figma-owned Elements", () => {
+	test("the Preview shows one as the export Pull cached", async () => {
+		const dir = await withFigmaOwned();
+		const server = startPreview({ dir, port: 0 });
+		stops.push(() => server.stop());
+		const html = await (await fetch(`${server.url}screens/login`)).text();
+		expect(html).toContain(
+			'figma-owned[data-key="e8"] { background: url("../sync/exports/login/e8.png")',
+		);
+		const image = await fetch(`${server.url}files/sync/exports/login/e8.png`);
+		expect(image.status).toBe(200);
+		expect(html).not.toContain("export is");
+	});
+
+	test("the Preview says when an export is stale or missing", async () => {
+		const dir = await withFigmaOwned();
+		const login = join(dir, "screens/login.html");
+		await writeFile(
+			login,
+			(await readFile(login, "utf8")).replace("width:40px", "width:80px"),
+		);
+		const server = startPreview({ dir, port: 0 });
+		stops.push(() => server.stop());
+		const stale = await (await fetch(`${server.url}screens/login`)).text();
+		expect(stale).toContain("export is stale");
+		expect(await (await fetch(server.url)).text()).toContain(
+			"Figma-owned “Star”: its export is stale",
+		);
+		await rm(join(dir, "sync/exports"), { recursive: true });
+		const missing = await (await fetch(`${server.url}screens/login`)).text();
+		expect(missing).toContain("no export");
+		expect(missing).not.toContain("url(");
+	});
+
+	test("Render reports each one's export", async () => {
+		const project = await loadProject(await withFigmaOwned());
+		const screenshot: Screenshotter = async (_, pngPath) => {
+			await writeFile(pngPath, Buffer.from(logoPng, "base64"));
+		};
+		const result = await renderScreen(
+			project,
+			project.screens[0] as ScreenFile,
+			{ screenshot },
+		);
+		expect(result.figmaOwned).toEqual([
+			{
+				key: "e8",
+				name: "Star",
+				export: "current",
+				src: "../sync/exports/login/e8.png",
+			},
+		]);
 	});
 });
 

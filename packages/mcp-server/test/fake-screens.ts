@@ -69,12 +69,13 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 				page: { id: target.id, name: target.name },
 				images: hashes,
 				...(pushed && { designSystem: pushed }),
-				screens: screens.map(({ screen, frameId, tree }) => {
+				screens: screens.map(({ screen, frameId, tree, remove }) => {
 					const previous = frameId ? frames.get(frameId) : undefined;
 					const frame = applyScreenTree(tree, previous?.frame, {
 						nextId,
 						imageHash: (name) => hashes[name] as string,
 						designSystem,
+						remove,
 					});
 					if (previous) frames.delete(previous.frame.id);
 					frames.set(frame.id, { screen, pageId, frame });

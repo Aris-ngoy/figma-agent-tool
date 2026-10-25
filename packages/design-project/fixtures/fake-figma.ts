@@ -23,11 +23,14 @@ export function applyScreenTree(
 		nextId,
 		imageHash,
 		designSystem,
+		remove = [],
 	}: {
 		nextId: () => string;
 		imageHash: (name: string) => string;
 		/** Where the trees' bindings point; bindings are dropped without it. */
 		designSystem?: FakeDesignSystem;
+		/** Layers to delete. */
+		remove?: string[];
 	},
 ): SyncedNode {
 	const old = new Map<string, SyncedNode>();
@@ -36,6 +39,29 @@ export function applyScreenTree(
 		node.children?.forEach(index);
 	};
 	if (previous) index(previous);
+	const gone = new Set(remove);
+	const placed = new Set<string>();
+
+	/** A layer Push keeps as it is, placed only when the Screen moved it. */
+	const keep = (spec: ScreenNode): SyncedNode | undefined => {
+		const existing = spec.id ? old.get(spec.id) : undefined;
+		if (!existing || gone.has(existing.id)) return undefined;
+		placed.add(existing.id);
+		const node = { ...structuredClone(existing), key: spec.key };
+		if (!spec.place) return node;
+		const { horizontal, vertical } = spec.sizing;
+		Object.assign(node, {
+			name: spec.name ?? node.name,
+			width: horizontal === "FIXED" ? spec.width : node.width,
+			height: vertical === "FIXED" ? spec.height : node.height,
+			sizing: spec.sizing,
+			x: spec.position?.x ?? node.x,
+			y: spec.position?.y ?? node.y,
+		});
+		if (spec.position) node.absolute = { horizontal: "MIN", vertical: "MIN" };
+		else delete node.absolute;
+		return node;
+	};
 
 	const apply = (spec: ScreenNode, isRoot: boolean): SyncedNode => {
 		const existing = spec.id ? old.get(spec.id) : undefined;
@@ -46,18 +72,33 @@ export function applyScreenTree(
 			type: spec.type,
 			name: spec.name ?? spec.text?.characters ?? spec.type,
 			visible: true,
-			x: reuse?.x ?? 0,
-			y: reuse?.y ?? 0,
+			x: spec.position?.x ?? reuse?.x ?? 0,
+			y: spec.position?.y ?? reuse?.y ?? 0,
 			width: spec.width,
 			height: spec.height,
 			rotation: 0,
 			opacity: spec.opacity ?? 1,
 			sizing: isRoot ? { horizontal: "FIXED", vertical: "FIXED" } : spec.sizing,
 			fills: spec.fills.map((fill) => paint(fill, imageHash)),
-			strokes: 0,
+			strokes: spec.stroke ? 1 : 0,
 			effects: 0,
 			cornerRadius: spec.cornerRadius ?? 0,
 		};
+		if (spec.stroke) {
+			const { color, weight, align, cap, join } = spec.stroke;
+			node.stroke = {
+				paint: { type: "SOLID", color },
+				weight,
+				align,
+				cap: cap ?? "NONE",
+				join: join ?? "MITER",
+				dashed: false,
+				...(spec.type === "FRAME" && { inLayout: true }),
+			};
+		}
+		if (spec.clips !== undefined) node.clips = spec.clips;
+		if (spec.vector) node.vector = structuredClone(spec.vector);
+		if (spec.position) node.absolute = { horizontal: "MIN", vertical: "MIN" };
 		if (spec.layout) node.layout = structuredClone(spec.layout);
 		if (designSystem && spec.bindings) bind(node, spec.bindings, designSystem);
 		if (spec.text) {
@@ -70,12 +111,14 @@ export function applyScreenTree(
 			};
 		}
 		if (spec.type === "FRAME") {
-			const children = (spec.children ?? []).map((child) =>
-				apply(child, false),
+			const children = (spec.children ?? []).flatMap(
+				(child) =>
+					(child.type === "OWNED" ? keep(child) : apply(child, false)) ?? [],
 			);
 			// The designers' own layers (no key) stay, after the pushed ones.
 			const kept = (reuse?.children ?? []).filter(
-				(child) => child.key === null,
+				(child) =>
+					child.key === null && !placed.has(child.id) && !gone.has(child.id),
 			);
 			node.children = [...children, ...kept];
 		}

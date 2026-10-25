@@ -1,65 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { SyncedNode } from "@figma-agent-tool/protocol";
-import { applyScreenTree, layerByKey, loginScreen } from "../fixtures";
-import {
-	assignKeys,
-	type Baseline,
-	baselineAfterPush,
-	checkScreen,
-	type DesignProject,
-	hasUnpulledChanges,
-	pullScreen,
-	pushedImageRecords,
-	type ScreenFile,
-	screenPush,
-} from "../src";
+import { layerByKey, loginScreen } from "../fixtures";
+import { checkScreen, hasUnpulledChanges, type ScreenFile } from "../src";
 import { fixtureProject } from "./fixture-project";
-
-/** Pushes a Screen into a fake frame, as Push does through the Plugin. */
-async function push(
-	project: DesignProject,
-	screen: ScreenFile,
-	previous?: { frame: SyncedNode; baseline: Baseline },
-) {
-	const { source } = assignKeys(screen.source);
-	const keyed = { ...screen, source };
-	const { root } = checkScreen(project, keyed);
-	if (!root) throw new Error("Screen doesn't check");
-	const { tree, images, sources } = await screenPush(
-		project,
-		keyed,
-		root,
-		previous?.baseline,
-	);
-	let id = previous ? 100 : 0;
-	const frame = applyScreenTree(tree, previous?.frame, {
-		nextId: () => `9:${++id}`,
-		imageHash: (name) => `hash-of-${name}`,
-	});
-	const hashes = Object.fromEntries(
-		Object.keys(images).map((name) => [name, `hash-of-${name}`]),
-	);
-	const imageRecords = pushedImageRecords(sources, hashes);
-	const baseline = baselineAfterPush(project, source, frame, imageRecords);
-	return { tree, images, frame, baseline, screen: keyed };
-}
-
-async function pushedLogin() {
-	const project = await fixtureProject();
-	const screen = project.screens[0] as ScreenFile;
-	return { project, ...(await push(project, screen)) };
-}
-
-function pull(
-	project: DesignProject,
-	screen: ScreenFile,
-	baseline: Baseline,
-	frame: SyncedNode,
-) {
-	const { root } = checkScreen(project, screen);
-	if (!root) throw new Error("Screen doesn't check");
-	return pullScreen(project, screen, root, baseline, frame);
-}
+import { pull, push, pushedLogin } from "./push-pull";
 
 describe("Push", () => {
 	test("writes a key into every element and leaves the rest of the file as it is", async () => {
@@ -172,7 +116,7 @@ describe("Pull", () => {
 		const result = pull(project, screen, baseline, frame);
 		expect(result.changed).toBe(false);
 		expect(result.source).toBeUndefined();
-		expect(result.unsupported).toEqual([]);
+		expect(result.figmaOwned).toEqual([]);
 	});
 
 	test("a Screen overriding the Screen Size round-trips too", async () => {
@@ -318,27 +262,6 @@ describe("Pull", () => {
 				">>>>>>> Figma",
 			].join("\n"),
 		);
-	});
-
-	test("keeps a layer outside the Screen Subset in Figma and lists it", async () => {
-		const { project, screen, baseline, frame } = await pushedLogin();
-		const star = {
-			...structuredClone(layerByKey(frame, "e7")),
-			id: "9:60",
-			key: null,
-			type: "STAR",
-			name: "Star",
-		};
-		frame.children?.push(star);
-		const shadowed = layerByKey(frame, "e5");
-		shadowed.effects = 1;
-		const result = pull(project, screen, baseline, frame);
-		expect(result.unsupported).toEqual([
-			{ nodeId: shadowed.id, name: "Button", reason: "has effects" },
-			{ nodeId: "9:60", name: "Star", reason: "is a STAR" },
-		]);
-		expect(result.changed).toBe(false);
-		expect(hasUnpulledChanges(project, screen, baseline, frame)).toBe(false);
 	});
 
 	test("follows a frame that was cut and pasted, which gives every layer a new ID", async () => {
