@@ -95,9 +95,11 @@ export function designSystemPush(
 	const warnings: DesignSystemWarning[] = [];
 	const paths = tokenPaths(fields);
 	const variables: DesignSystemPush["variables"] = [];
-	const otherModes = [...(modes?.overrides.keys() ?? [])]
-		.filter((mode) => mode !== modes?.default)
-		.map((mode) => [mode, modeFields(fields, modes as Modes, mode)] as const);
+	// Modes.names lists the default first.
+	const [, ...otherNames] = modes?.names ?? [];
+	const otherModes = modes
+		? otherNames.map((mode) => [mode, modeFields(fields, modes, mode)] as const)
+		: [];
 	for (const path of paths.variables) {
 		const type = VARIABLE_GROUPS[groupOf(path) as VariableGroup];
 		const value = pushedValue(path, type, fields);
@@ -138,10 +140,7 @@ export function designSystemPush(
 	const pushed = (list: { token: string }[]) =>
 		new Set(list.map((entry) => entry.token));
 	const [keptVariables, keptStyles] = [pushed(variables), pushed(textStyles)];
-	const modeNames =
-		otherModes.length > 0
-			? [modes?.default as string, ...otherModes.map(([mode]) => mode)]
-			: [];
+	const modeNames = otherNames.length > 0 ? (modes?.names ?? []) : [];
 	// The Baseline lists the default mode first; it stays, renamed if need be.
 	const [defaultId, ...otherIds] = Object.values(baseline?.modes ?? {});
 	const modeIds = { ...baseline?.modes };
