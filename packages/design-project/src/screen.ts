@@ -198,11 +198,16 @@ export function parseComponent(
 	const root = componentSetRoot([]);
 	const builder = new Builder(file, context, errors, true);
 	elements.forEach((html, index) => {
-		const path = `component${elements.length > 1 ? `:nth-of-type(${index + 1})` : ""}`;
+		const path = variantPath(index, elements.length);
 		root.children.push(builder.element(html, path, root));
 	});
 	builder.checkVariants(elements, root.children);
 	return { root, errors };
+}
+
+/** A <component>'s path in errors: `component`, or its place among several. */
+function variantPath(index: number, count: number): string {
+	return count > 1 ? `component:nth-of-type(${index + 1})` : "component";
 }
 
 /**
@@ -545,7 +550,7 @@ class Builder {
 		let names: string | undefined;
 		variants.forEach((variant, index) => {
 			const html = htmls[index] as HtmlElement;
-			const path = `component${variants.length > 1 ? `:nth-of-type(${index + 1})` : ""}`;
+			const path = variantPath(index, variants.length);
 			const { props } = variant;
 			const placed = (["flex", "align-self", "position"] as const).filter(
 				(prop) => props[prop] !== undefined,

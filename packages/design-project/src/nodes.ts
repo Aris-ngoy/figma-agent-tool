@@ -518,7 +518,7 @@ function instanceElement(
 	const properties: Record<string, string> = {};
 	for (const [name, value] of Object.entries(node.instance?.properties ?? {})) {
 		const property = definition?.properties[name];
-		if (definition ? property && value !== property.default : true)
+		if (!definition || (property && value !== property.default))
 			properties[name] = value;
 	}
 	const element: Element = {

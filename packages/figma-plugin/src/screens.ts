@@ -1,8 +1,8 @@
 // Push and Pull: applies Screens' node trees to their frames in place (and
-// Defined Components' to their component sets) and reads them back. Layers are matched by node ID, which the server keeps;
-// each layer's element key and each frame's Screen are stored in shared
-// plugin data, so a frame that is renamed, moved or cut and pasted stays
-// linked. Like create_nodes, a push does its async work first and edits the
+// Defined Components' to their component sets) and reads them back. Layers
+// are matched by node ID, which the server keeps; each layer's element key
+// and each frame's Screen are stored in shared plugin data, so a frame that
+// is renamed, moved or cut and pasted stays linked. Like create_nodes, a push does its async work first and edits the
 // document in one synchronous pass, as one undo step.
 import {
 	type CommandParams,
@@ -305,22 +305,29 @@ function checkInstances(
 					`Layer ${spec.key} is an instance of ${name}, which this push doesn't send or link, so nothing was pushed.`,
 				);
 			}
+			// Defined Components' properties were checked against their files.
+			if (!link) {
+				spec.children?.forEach(walk);
+				return;
+			}
 			for (const [property, value] of Object.entries(spec.properties ?? {})) {
-				const definition = link?.info.properties[property];
+				const definition = link.info.properties[property];
+				if (!definition) {
+					const names = Object.keys(link.info.properties).join(", ");
+					throw new CommandError(
+						"invalid_property",
+						`Layer ${spec.key} sets ${property} on ${name}, which has no such property (${names ? `it has ${names}` : "it has none"}), so nothing was pushed.`,
+					);
+				}
 				if (
-					!link ||
-					(definition &&
-						(definition.type !== "VARIANT" ||
-							definition.options.includes(value)))
-				)
-					continue;
-				const names = Object.keys(link.info.properties).join(", ");
-				throw new CommandError(
-					"invalid_property",
-					definition
-						? `Layer ${spec.key} sets ${property}="${value}" on ${name}, whose ${property} is one of ${(definition as { options: string[] }).options.join(", ")}, so nothing was pushed.`
-						: `Layer ${spec.key} sets ${property} on ${name}, which has no such property (${names ? `it has ${names}` : "it has none"}), so nothing was pushed.`,
-				);
+					definition.type === "VARIANT" &&
+					!definition.options.includes(value)
+				) {
+					throw new CommandError(
+						"invalid_property",
+						`Layer ${spec.key} sets ${property}="${value}" on ${name}, whose ${property} is one of ${definition.options.join(", ")}, so nothing was pushed.`,
+					);
+				}
 			}
 		}
 		spec.children?.forEach(walk);
