@@ -17,7 +17,13 @@ import { assignElementKeys, elementKeys } from "./keys";
 import { mergeScreen } from "./merge";
 import { type FigmaOwnedLayer, fromSyncedNode, toScreenNode } from "./nodes";
 import { printScreen } from "./print";
-import { type DesignProject, imagePath, type ScreenFile } from "./project";
+import {
+	type DesignProject,
+	type DirectionFile,
+	defaultScreenSize,
+	imagePath,
+	type ScreenFile,
+} from "./project";
 import {
 	type ResolveContext,
 	resolveProp,
@@ -33,6 +39,8 @@ export type Link = {
 	linkId: string;
 	file: FileInfo;
 	screensPage: { id: string; name: string };
+	/** The page Directions are copied to, once they have been. */
+	explorationsPage?: { id: string; name: string };
 };
 
 export type ImageRecord = { imageHash: string; sha256: string };
@@ -151,12 +159,12 @@ function tokensFrom(record: Record<string, string>): Tokens {
 
 export function resolveContext(
 	project: DesignProject,
-	screen: { name: string },
+	screen: { name: string; of?: string },
 ): ResolveContext {
 	return {
 		tokens: project.tokens,
 		screenName: screen.name,
-		screenSize: project.config.screenSize,
+		screenSize: defaultScreenSize(project, screen),
 	};
 }
 
@@ -209,6 +217,60 @@ export async function screenPush(
 	/** Layers of elements the Screen deleted since the Baseline. */
 	remove: string[];
 }> {
+	const { images, sources } = await pushedImages(
+		project,
+		screen,
+		root,
+		baseline,
+	);
+	const tree = toScreenNode(root, {
+		...resolveContext(project, screen),
+		nodeIds: baseline?.nodes ?? {},
+		bindings,
+		imageFill: imageFill(sources),
+		placed: baseline ? placedSince(project, screen, baseline) : () => true,
+	});
+	const keys = new Set(elementKeys(root));
+	const remove = Object.entries(baseline?.nodes ?? {}).flatMap(([key, id]) =>
+		keys.has(key) ? [] : [id],
+	);
+	return { tree, images, sources, remove };
+}
+
+/**
+ * The node tree a copy of a checked Direction (every element keyed) pushes
+ * as: unbound, and its Figma-owned Elements copy the layers of its Screen's
+ * frame.
+ */
+export async function directionPush(
+	project: DesignProject,
+	direction: DirectionFile,
+	root: Element,
+	screenBaseline: Baseline | undefined,
+): Promise<{ tree: ScreenNode; images: Record<string, string> }> {
+	const { images, sources } = await pushedImages(
+		project,
+		direction,
+		root,
+		undefined,
+	);
+	const owned = figmaOwnedElements(root, screenBaseline?.nodes ?? {});
+	const tree = toScreenNode(root, {
+		...resolveContext(project, direction),
+		nodeIds: Object.fromEntries(owned.map(({ key, nodeId }) => [key, nodeId])),
+		imageFill: imageFill(sources),
+		placed: () => true,
+	});
+	return { tree, images };
+}
+
+/** How each image `src` in a Screen is pushed, and the bytes to send. */
+async function pushedImages(
+	project: DesignProject,
+	screen: ScreenFile,
+	root: Element,
+	baseline: Baseline | undefined,
+) {
 	const images: Record<string, string> = {};
 	const sources: Record<string, PushedImage> = {};
 	const srcs = new Set<string>();
@@ -231,22 +293,15 @@ export async function screenPush(
 			sources[src] = { sha256: sha, image: name };
 		}
 	}
-	const tree = toScreenNode(root, {
-		...resolveContext(project, screen),
-		nodeIds: baseline?.nodes ?? {},
-		bindings,
-		imageFill: (src, scaleMode) => {
-			const { sha256: _, ...fill } = sources[src] as PushedImage;
-			return { type: "IMAGE", scaleMode, ...fill } as ScreenFill;
-		},
-		placed: baseline ? placedSince(project, screen, baseline) : () => true,
-	});
-	const keys = new Set(elementKeys(root));
-	const remove = Object.entries(baseline?.nodes ?? {}).flatMap(([key, id]) =>
-		keys.has(key) ? [] : [id],
-	);
-	return { tree, images, sources, remove };
+	return { images, sources };
 }
+
+const imageFill =
+	(sources: Record<string, PushedImage>) =>
+	(src: string, scaleMode: "FILL" | "FIT"): ScreenFill => {
+		const { sha256: _, ...fill } = sources[src] as PushedImage;
+		return { type: "IMAGE", scaleMode, ...fill } as ScreenFill;
+	};
 
 /** Whether the Screen moved, resized or renamed an element since the Baseline. */
 function placedSince(

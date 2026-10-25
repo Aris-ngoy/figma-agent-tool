@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
 	layerByKey,
+	loginScreen,
 	logoPng,
+	welcomeScreen,
 	widerScreens,
 	writeFixtureProject,
 } from "@figma-agent-tool/design-project/fixtures";
@@ -80,6 +82,7 @@ describe("init_design_project", () => {
 		expect(config).toEqual({
 			screenSize: { width: 393, height: 852 },
 			screensPage: "Screens",
+			explorationsPage: "Explorations",
 		});
 		expect(
 			await readFile(join(harness.designDir, "DESIGN.md"), "utf8"),
@@ -1022,5 +1025,244 @@ describe("Modes", () => {
 				},
 			],
 		});
+	});
+});
+
+/** A Direction of the login Screen: the same Screen, bolder. */
+const boldLogin = loginScreen
+	.replace("Welcome back", "Welcome back!")
+	.replace("../assets/logo.png", "../../assets/logo.png");
+
+async function writeDirection(designDir: string, name: string, source: string) {
+	const dir = join(designDir, "screens/login.directions");
+	await mkdir(dir, { recursive: true });
+	await writeFile(join(dir, `${name}.html`), source);
+}
+
+describe("Directions", () => {
+	test("check reports a Direction's errors under its file", async () => {
+		const designDir = await writeFixtureProject({
+			"screens/login.directions/bold.html":
+				'<body style="display:flex">\n  <table></table>\n</body>\n',
+			"screens/login.directions/calm.html": boldLogin,
+		});
+		const harness = await startHarness({ designDir });
+		const result = await harness.callTool("check_design_project");
+		expect(structured(result)).toMatchObject({
+			ok: false,
+			errors: [
+				{
+					file: "screens/login.directions/bold.html",
+					line: 2,
+					element: "body > table",
+					rule: "unknown-element",
+				},
+			],
+		});
+	});
+
+	test("render_screen renders a Direction at its Screen's Screen Size", async () => {
+		const designDir = await writeFixtureProject({
+			"screens/welcome.html": welcomeScreen,
+			"screens/welcome.directions/stacked.html":
+				'<body style="display:flex; flex-direction:column">\n  <p>Stacked welcome</p>\n</body>\n',
+		});
+		const shots: { html: string; size: unknown }[] = [];
+		const harness = await startHarness({
+			designDir,
+			screenshot: async (htmlPath, pngPath, size) => {
+				shots.push({ html: await readFile(htmlPath, "utf8"), size });
+				await writeFile(pngPath, Buffer.from(logoPng, "base64"));
+			},
+		});
+		const result = await harness.callTool("render_screen", {
+			screen: "welcome",
+			direction: "stacked",
+		});
+		expect(result.isError).toBeFalsy();
+		expect(structured<{ path: string }>(result).path).toContain(
+			"screen-welcome-stacked",
+		);
+		expect(shots[0]?.size).toEqual({ width: 1024, height: 768 });
+		expect(shots[0]?.html).toContain("Stacked welcome");
+		expect(shots[0]?.html).toContain("body { width: 1024px; height: 768px; }");
+		const unknown = await harness.callTool("render_screen", {
+			screen: "welcome",
+			direction: "nope",
+		});
+		expect(unknown.isError).toBe(true);
+		expect(text(unknown)).toContain("welcome has the Directions stacked");
+	});
+
+	test("choose_direction makes a Direction the Screen and removes the other Directions", async () => {
+		const designDir = await writeFixtureProject({
+			"screens/login.directions/bold.html": boldLogin,
+			"screens/login.directions/calm.html": loginScreen,
+		});
+		const harness = await startHarness({ designDir });
+		const result = await harness.callTool("choose_direction", {
+			screen: "login",
+			direction: "bold",
+		});
+		expect(result.isError).toBeFalsy();
+		expect(structured(result)).toEqual({
+			screen: "login",
+			file: "screens/login.html",
+			chose: "bold",
+			discarded: ["calm"],
+		});
+		// Its images' paths follow it to the Screen's folder.
+		expect(await readFile(join(designDir, "screens/login.html"), "utf8")).toBe(
+			loginScreen.replace("Welcome back", "Welcome back!"),
+		);
+		expect(existsSync(join(designDir, "screens/login.directions"))).toBe(false);
+		const check = await harness.callTool("check_design_project");
+		expect(structured(check)).toMatchObject({ ok: true });
+		const again = await harness.callTool("choose_direction", {
+			screen: "login",
+			direction: "bold",
+		});
+		expect(again.isError).toBe(true);
+		expect(text(again)).toContain("login has no Directions");
+	});
+
+	test("choose_direction makes a new Screen from a Direction of a Screen that doesn't exist yet", async () => {
+		const designDir = await writeFixtureProject({
+			"screens/signup.directions/a.html": boldLogin,
+		});
+		const harness = await startHarness({ designDir });
+		const result = await harness.callTool("choose_direction", {
+			screen: "signup",
+			direction: "a",
+		});
+		expect(result.isError).toBeFalsy();
+		expect(await readFile(join(designDir, "screens/signup.html"), "utf8")).toBe(
+			loginScreen.replace("Welcome back", "Welcome back!"),
+		);
+	});
+
+	test("a regular Push never Pushes Directions to the Screens Page", async () => {
+		const { harness, plugin } = await withProject({
+			"screens/login.directions/bold.html": boldLogin,
+		});
+		const result = await harness.callTool("push", { confirmLink: true });
+		expect(structured(result)).toMatchObject({
+			status: "pushed",
+			screens: [{ screen: "login", created: true }],
+		});
+		expect([...plugin.screens.frames.values()].map((f) => f.screen)).toEqual([
+			"login",
+		]);
+		expect(plugin.screens.frame("login").children?.[1]?.text?.characters).toBe(
+			"Welcome back",
+		);
+	});
+
+	test("Pushing Directions copies them, labelled, to the Explorations Page; again replaces the copies", async () => {
+		const { harness, plugin, designDir, frame } = await pushed();
+		await writeDirection(designDir, "bold", boldLogin);
+		await writeDirection(
+			designDir,
+			"calm",
+			boldLogin.replace("Welcome back!", "Hello"),
+		);
+		const screenFrame = structuredClone(frame());
+		const result = await harness.callTool("push", {
+			screens: ["login"],
+			directions: true,
+		});
+		expect(result.isError).toBeFalsy();
+		expect(structured(result)).toMatchObject({
+			status: "pushed_directions",
+			page: { name: "Explorations" },
+			screens: [
+				{
+					screen: "login",
+					directions: [
+						{ direction: "bold", frameId: expect.any(String) },
+						{ direction: "calm", frameId: expect.any(String) },
+					],
+				},
+			],
+		});
+		const copies = () => [...plugin.screens.explorations.values()];
+		expect(copies().map(({ frame }) => frame.name)).toEqual([
+			"login / bold",
+			"login / calm",
+		]);
+		expect(copies()[0]?.frame.children?.[1]?.text?.characters).toBe(
+			"Welcome back!",
+		);
+		const page = plugin.document.pages.find((p) => p.name === "Explorations");
+		expect(copies().every(({ pageId }) => pageId === page?.id)).toBe(true);
+		// The Screen, its frame and its file are untouched; Directions get no keys.
+		expect(frame()).toEqual(screenFrame);
+		expect(
+			await readFile(
+				join(designDir, "screens/login.directions/bold.html"),
+				"utf8",
+			),
+		).toBe(boldLogin);
+		const link = JSON.parse(
+			await readFile(join(designDir, "sync/link.json"), "utf8"),
+		);
+		expect(link.explorationsPage).toEqual({
+			id: page?.id,
+			name: "Explorations",
+		});
+
+		await rm(join(designDir, "screens/login.directions/calm.html"));
+		await harness.callTool("push", { directions: true });
+		expect(copies().map(({ frame }) => frame.name)).toEqual(["login / bold"]);
+	});
+
+	test("Pull never reads the Explorations Page", async () => {
+		const { harness, plugin, designDir, read } = await pushed();
+		await writeDirection(designDir, "bold", boldLogin);
+		await harness.callTool("push", { directions: true });
+		const before = await read();
+		// A designer edits a copy, then deletes the Screen's own frame.
+		const [copy] = [...plugin.screens.explorations.values()];
+		(copy?.frame.children?.[1]?.text as { characters: string }).characters =
+			"Edited copy";
+		plugin.screens.frames.clear();
+		const result = await harness.callTool("pull");
+		expect(structured(result)).toMatchObject({
+			screens: [{ screen: "login", status: "missing" }],
+		});
+		expect(await read()).toBe(before);
+	});
+
+	test("Pushing Directions is refused without Directions, or when one fails Check", async () => {
+		const { harness, designDir } = await pushed();
+		const none = await harness.callTool("push", { directions: true });
+		expect(none.isError).toBe(true);
+		expect(text(none)).toContain("No Directions to push");
+		await writeDirection(designDir, "bad", "<body><table></table></body>\n");
+		const failing = await harness.callTool("push", { directions: true });
+		expect(failing.isError).toBe(true);
+		expect(text(failing)).toContain("screens/login.directions/bad.html:1");
+	});
+
+	test("choosing a Direction, then Pushing, updates the Screen's frame in place", async () => {
+		const { harness, plugin, designDir, read, frame } = await pushed();
+		const { id } = frame();
+		// An Agent copies the keyed Screen into a Direction and edits it.
+		const keyed = (await read())
+			.replace("Welcome back", "Welcome back!")
+			.replace("../assets/logo.png", "../../assets/logo.png");
+		await writeDirection(designDir, "bold", keyed);
+		await harness.callTool("choose_direction", {
+			screen: "login",
+			direction: "bold",
+		});
+		const result = await harness.callTool("push");
+		expect(structured(result)).toMatchObject({
+			status: "pushed",
+			screens: [{ screen: "login", frameId: id, created: false }],
+		});
+		expect(plugin.screens.frame("login").children?.[1]?.text?.characters).toBe(
+			"Welcome back!",
+		);
 	});
 });

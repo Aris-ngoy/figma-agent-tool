@@ -253,3 +253,64 @@ describe("Render", () => {
 		},
 	);
 });
+
+describe("Directions", () => {
+	const bold = loginScreen
+		.replace("Welcome back", "Welcome back!")
+		.replace("../assets/logo.png", "../../assets/logo.png");
+	const welcome =
+		'<body style="display:flex; width:1024px; height:768px"><p>Hi</p></body>\n';
+
+	test("the Preview shows a Screen's Directions side by side, with their errors", async () => {
+		const { server } = await preview({
+			"screens/login.directions/bold.html": bold,
+			"screens/login.directions/broken.html": "<table></table>",
+		});
+		const html = await (await fetch(server.url)).text();
+		const row = html.slice(html.indexOf('class="directions"'));
+		expect(row).toContain(
+			'<iframe src="/directions/login/bold" width="393" height="852"',
+		);
+		expect(row).toContain('<iframe src="/directions/login/broken"');
+		expect(row).toContain("single-root");
+		expect(row).toContain('action="/choose"');
+	});
+
+	test("serves a Direction at its Screen's Screen Size, its images from its folder", async () => {
+		const { server } = await preview({
+			"screens/welcome.html": welcome,
+			"screens/welcome.directions/plain.html":
+				'<body style="display:flex"><p>Plain</p></body>\n',
+		});
+		const html = await (
+			await fetch(`${server.url}directions/welcome/plain`)
+		).text();
+		expect(html).toContain("<p>Plain</p>");
+		expect(html).toContain("body { width: 1024px; height: 768px; }");
+		expect(html).toContain('<base href="/files/screens/welcome.directions/">');
+		const missing = await fetch(`${server.url}directions/welcome/nope`);
+		expect(missing.status).toBe(404);
+	});
+
+	test("choosing a Direction in the Preview makes it the Screen", async () => {
+		const { dir, server } = await preview({
+			"screens/login.directions/bold.html": bold,
+			"screens/login.directions/calm.html": loginScreen,
+		});
+		const response = await fetch(`${server.url}choose`, {
+			method: "POST",
+			body: new URLSearchParams({ screen: "login", direction: "bold" }),
+			redirect: "manual",
+		});
+		expect(response.status).toBe(303);
+		expect(await readFile(join(dir, "screens/login.html"), "utf8")).toBe(
+			loginScreen.replace("Welcome back", "Welcome back!"),
+		);
+		expect(existsSync(join(dir, "screens/login.directions"))).toBe(false);
+		const again = await fetch(`${server.url}choose`, {
+			method: "POST",
+			body: new URLSearchParams({ screen: "login", direction: "bold" }),
+		});
+		expect(again.status).toBe(404);
+	});
+});

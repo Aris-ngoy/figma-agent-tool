@@ -12,9 +12,8 @@ import {
 	figmaOwnedPreviews,
 	modeTokens,
 	readBaseline,
-	resolveProp,
 	type ScreenFile,
-	type ScreenSize,
+	screenSizeOf,
 	tokensCss,
 } from "@figma-agent-tool/design-project";
 
@@ -48,13 +47,13 @@ export type DocumentOptions = {
 	mode?: string;
 };
 
-/** A Screen's Figma-owned Elements, with the state of their exports. */
+/** A Screen's (or Direction's) Figma-owned Elements, with the state of their exports. */
 export async function figmaOwnedOf(
 	project: DesignProject,
 	screen: ScreenFile,
 ): Promise<FigmaOwnedPreview[]> {
 	const { root } = checkScreen(project, screen);
-	const baseline = await readBaseline(project, screen.name);
+	const baseline = await readBaseline(project, screen.of ?? screen.name);
 	return figmaOwnedPreviews(project, screen, root, baseline);
 }
 
@@ -93,24 +92,13 @@ function cssString(text: string): string {
 	);
 }
 
-/** The Screen Size a Screen renders at: its <body> override, else the project's. */
-export function screenSize(
-	project: DesignProject,
-	screen: ScreenFile,
-): ScreenSize {
-	const { root } = checkScreen(project, screen);
-	const width = root && Number(resolveProp(root, "width", project.tokens));
-	const height = root && Number(resolveProp(root, "height", project.tokens));
-	return width && height ? { width, height } : project.config.screenSize;
-}
-
 export function screenDocument(
 	project: DesignProject,
 	screen: ScreenFile,
 	{ baseUrl, head = "", figmaOwned = [], mode }: DocumentOptions,
 ): string {
 	const tokens = modeTokens(project, mode);
-	const { width, height } = screenSize(project, screen);
+	const { width, height } = screenSizeOf(project, screen);
 	return [
 		"<!doctype html>",
 		"<html>",

@@ -270,6 +270,7 @@ function answer(
 			return okOrFailure(handle(params));
 		}
 		case "push_screens":
+		case "push_explorations":
 		case "read_screens":
 		case "read_design_system":
 		case "link_file":

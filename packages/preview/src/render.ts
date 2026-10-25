@@ -14,12 +14,13 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import type {
-	DesignProject,
-	FigmaOwnedPreview,
-	ScreenFile,
+import {
+	type DesignProject,
+	type FigmaOwnedPreview,
+	type ScreenFile,
+	screenSizeOf,
 } from "@figma-agent-tool/design-project";
-import { figmaOwnedOf, screenDocument, screenSize } from "./document";
+import { figmaOwnedOf, screenDocument } from "./document";
 
 export class RenderError extends Error {}
 
@@ -48,7 +49,7 @@ export async function renderScreen(
 	/** Its Figma-owned Elements, shown from their exports. */
 	figmaOwned: FigmaOwnedPreview[];
 }> {
-	const size = screenSize(project, screen);
+	const size = screenSizeOf(project, screen);
 	const figmaOwned = await figmaOwnedOf(project, screen);
 	const document = screenDocument(project, screen, {
 		baseUrl: pathToFileURL(`${dirname(screen.path)}/`).href,

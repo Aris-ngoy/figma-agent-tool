@@ -2,6 +2,7 @@
 // with Figma (push, pull, relink). The CLI runs the same functions.
 import {
 	checkProject,
+	chooseDirection,
 	DesignProjectError,
 	initProject,
 	loadProject,
@@ -22,9 +23,11 @@ import { writePngArtifact } from "./artifacts";
 import { type Bridge, BridgeRequestError } from "./bridge";
 import {
 	DesignSyncError,
+	findDirection,
 	findScreen,
 	pullDesignProject,
 	pushDesignProject,
+	pushDirections,
 	relinkDesignProject,
 } from "./design-sync";
 import { jsonResult, registerGuardedTool } from "./figma-tool";
@@ -127,8 +130,8 @@ export function registerDesignTools(
 		"render_screen",
 		{
 			description:
-				"Render a Screen to a PNG exactly as the Preview shows it (headless Chromium, " +
-				"downloaded on first use), into the artifacts folder, in the default Mode or the " +
+				"Render a Screen, or one of its Directions, to a PNG exactly as the Preview shows it " +
+				"(headless Chromium, downloaded on first use), into the artifacts folder, in the default Mode or the " +
 				"`mode` given. Returns its path and size, and its Figma-owned Elements, drawn " +
 				"from the exports Pull cached (`export`: current, stale once the Screen resized " +
 				"one, or missing); set `inline` to also get the image.",
@@ -137,6 +140,13 @@ export function registerDesignTools(
 					.string()
 					.min(1)
 					.describe("Screen name: its file name in screens/ without .html."),
+				direction: z
+					.string()
+					.min(1)
+					.optional()
+					.describe(
+						"A Direction of the Screen to render instead: its file name in screens/<screen>.directions/ without .html.",
+					),
 				mode: z
 					.string()
 					.min(1)
@@ -163,19 +173,20 @@ export function registerDesignTools(
 				),
 			},
 		},
-		async ({ screen: name, mode, inline }) => {
+		async ({ screen: name, direction, mode, inline }) => {
 			const project = await loadProject(designDir);
-			const screen = findScreen(project, name);
+			const screen = direction
+				? findDirection(project, name, direction)
+				: findScreen(project, name);
 			const { png, figmaOwned } = await renderScreen(project, screen, {
 				screenshot,
 				mode,
 			});
+			let artifact = `screen-${name}`;
+			if (direction) artifact += `-${direction}`;
+			if (mode) artifact += `-${mode}`;
 			const structuredContent = {
-				...(await writePngArtifact(
-					artifactsDir,
-					mode ? `screen-${name}-${mode}` : `screen-${name}`,
-					png,
-				)),
+				...(await writePngArtifact(artifactsDir, artifact, png)),
 				figmaOwned: figmaOwned.map(({ src: _, ...owned }) => {
 					const note = exportNote(owned);
 					return note ? { ...owned, note } : owned;
@@ -190,6 +201,44 @@ export function registerDesignTools(
 				});
 			}
 			return result;
+		},
+		EXPECTED,
+	);
+
+	registerGuardedTool(
+		server,
+		"choose_direction",
+		{
+			description:
+				"Choose one of a Screen's Directions (alternative versions in " +
+				"screens/<screen>.directions/, compared side by side in the Preview): it becomes the " +
+				"Screen (screens/<screen>.html, created if there was none) and the other Directions " +
+				"are deleted with their folder; git keeps them. The Screen's frame in Figma updates " +
+				"in place at the next Push. Only when the user picked the Direction.",
+			inputSchema: {
+				screen: z.string().min(1).describe("The Screen's name."),
+				direction: z
+					.string()
+					.min(1)
+					.describe(
+						"The Direction's file name in screens/<screen>.directions/ without .html.",
+					),
+			},
+			outputSchema: {
+				screen: z.string(),
+				file: z.string(),
+				chose: z.string(),
+				discarded: z.array(z.string()),
+			},
+		},
+		async ({ screen, direction }) => {
+			const project = await loadProject(designDir);
+			return jsonResult(
+				await chooseDirection(
+					project,
+					findDirection(project, screen, direction),
+				),
+			);
 		},
 		EXPECTED,
 	);
@@ -238,7 +287,10 @@ export function registerDesignTools(
 				"every element. The first Push asks to confirm the Bridged File before linking it " +
 				"(status confirm_link): ask the user, then call again with confirmLink. Refused " +
 				"while the Bridged File isn't the Linked File, a Screen or DESIGN.md fails Check or " +
-				"has Sync Conflicts, or a frame or the Design System has Unpulled Changes (Pull first).",
+				"has Sync Conflicts, or a frame or the Design System has Unpulled Changes (Pull first). " +
+				"A Screen's Directions are never pushed to the Screens Page: with `directions`, Push " +
+				"instead copies them, labelled “<screen> / <direction>”, side by side on the " +
+				"Explorations Page (replacing earlier copies), which Pull never reads.",
 			inputSchema: {
 				screens: z
 					.array(z.string().min(1))
@@ -248,11 +300,22 @@ export function registerDesignTools(
 					.boolean()
 					.default(false)
 					.describe("Confirms linking the Bridged File on the first Push."),
+				directions: z
+					.boolean()
+					.default(false)
+					.describe(
+						"Instead, copy the Screens' Directions to the Explorations Page for designers to compare (status pushed_directions).",
+					),
 			},
 		},
-		async ({ screens, confirmLink }) =>
+		async ({ screens, confirmLink, directions }) =>
 			jsonResult(
-				await pushDesignProject(designDir, bridge, { screens, confirmLink }),
+				directions
+					? await pushDirections(designDir, bridge, { screens, confirmLink })
+					: await pushDesignProject(designDir, bridge, {
+							screens,
+							confirmLink,
+						}),
 			),
 		EXPECTED,
 	);

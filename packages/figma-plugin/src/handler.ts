@@ -34,6 +34,7 @@ import {
 	fileLinkId,
 	getImage,
 	linkFile,
+	pushExplorations,
 	pushScreens,
 	readScreens,
 } from "./screens";
@@ -126,6 +127,7 @@ const implementations: CommandImplementations = {
 	get_motion: getMotion,
 	set_motion: setMotion,
 	push_screens: pushScreens,
+	push_explorations: pushExplorations,
 	read_screens: readScreens,
 	read_design_system: readDesignSystem,
 	link_file: linkFile,

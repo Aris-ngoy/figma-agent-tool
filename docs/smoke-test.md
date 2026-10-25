@@ -78,6 +78,8 @@ In a scratch repo, with the MCP server's working directory there (or `FIGMA_AGEN
 - [ ] Change a Dark value in Figma: `get_status` lists `modes.Dark.…` under `designSystem.unpulledChanges` and `push` is refused. `pull`: only that value changes in `modes.yaml`, DESIGN.md stays as it was. Drop the Mode from the file and `push`: the mode is gone from the collection.
 - [ ] On a Free (Starter) plan, `push` with a second Mode: refused with `mode_limit`, naming the mode.
 - [ ] Unverified against the mock: `addMode`, `renameMode` and `removeMode` on the collection, and Figma resolving an alias in a non-default mode to the target's value in that mode. Binding corner radii and padding with `setBoundVariable`, `setTextStyleIdAsync` after the synchronous pass, and creating variables with `createVariable(name, collection, type)`.
+- [ ] Ask the agent for two Directions of the login Screen (`design/screens/login.directions/bold.html`, `calm.html`): `check_design_project` checks them, and the Preview shows them side by side with the Screen at its Screen Size. `push` with `directions: true` (or `figma-agent-tool push --directions`): an Explorations page gets frames “login / bold” and “login / calm” side by side, and the Screens Page is unchanged. Move the row and push Directions again: the new copies replace the old ones where the row is now. Edit a copy, then `pull`: `unchanged`. Press Choose on “bold” in the Preview: `login.html` is now the Direction, the folder is gone, and the next `push` updates the login frame in place.
+- [ ] Unverified against the mock: `clone()` of a Figma-owned Element's layer into a copy, and the copies' placement after removing the old ones.
 
 ## Agent loop
 

@@ -15,8 +15,11 @@ import {
 	clearBaselines,
 	type DesignProject,
 	type DesignSystemBaseline,
+	type DirectionFile,
 	designSystemChanges,
 	designSystemPush,
+	directionOf,
+	directionPush,
 	type Element,
 	exportsToFetch,
 	type FigmaDesignSystem,
@@ -104,12 +107,33 @@ export function findScreen(project: DesignProject, name: string): ScreenFile {
 	return screen;
 }
 
+/** A Screen's Direction, or a DesignSyncError listing the Directions it has. */
+export function findDirection(
+	project: DesignProject,
+	screen: string,
+	direction: string,
+): DirectionFile {
+	const found = directionOf(project, screen, direction);
+	if (!found) {
+		const directions = project.directions.filter((d) => d.of === screen);
+		throw new DesignSyncError(
+			directions.length > 0
+				? `No Direction named "${direction}": ${screen} has the Directions ${directions.map((d) => d.direction).join(", ")}.`
+				: `No Direction named "${direction}": ${screen} has no Directions (in screens/${screen}.directions/).`,
+		);
+	}
+	return found;
+}
+
+/** The first Push's question: link the Bridged File? */
+type ConfirmLink = {
+	status: "confirm_link";
+	file: FileInfo;
+	message: string;
+};
+
 export type PushResult =
-	| {
-			status: "confirm_link";
-			file: FileInfo;
-			message: string;
-	  }
+	| ConfirmLink
 	| {
 			status: "pushed";
 			linkedFile: FileInfo;
@@ -126,51 +150,16 @@ export async function pushDesignProject(
 	}: { screens?: string[]; confirmLink?: boolean } = {},
 ): Promise<PushResult> {
 	const project = await loadProject(dir);
-	const status = connected(bridge);
+	connected(bridge);
 	const screens = selectScreens(project, only);
 	if (screens.length === 0) {
 		throw new DesignSyncError(
 			"Nothing to push: the Design Project has no Screens yet. Add HTML files to screens/.",
 		);
 	}
-	const checked = await checkProject(project);
-	const failing = checked.errors.filter(
-		(error) =>
-			isDesignSystemFile(error.file) ||
-			screens.some((screen) => screen.file === error.file),
-	);
-	if (failing.length > 0) {
-		const conflicted = [
-			...new Set(
-				failing.filter((e) => e.rule === "sync-conflict").map((e) => e.file),
-			),
-		];
-		throw new DesignSyncError(
-			[
-				conflicted.length > 0
-					? `Push refused: ${conflicted.join(", ")} still ${conflicted.length === 1 ? "has" : "have"} Sync Conflicts to resolve.`
-					: "Push refused: these files fail Check.",
-				describeErrors(failing),
-			].join("\n"),
-		);
-	}
-
-	let link = await readLink(project);
-	if (!link) {
-		if (!confirmLink) {
-			const linkedElsewhere = status.linkId
-				? " It is already linked to another Design Project, which would lose its link."
-				: "";
-			return {
-				status: "confirm_link",
-				file: status.file,
-				message: `This first Push links the Design Project to the Bridged File, ${fileName(status.file)}: from then on Push and Pull only work with that file.${linkedElsewhere} Ask the user to confirm it's the right file, then push again with confirmLink.`,
-			};
-		}
-		link = await linkBridgedFile(project, bridge, status.file);
-	} else {
-		checkBridgedFile(bridge, link);
-	}
+	await refuseFailingCheck(project, screens);
+	const link = await linkOrConfirm(project, bridge, confirmLink);
+	if ("status" in link) return link;
 
 	const linked = await readLinkedDesignSystem(project, bridge);
 	if (linked && linked.changes.length > 0) {
@@ -282,6 +271,145 @@ export async function pushDesignProject(
 		linkedFile: link.file,
 		page: result.page,
 		screens: pushed,
+	};
+}
+
+/** Refuses while DESIGN.md, its Modes file or one of `files` fails Check. */
+async function refuseFailingCheck(project: DesignProject, files: ScreenFile[]) {
+	const checked = await checkProject(project);
+	const failing = checked.errors.filter(
+		(error) =>
+			isDesignSystemFile(error.file) ||
+			files.some((file) => file.file === error.file),
+	);
+	if (failing.length === 0) return;
+	const conflicted = [
+		...new Set(
+			failing.filter((e) => e.rule === "sync-conflict").map((e) => e.file),
+		),
+	];
+	throw new DesignSyncError(
+		[
+			conflicted.length > 0
+				? `Push refused: ${conflicted.join(", ")} still ${conflicted.length === 1 ? "has" : "have"} Sync Conflicts to resolve.`
+				: "Push refused: these files fail Check.",
+			describeErrors(failing),
+		].join("\n"),
+	);
+}
+
+/**
+ * The Linked File, once the Bridged File is checked to be it. The first Push
+ * asks to confirm linking the Bridged File, and links it with `confirmLink`.
+ */
+async function linkOrConfirm(
+	project: DesignProject,
+	bridge: Bridge,
+	confirmLink: boolean,
+): Promise<Link | ConfirmLink> {
+	const status = connected(bridge);
+	const link = await readLink(project);
+	if (link) {
+		checkBridgedFile(bridge, link);
+		return link;
+	}
+	if (!confirmLink) {
+		const linkedElsewhere = status.linkId
+			? " It is already linked to another Design Project, which would lose its link."
+			: "";
+		return {
+			status: "confirm_link",
+			file: status.file,
+			message: `This first Push links the Design Project to the Bridged File, ${fileName(status.file)}: from then on Push and Pull only work with that file.${linkedElsewhere} Ask the user to confirm it's the right file, then push again with confirmLink.`,
+		};
+	}
+	return linkBridgedFile(project, bridge, status.file);
+}
+
+export type PushDirectionsResult =
+	| ConfirmLink
+	| {
+			status: "pushed_directions";
+			linkedFile: FileInfo;
+			page: { id: string; name: string };
+			screens: {
+				screen: string;
+				directions: { direction: string; frameId: string }[];
+			}[];
+	  };
+
+/**
+ * Copies the Directions of the Screens named (all Screens' by default) to
+ * the Explorations Page, replacing their earlier copies, for designers to
+ * compare. Screens and their frames are left as they are.
+ */
+export async function pushDirections(
+	dir: string,
+	bridge: Bridge,
+	{
+		screens: only,
+		confirmLink = false,
+	}: { screens?: string[]; confirmLink?: boolean } = {},
+): Promise<PushDirectionsResult> {
+	const project = await loadProject(dir);
+	connected(bridge);
+	const directions = project.directions.filter(
+		(direction) => !only || only.length === 0 || only.includes(direction.of),
+	);
+	if (directions.length === 0) {
+		throw new DesignSyncError(
+			`No Directions to push: ${only && only.length > 0 ? only.join(", ") : "no Screen"} has none. Write them in screens/<screen>.directions/.`,
+		);
+	}
+	await refuseFailingCheck(project, directions);
+	const link = await linkOrConfirm(project, bridge, confirmLink);
+	if ("status" in link) return link;
+
+	const baselines = await readBaselines(project);
+	const images: Record<string, string> = {};
+	const screens = new Map<string, { direction: string; tree: ScreenNode }[]>();
+	for (const direction of directions) {
+		// Keyed for the push only: a Direction's file stays as the Agent wrote it.
+		const keyed = { ...direction, source: assignKeys(direction.source).source };
+		const { root } = checkScreen(project, keyed);
+		if (!root)
+			throw new Error(
+				`${direction.file} stopped checking while keys were added.`,
+			);
+		const baseline = baselines.get(direction.of);
+		const unlinked = unlinkedFigmaOwned(root, baseline);
+		if (unlinked.length > 0) {
+			throw new DesignSyncError(
+				`Push refused: ${direction.file} has Figma-owned Elements (${unlinked.join(", ")}) whose layers aren't in ${direction.of}'s frame, so they can't be copied. Only Pull makes Figma-owned Elements: copy them from the Screen as Pull wrote them, or delete them.`,
+			);
+		}
+		const push = await directionPush(project, keyed, root, baseline);
+		Object.assign(images, push.images);
+		const pushes = screens.get(direction.of) ?? [];
+		pushes.push({ direction: direction.direction, tree: push.tree });
+		screens.set(direction.of, pushes);
+	}
+	const page = link.explorationsPage ?? {
+		id: "",
+		name: project.config.explorationsPage,
+	};
+	const result = await bridge.request("push_explorations", {
+		page: { id: page.id || undefined, name: page.name },
+		screens: [...screens].map(([screen, pushes]) => ({
+			screen,
+			directions: pushes,
+		})),
+		images,
+	});
+	await writeLink(project, { ...link, explorationsPage: result.page });
+	return {
+		status: "pushed_directions",
+		linkedFile: link.file,
+		page: result.page,
+		screens: result.screens.map(({ screen, frames }) => ({
+			screen,
+			directions: frames,
+		})),
 	};
 }
 
