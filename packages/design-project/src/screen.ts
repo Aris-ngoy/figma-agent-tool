@@ -419,20 +419,23 @@ class Builder {
 		let d: string | undefined;
 		let fillRule: VectorPath["fillRule"];
 		for (const { name, value } of html.attributes) {
-			if (name === "d") d = value;
-			else if (
-				name === "fill-rule" &&
-				(value === "nonzero" || value === "evenodd")
-			)
-				fillRule = value;
-			else {
+			if (name === "d") {
+				d = value;
+			} else if (name !== "fill-rule") {
 				this.error(
 					html,
 					path,
-					name === "fill-rule" ? "invalid-value" : "unknown-attribute",
-					name === "fill-rule"
-						? `\`fill-rule="${value}"\` isn't in the Screen Subset: use \`nonzero\` or \`evenodd\`.`
-						: `The \`${name}\` attribute isn't in the Screen Subset: a <path> takes \`d\` and \`fill-rule\`; colors and strokes go in the <svg>'s style.`,
+					"unknown-attribute",
+					`The \`${name}\` attribute isn't in the Screen Subset: a <path> takes \`d\` and \`fill-rule\`; colors and strokes go in the <svg>'s style.`,
+				);
+			} else if (value === "nonzero" || value === "evenodd") {
+				fillRule = value;
+			} else {
+				this.error(
+					html,
+					path,
+					"invalid-value",
+					`\`fill-rule="${value}"\` isn't in the Screen Subset: use \`nonzero\` or \`evenodd\`.`,
 				);
 			}
 		}

@@ -15,6 +15,7 @@ import {
 	resolveElement,
 	resolveProp,
 	vectorGeometry,
+	vectorPath,
 } from "./resolve";
 import type { Element } from "./screen";
 import {
@@ -422,8 +423,10 @@ function readVector(
 	}
 	element.paths = (node.vector?.paths ?? []).map(({ data, windingRule }) => {
 		const commands = parsePath(data);
-		const d = "problem" in commands ? data : formatPath(commands);
-		return windingRule === "EVENODD" ? { d, fillRule: "evenodd" } : { d };
+		return vectorPath(
+			"problem" in commands ? data : formatPath(commands),
+			windingRule,
+		);
 	});
 }
 

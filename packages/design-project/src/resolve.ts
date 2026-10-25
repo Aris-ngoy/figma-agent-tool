@@ -4,7 +4,7 @@
 import type { Tokens } from "./design-md";
 import { formatPath, parsePath, transformPath } from "./path";
 import type { ScreenSize } from "./project";
-import type { Element } from "./screen";
+import type { Element, VectorPath } from "./screen";
 import {
 	DEFAULT_NAMES,
 	defaultValue,
@@ -111,12 +111,13 @@ export function withoutViewBox(
 		...element,
 		viewBox: undefined,
 		props,
-		paths: paths.map(({ data, windingRule }) =>
-			windingRule === "EVENODD"
-				? { d: data, fillRule: "evenodd" }
-				: { d: data },
-		),
+		paths: paths.map(({ data, windingRule }) => vectorPath(data, windingRule)),
 	};
+}
+
+/** A path as a Screen writes it: `fill-rule` only when it's evenodd. */
+export function vectorPath(d: string, windingRule: string): VectorPath {
+	return windingRule === "EVENODD" ? { d, fillRule: "evenodd" } : { d };
 }
 
 function round(value: number): number {

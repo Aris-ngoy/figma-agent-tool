@@ -8,6 +8,8 @@ export type PathCommand = {
 };
 
 const NUMBER = /[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/gi;
+const COMMAND = /[mlhvcsqtza]/gi;
+const TOKEN = new RegExp(`${COMMAND.source}|${NUMBER.source}`, "gi");
 
 /** Coordinates each command takes. */
 const ARITY: Record<string, number> = {
@@ -24,10 +26,8 @@ const ARITY: Record<string, number> = {
 
 /** Absolute M, L, C, Q and Z commands, or why the data can't be read. */
 export function parsePath(d: string): PathCommand[] | { problem: string } {
-	const tokens = d.match(
-		/[mlhvcsqtza]|[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/gi,
-	);
-	const rest = d.replace(NUMBER, " ").replace(/[mlhvcsqtza]/gi, " ");
+	const tokens = d.match(TOKEN);
+	const rest = d.replace(NUMBER, " ").replace(COMMAND, " ");
 	if (!tokens || rest.replace(/[\s,]/g, "") !== "") {
 		return { problem: `\`d="${d}"\` isn't SVG path data.` };
 	}
