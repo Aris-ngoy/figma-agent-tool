@@ -213,13 +213,9 @@ export function createFakeDesignSystem(nextId: () => string) {
 			const walk = (node: SyncedNode) => {
 				if (node.fills !== "mixed") {
 					for (const fill of node.fills) {
-						const color = fill.type === "SOLID" ? value(fill.variable) : null;
-						if (
-							fill.type === "SOLID" &&
-							color &&
-							typeof color === "object" &&
-							"color" in color
-						)
+						if (fill.type !== "SOLID") continue;
+						const color = value(fill.variable);
+						if (color && typeof color === "object" && "color" in color)
 							fill.color = color.color;
 					}
 				}

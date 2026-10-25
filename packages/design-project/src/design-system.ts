@@ -88,17 +88,15 @@ export function designSystemPush(
 	const variables: DesignSystemPush["variables"] = [];
 	for (const path of paths.variables) {
 		const type = VARIABLE_GROUPS[groupOf(path) as VariableGroup];
-		const literal = resolveField(path, fields);
-		const value =
-			literal === undefined
-				? undefined
-				: type === "COLOR"
-					? colorValue(literal)
-					: pixels(literal);
+		const value = variableValue(type, resolveField(path, fields));
 		if (value === undefined) {
+			const expected =
+				type === "COLOR"
+					? "#rgb, #rrggbb or #rrggbbaa colors"
+					: "px or rem lengths";
 			warnings.push({
 				path,
-				message: `${path} (${fields.get(path)}) isn't pushed to Figma: ${type === "COLOR" ? "variables take #rgb, #rrggbb or #rrggbbaa colors" : "variables take px or rem lengths"}, or a reference to one.`,
+				message: `${path} (${fields.get(path)}) isn't pushed to Figma: variables take ${expected}, or a reference to one.`,
 			});
 			continue;
 		}
@@ -147,6 +145,15 @@ export function designSystemPush(
 		},
 		warnings,
 	};
+}
+
+/** A token's resolved value as a variable of this type takes it; undefined if it can't. */
+function variableValue(
+	type: "COLOR" | "FLOAT",
+	literal: string | undefined,
+): { color: string; opacity?: number } | number | undefined {
+	if (literal === undefined) return undefined;
+	return type === "COLOR" ? colorValue(literal) : pixels(literal);
 }
 
 function textStyle(
