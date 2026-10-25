@@ -63,10 +63,12 @@ The Agent designs **Screens** as files in a **Design Project** in the repo, sees
 
 ```
 design/
-  project.json        { "screenSize": { "width": 393, "height": 852 }, "screensPage": "Screens" }
+  project.json        { "screenSize": { "width": 393, "height": 852 }, "screensPage": "Screens", "explorationsPage": "Explorations" }
   DESIGN.md           the Design System (Google Labs' DESIGN.md format), in its default Mode
   modes.yaml          optional: the tokens' values in other Modes (dark, high contrast, …)
   screens/login.html  one Screen per file
+  screens/login.directions/bold.html
+                      optional: alternative versions (Directions) of a Screen, compared in the Preview
   assets/             images Screens use
   sync/               the Linked File, each Screen's Baseline and the Design System's; commit it so teammates share it
 ```
@@ -77,9 +79,10 @@ Every tool has a CLI command doing the same thing (`bun packages/mcp-server/src/
 | --- | --- | --- |
 | `init_design_project` | `init [--size 393x852]` | Create the folder above. |
 | `check_design_project` | `check` | Check Screens, DESIGN.md (the DESIGN.md spec's own linter, WCAG contrast included) and `modes.yaml`; each finding names the file, line, element or token and rule. Warnings don't fail it. |
-| `render_screen` | `render <screen> [--mode Dark] [--out file.png]` | A PNG of the Screen exactly as the Preview shows it, in a Mode. |
-| `open_preview` | `preview [--port 4321]` | Every Screen at its Screen Size, in the Mode its switcher picks, reloading as files change. |
-| `push` | `push [<screen>…] [--yes]` | Screens → frames on the Screens Page, DESIGN.md → variables and text styles, all updated in place. |
+| `render_screen` | `render <screen> [--direction bold] [--mode Dark] [--out file.png]` | A PNG of the Screen (or one of its Directions) exactly as the Preview shows it, in a Mode. |
+| `open_preview` | `preview [--port 4321]` | Every Screen at its Screen Size with its Directions side by side, in the Mode its switcher picks, reloading as files change. |
+| `choose_direction` | `choose <screen> <direction>` | Make a Direction the Screen and delete the other Directions. |
+| `push` | `push [<screen>…] [--directions] [--yes]` | Screens → frames on the Screens Page, DESIGN.md → variables and text styles, all updated in place. With `directions`, copies the Screens' Directions to the Explorations Page instead. |
 | `pull` | `pull` | Designers' edits → the Screens and DESIGN.md, merged against the Baseline. |
 | `relink_file` | `relink [--yes]` | Link the Bridged File instead of the Linked File. |
 
@@ -109,6 +112,14 @@ A Screen is one `<body>` element in the **Screen Subset**, where everything has 
 - **Prototype Links**: `href="signup.html"` on any element but `<body>` links it to another Screen, an on-click NAVIGATE to that Screen's frame in Figma's prototype; `<a href>` is a frame (with `display:flex`), text (holding text) or a rectangle. `data-transition` animates it, CSS-style: `instant` (the default), or `dissolve`, `smart-animate`, `scroll-animate`, `move-in`, `move-out`, `push`, `slide-in` or `slide-out`, with a direction for move, push and slide (`left`, `right`, `top`, `bottom`), then optionally a duration (`300ms` by default) and an easing (`ease-out` by default; `ease-in`, `ease-in-out`, `linear`, `ease-in-back`, `ease-out-back`, `ease-in-out-back`, `gentle`, `quick`, `bouncy`, `slow`), as in `data-transition="push left 200ms ease-in-out"`. Check rejects links to Screens that don't exist and transitions Figma can't take.
 - `data-name` names the layer. Push writes a `data-key` into each element, which links it to its layer: leave it, and don't copy it onto another element.
 - DESIGN.md's tokens are CSS variables named after their path: `colors.primary` is `var(--colors-primary)`, `typography.title.fontSize` is `var(--typography-title-font-size)`.
+
+### Directions
+
+A **Direction** is an alternative version of a Screen, written next to it in `screens/<screen>.directions/<direction>.html` (a Screen that doesn't exist yet can have Directions too). It is a Screen in every other way: the same Screen Subset, Components and Prototype Links, and its images' `src`s are relative to its own folder (`../../assets/logo.png`).
+
+- Check checks Directions; the Preview shows each Screen's Directions side by side with it, and Render takes `direction`. A Direction is designed at its Screen's Screen Size unless its `<body>` sets one.
+- Choosing a Direction (its Choose button in the Preview, `choose_direction`, or `choose`) writes it over the Screen, with its image paths adjusted, and deletes the Screen's Directions folder; git keeps the others. The Screen's frame updates at the next Push, in place for elements whose `data-key` the Direction kept (copy the Screen, keys and all, to start a Direction from it).
+- A regular Push never sends Directions to the Screens Page. `push` with `directions: true` (CLI `push --directions`) copies them for designers to compare: one frame per Direction, labelled `<screen> / <direction>`, side by side in a row per Screen on the Explorations Page (`explorationsPage` in `project.json`). Pushing them again replaces that Screen's copies where they were. Copies aren't linked to anything: Pull never reads them, and edits to them stay in Figma. Tokens are pushed as values (no variable bindings), and Figma-owned Elements copy their Screen's layers. Directions' files get no `data-key`s from it.
 
 ### Push and Pull
 

@@ -7,7 +7,7 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import type { SyncedNode } from "@figma-agent-tool/protocol";
 import type { DesignProject, ScreenFile } from "./project";
 import { resolveProp } from "./resolve";
@@ -44,11 +44,6 @@ const exportsDir = (project: { dir: string }, screen: string) =>
 	join(project.dir, "sync", "exports", screen);
 const manifestPath = (project: { dir: string }, screen: string) =>
 	join(exportsDir(project, screen), "exports.json");
-
-/** Where a Figma-owned Element's export is, relative to its Screen's folder. */
-export function exportSrc(screen: string, key: string): string {
-	return `../sync/exports/${screen}/${key}.png`;
-}
 
 export async function readExports(
 	project: { dir: string },
@@ -140,7 +135,9 @@ export async function figmaOwnedPreviews(
 	baseline: Baseline | undefined,
 ): Promise<FigmaOwnedPreview[]> {
 	if (!root) return [];
-	const exports = await readExports(project, screen.name);
+	// A Direction shows its Screen's exports.
+	const owner = screen.of ?? screen.name;
+	const exports = await readExports(project, owner);
 	const previews: FigmaOwnedPreview[] = [];
 	const walk = (element: Element) => {
 		if (element.kind === "owned" && element.key) {
@@ -150,8 +147,9 @@ export async function figmaOwnedPreviews(
 	};
 	const preview = (element: Element, key: string): FigmaOwnedPreview => {
 		const known = exports[key];
-		const src = exportSrc(screen.name, key);
-		const file = join(exportsDir(project, screen.name), `${key}.png`);
+		const file = join(exportsDir(project, owner), `${key}.png`);
+		// Relative to the Screen's folder, as its `src`s are.
+		const src = relative(dirname(screen.path), file).split(sep).join("/");
 		const base = { key, ...(element.name && { name: element.name }) };
 		// An export of another layer is no export of this one.
 		const ofLayer = known?.nodeId === baseline?.nodes[key];

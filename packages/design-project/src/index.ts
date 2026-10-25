@@ -1,5 +1,6 @@
 export * from "./design-md";
 export * from "./design-system";
+export * from "./directions";
 export * from "./exports";
 export * from "./keys";
 export * from "./link";

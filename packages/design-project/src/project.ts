@@ -1,5 +1,6 @@
 // A Design Project on disk: project.json (the Screen Size and Screens Page),
-// DESIGN.md and its Modes file, Screens in screens/, images (anywhere, by convention assets/)
+// DESIGN.md and its Modes file, Screens in screens/ with their Directions in
+// screens/<Screen>.directions/, images (anywhere, by convention assets/)
 // and the committed sync state in sync/.
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
@@ -9,6 +10,7 @@ import { designSystemPush } from "./design-system";
 import { DesignProjectError } from "./errors";
 import { checkModes, lineOf, lintDesignMd } from "./lint";
 import { MODES_FILE, type Modes, parseModes } from "./modes";
+import { resolveProp } from "./resolve";
 import { type CheckError, type Element, parseScreen } from "./screen";
 
 /** Relative to the working directory. */
@@ -24,6 +26,8 @@ export type ProjectConfig = {
 	screenSize: ScreenSize;
 	/** Name of the Linked File's page holding the Screens' frames. */
 	screensPage: string;
+	/** Name of the Linked File's page that Directions are copied to. */
+	explorationsPage: string;
 };
 
 export type ScreenFile = {
@@ -33,6 +37,15 @@ export type ScreenFile = {
 	file: string;
 	path: string;
 	source: string;
+	/** For a Direction: the Screen it's a Direction of. */
+	of?: string;
+};
+
+/** One of several alternative versions of a Screen, in screens/<Screen>.directions/. */
+export type DirectionFile = ScreenFile & {
+	of: string;
+	/** The file name without `.html`. */
+	direction: string;
 };
 
 export type DesignProject = {
@@ -47,11 +60,14 @@ export type DesignProject = {
 	/** The Modes file: the tokens' values in the other Modes. */
 	modes: Modes;
 	screens: ScreenFile[];
+	/** Every Screen's Directions, by Screen and then by name. */
+	directions: DirectionFile[];
 };
 
 export { DesignProjectError };
 
 const CONFIG_FILE = "project.json";
+const DIRECTIONS = ".directions";
 
 export function screenPath(project: { dir: string }, name: string): string {
 	return join(project.dir, "screens", `${name}.html`);
@@ -76,22 +92,37 @@ export async function loadProject(dir: string): Promise<DesignProject> {
 		existsSync(modesPath) ? await readFile(modesPath, "utf8") : "",
 	);
 	const screensDir = join(root, "screens");
-	const names = existsSync(screensDir)
-		? (await readdir(screensDir))
-				.filter((file) => file.endsWith(".html"))
-				.sort()
+	const entries = existsSync(screensDir)
+		? (await readdir(screensDir, { withFileTypes: true })).sort((a, b) =>
+				a.name.localeCompare(b.name),
+			)
 		: [];
-	const screens = await Promise.all(
-		names.map(async (fileName) => {
-			const path = join(screensDir, fileName);
-			return {
-				name: fileName.slice(0, -".html".length),
-				file: `screens/${fileName}`,
-				path,
-				source: await readFile(path, "utf8"),
-			};
-		}),
+	const screens = await readScreenFiles(
+		root,
+		entries.filter((entry) => entry.isFile()).map((entry) => entry.name),
 	);
+	const directions = (
+		await Promise.all(
+			entries
+				.filter(
+					(entry) => entry.isDirectory() && entry.name.endsWith(DIRECTIONS),
+				)
+				.map(async (entry) => {
+					const of = entry.name.slice(0, -DIRECTIONS.length);
+					const files = await readScreenFiles(
+						root,
+						(await readdir(join(screensDir, entry.name))).sort(),
+						entry.name,
+					);
+					return files.map(({ name, ...file }) => ({
+						...file,
+						name: directionName(of, name),
+						of,
+						direction: name,
+					}));
+				}),
+		)
+	).flat();
 	return {
 		dir: root,
 		config,
@@ -107,7 +138,40 @@ export async function loadProject(dir: string): Promise<DesignProject> {
 		})),
 		modes,
 		screens,
+		directions,
 	};
+}
+
+/** The HTML files among `fileNames` in screens/ (or a folder in it), read. */
+function readScreenFiles(
+	root: string,
+	fileNames: string[],
+	folder?: string,
+): Promise<ScreenFile[]> {
+	const relativeDir = folder ? `screens/${folder}` : "screens";
+	return Promise.all(
+		fileNames
+			.filter((fileName) => fileName.endsWith(".html"))
+			.map(async (fileName) => {
+				const path = join(root, relativeDir, fileName);
+				return {
+					name: fileName.slice(0, -".html".length),
+					file: `${relativeDir}/${fileName}`,
+					path,
+					source: await readFile(path, "utf8"),
+				};
+			}),
+	);
+}
+
+/** A Direction's name: its frame's name when it's copied to the Explorations Page. */
+export function directionName(screen: string, direction: string): string {
+	return `${screen} / ${direction}`;
+}
+
+/** The folder holding a Screen's Directions. */
+export function directionsPath(project: { dir: string }, screen: string) {
+	return join(project.dir, "screens", `${screen}${DIRECTIONS}`);
 }
 
 function parseConfig(text: string, path: string): ProjectConfig {
@@ -128,6 +192,7 @@ function parseConfig(text: string, path: string): ProjectConfig {
 	return {
 		screenSize: { width: Number(size.width), height: Number(size.height) },
 		screensPage: data.screensPage || "Screens",
+		explorationsPage: data.explorationsPage || "Explorations",
 	};
 }
 
@@ -169,7 +234,11 @@ export async function initProject(
 	if (existsSync(join(root, CONFIG_FILE))) {
 		throw new DesignProjectError(`${root} already holds a Design Project.`);
 	}
-	const config: ProjectConfig = { screenSize, screensPage: "Screens" };
+	const config: ProjectConfig = {
+		screenSize,
+		screensPage: "Screens",
+		explorationsPage: "Explorations",
+	};
 	const files: [string, string][] = [
 		[CONFIG_FILE, `${JSON.stringify(config, null, "\t")}\n`],
 	];
@@ -201,6 +270,9 @@ export async function checkProject(project: DesignProject): Promise<{
 	screens: ParsedScreen[];
 }> {
 	const screens = project.screens.map((screen) => checkScreen(project, screen));
+	const directions = project.directions.map((direction) =>
+		checkScreen(project, direction),
+	);
 	const designMd = checkDesignMd(project);
 	// Modes are checked against DESIGN.md's tokens, so it must read first.
 	const modes =
@@ -212,6 +284,7 @@ export async function checkProject(project: DesignProject): Promise<{
 			...designMd.errors,
 			...modes.errors,
 			...screens.flatMap((screen) => screen.errors),
+			...directions.flatMap((direction) => direction.errors),
 		],
 		warnings: [...designMd.warnings, ...modes.warnings],
 		screens,
@@ -254,6 +327,31 @@ export function checkScreen(
 		screenExists: (name) => project.screens.some((s) => s.name === name),
 	});
 	return { ...screen, root, errors };
+}
+
+/**
+ * The Screen Size a Screen or Direction is designed at: its <body> override,
+ * else (for a Direction) its Screen's, else the project's.
+ */
+export function screenSizeOf(
+	project: DesignProject,
+	screen: ScreenFile,
+): ScreenSize {
+	const { root } = checkScreen(project, screen);
+	const width = root && Number(resolveProp(root, "width", project.tokens));
+	const height = root && Number(resolveProp(root, "height", project.tokens));
+	return width && height
+		? { width, height }
+		: defaultScreenSize(project, screen);
+}
+
+/** The Screen Size a Screen or Direction has without a <body> override. */
+export function defaultScreenSize(
+	project: DesignProject,
+	screen: { of?: string },
+): ScreenSize {
+	const of = screen.of && project.screens.find((s) => s.name === screen.of);
+	return of ? screenSizeOf(project, of) : project.config.screenSize;
 }
 
 /** An image's path from its `src`; undefined if it points outside the project. */

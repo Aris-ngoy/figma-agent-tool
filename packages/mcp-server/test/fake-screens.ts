@@ -20,6 +20,11 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 		string,
 		{ screen: string; pageId: string; frame: SyncedNode }
 	>();
+	/** Copies of Directions on the Explorations Page, by frame ID: no Screen links them. */
+	const explorations = new Map<
+		string,
+		{ of: string; pageId: string; frame: SyncedNode }
+	>();
 	const images = new Map<string, string>();
 	const designSystem = createFakeDesignSystem(nextId);
 	let linkId: string | null = null;
@@ -31,8 +36,30 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 		);
 	}
 
+	function pageNamed(page: { id?: string; name: string }) {
+		let target =
+			doc.pages.find((p) => p.id === page.id) ??
+			doc.pages.find((p) => p.name === page.name);
+		if (!target) {
+			target = { id: nextId(), name: page.name, children: [], flows: [] };
+			doc.pages.push(target);
+		}
+		return target;
+	}
+
+	function addImages(bytes: Record<string, string>): Record<string, string> {
+		const hashes: Record<string, string> = {};
+		for (const [name, data] of Object.entries(bytes)) {
+			const hash = `image-${images.size + 1}`;
+			images.set(hash, data);
+			hashes[name] = hash;
+		}
+		return hashes;
+	}
+
 	return {
 		frames,
+		explorations,
 		/** The variables and text styles Push made, which tests edit as a designer would. */
 		designSystem,
 		get linkId() {
@@ -53,19 +80,8 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 			frames: linkedFrames,
 			screenFrames,
 		}: CommandParams<"push_screens">): CommandResult<"push_screens"> {
-			let target =
-				doc.pages.find((p) => p.id === page.id) ??
-				doc.pages.find((p) => p.name === page.name);
-			if (!target) {
-				target = { id: nextId(), name: page.name, children: [], flows: [] };
-				doc.pages.push(target);
-			}
-			const hashes: Record<string, string> = {};
-			for (const [name, data] of Object.entries(bytes)) {
-				const hash = `image-${images.size + 1}`;
-				images.set(hash, data);
-				hashes[name] = hash;
-			}
+			const target = pageNamed(page);
+			const hashes = addImages(bytes);
 			const pageId = target.id;
 			const pushed = tokens && designSystem.push(tokens);
 			const applied = screens.map(({ screen, frameId, tree, remove }) => {
@@ -98,6 +114,42 @@ export function createFakeScreens(doc: DocumentFixture, nextId: () => string) {
 					screen,
 					frame: structuredClone(frame),
 				})),
+			};
+		},
+
+		push_explorations({
+			page,
+			screens,
+			images: bytes,
+		}: CommandParams<"push_explorations">): CommandResult<"push_explorations"> {
+			const target = pageNamed(page);
+			const hashes = addImages(bytes);
+			return {
+				page: { id: target.id, name: target.name },
+				screens: screens.map(({ screen, directions }) => {
+					for (const [id, copy] of explorations) {
+						if (copy.of === screen) explorations.delete(id);
+					}
+					// Figma-owned Elements' layers are copied from the Screen's frame.
+					const original = [...frames.values()].find(
+						(e) => e.screen === screen,
+					);
+					return {
+						screen,
+						frames: directions.map(({ direction, tree }) => {
+							const frame = applyScreenTree(tree, original?.frame, {
+								nextId,
+								imageHash: (name) => hashes[name] as string,
+							});
+							explorations.set(frame.id, {
+								of: screen,
+								pageId: target.id,
+								frame,
+							});
+							return { direction, frameId: frame.id };
+						}),
+					};
+				}),
 			};
 		},
 

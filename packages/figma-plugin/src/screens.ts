@@ -143,6 +143,87 @@ export async function pushScreens(
 	};
 }
 
+/** Room between frames on the Explorations Page. */
+const GAP = 100;
+
+export async function pushExplorations(
+	{ page: pageRef, screens, images }: CommandParams<"push_explorations">,
+	deadline: Deadline = NO_DEADLINE,
+): Promise<CommandResult<"push_explorations">> {
+	const found = new Map<string, BaseNode>();
+	const trees = screens.flatMap(({ directions }) =>
+		directions.map(({ tree }) => tree),
+	);
+	const [page] = await Promise.all([
+		findPage(pageRef),
+		...trees.flatMap(treeIds).map(async (id) => {
+			const node = await figma.getNodeByIdAsync(id);
+			if (node) found.set(id, node);
+		}),
+	]);
+	if (page) await page.loadAsync();
+	const fonts = trees.flatMap((tree) => treeFonts(tree, found));
+	const failed = await loadFonts(fonts);
+	const missing = fonts.find((font) => failed.has(fontKey(font)));
+	if (missing) {
+		throw new CommandError(
+			"font_not_found",
+			`Font "${fontKey(missing)}" isn't available in this file, so nothing was pushed. Install it, or use another font-family / font-weight in the Direction.`,
+		);
+	}
+	for (const tree of trees) {
+		for (const id of treeIds(tree)) {
+			if (!found.get(id) || found.get(id)?.removed) {
+				throw new CommandError(
+					"node_not_found",
+					`The layer ${id} of a Figma-owned Element isn't in the file any more, so nothing was pushed. Pull first.`,
+				);
+			}
+		}
+	}
+	checkDeadline(deadline);
+
+	// Synchronous from here on: the document changes all at once.
+	const explorations = page ?? createPage(pageRef.name);
+	const hashes = Object.fromEntries(
+		Object.entries(images).map(([name, bytes]) => [
+			name,
+			figma.createImage(figma.base64Decode(bytes)).hash,
+		]),
+	);
+	const applier = new Applier(found, hashes, undefined, true);
+	const result = screens.map(({ screen, directions }) => {
+		// A Screen's copies go in a row: where its last copies were, else below the rest.
+		const old = explorations.children.filter(
+			(node) => shared(node, SYNC_KEYS.exploration) === screen,
+		);
+		const bottom = Math.max(
+			0,
+			...explorations.children.map((node) => node.y + node.height + GAP),
+		);
+		let x = old.length > 0 ? Math.min(...old.map((node) => node.x)) : 0;
+		const y = old.length > 0 ? Math.min(...old.map((node) => node.y)) : bottom;
+		for (const node of old) node.remove();
+		const frames = directions.map(({ direction, tree }) => {
+			const frame = figma.createFrame();
+			explorations.appendChild(frame);
+			frame.setSharedPluginData(SYNC_NAMESPACE, SYNC_KEYS.exploration, screen);
+			applier.apply(frame, tree, true);
+			frame.x = x;
+			frame.y = y;
+			x += frame.width + GAP;
+			return { direction, frameId: frame.id };
+		});
+		return { screen, frames };
+	});
+	await applier.applyTextStyles();
+	figma.commitUndo();
+	return {
+		page: { id: explorations.id, name: explorations.name },
+		screens: result,
+	};
+}
+
 export async function readScreens({
 	screens,
 }: CommandParams<"read_screens">): Promise<CommandResult<"read_screens">> {
@@ -288,6 +369,8 @@ class Applier {
 		private readonly found: Map<string, BaseNode>,
 		private readonly hashes: Record<string, string>,
 		private readonly designSystem?: AppliedDesignSystem,
+		/** Figma-owned Elements get copies of their layers, not the layers. */
+		private readonly copyOwned = false,
 	) {}
 
 	/** Applies each text layer's text style, or detaches the one it had. */
@@ -442,7 +525,11 @@ class Applier {
 	private layerFor(spec: ScreenNode): SceneNode {
 		const existing = spec.id ? this.found.get(spec.id) : undefined;
 		if (spec.type === "OWNED") {
-			if (existing && !existing.removed) return existing as SceneNode;
+			if (existing && !existing.removed) {
+				return this.copyOwned
+					? (existing as SceneNode).clone()
+					: (existing as SceneNode);
+			}
 			throw new CommandError(
 				"node_not_found",
 				`The layer ${spec.id} of Figma-owned Element ${spec.key} isn't in the file any more, so nothing was pushed. Pull first.`,

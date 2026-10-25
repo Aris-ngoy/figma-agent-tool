@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	designMd,
+	loginScreen,
 	writeFixtureProject,
 } from "@figma-agent-tool/design-project/fixtures";
 import { handshake } from "@figma-agent-tool/protocol/fixtures";
@@ -201,5 +202,55 @@ describe("figma-agent-tool CLI", () => {
 		const { cli, err } = io();
 		expect(await runCli(["frobnicate"], cli)).toBe(1);
 		expect(err[0]).toContain("Usage: figma-agent-tool");
+	});
+
+	test("check counts Directions; choose makes one the Screen", async () => {
+		const dir = await writeFixtureProject({
+			"screens/login.directions/bold.html": loginScreen.replace(
+				"../assets/logo.png",
+				"../../assets/logo.png",
+			),
+			"screens/login.directions/calm.html":
+				'<body style="display:flex"></body>\n',
+		});
+		const checked = io();
+		expect(await runCli(["check", "--dir", dir], checked.cli)).toBe(0);
+		expect(checked.out).toEqual([
+			"1 Screen, 2 Directions and DESIGN.md checked: no errors.",
+		]);
+		const unknown = io();
+		expect(
+			await runCli(["choose", "login", "nope", "--dir", dir], unknown.cli),
+		).toBe(1);
+		expect(unknown.err.join("\n")).toContain(
+			"login has the Directions bold, calm",
+		);
+		const chosen = io();
+		expect(
+			await runCli(["choose", "login", "bold", "--dir", dir], chosen.cli),
+		).toBe(0);
+		expect(chosen.out).toEqual([
+			"bold is now the login Screen (screens/login.html); deleted the Directions calm.",
+		]);
+		expect(await readFile(join(dir, "screens/login.html"), "utf8")).toBe(
+			loginScreen,
+		);
+	});
+
+	test("push --directions copies Directions to the Explorations Page", async () => {
+		const dir = await writeFixtureProject({
+			"screens/login.directions/bold.html":
+				'<body style="display:flex"></body>\n',
+		});
+		const { cli, out } = io();
+		const { code } = await withPlugin(
+			["push", "--directions", "--dir", dir, "--yes"],
+			cli,
+		);
+		expect(code).toBe(0);
+		expect(out).toEqual([
+			expect.stringMatching(/^Copied login \/ bold \(frame 100:\d+\)$/),
+			"Pushed Directions to “Sample App”, page “Explorations”.",
+		]);
 	});
 });

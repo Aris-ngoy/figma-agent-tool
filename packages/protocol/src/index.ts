@@ -1570,6 +1570,8 @@ export const SYNC_KEYS = {
 	screen: "screen",
 	element: "key",
 	link: "link",
+	// On a copy of a Direction on the Explorations Page: its Screen's name.
+	exploration: "exploration",
 } as const;
 
 const ScreenSizing = z.object({ horizontal: Sizing, vertical: Sizing });
@@ -2150,6 +2152,43 @@ export const commands = {
 			designSystem: PushedDesignSystem.optional(),
 		}),
 	},
+	// Pushing Directions: replaces each Screen's copies of its Directions on
+	// the Explorations Page with new frames, side by side, as one undo step.
+	// The copies aren't linked to their Screens, so Pull never finds them.
+	push_explorations: {
+		params: z.object({
+			// The Explorations Page: found by ID, else by name, else created.
+			page: z.object({ id: z.string().min(1).optional(), name: z.string() }),
+			screens: z
+				.array(
+					z.object({
+						screen: z.string().min(1),
+						directions: z
+							.array(
+								z.object({
+									direction: z.string().min(1),
+									// Figma-owned Elements' layers (by `id`) are copied.
+									tree: ScreenNode,
+								}),
+							)
+							.min(1),
+					}),
+				)
+				.min(1),
+			images: z.record(z.string(), z.base64()).default({}),
+		}),
+		result: z.object({
+			page: PageRef,
+			screens: z.array(
+				z.object({
+					screen: z.string(),
+					frames: z.array(
+						z.object({ direction: z.string(), frameId: z.string() }),
+					),
+				}),
+			),
+		}),
+	},
 	// Pull: reads the variables and text styles Push made, by ID.
 	read_design_system: {
 		params: z.object({
@@ -2201,6 +2240,7 @@ export const DEADLINE_COMMANDS: readonly CommandName[] = [
 	"create_nodes",
 	"update_nodes",
 	"push_screens",
+	"push_explorations",
 ];
 
 /**

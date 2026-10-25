@@ -8,8 +8,10 @@ import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
 	checkProject,
+	chooseDirection,
 	DEFAULT_DESIGN_DIR,
 	DesignProjectError,
+	directionName,
 	initProject,
 	loadProject,
 } from "@figma-agent-tool/design-project";
@@ -19,13 +21,15 @@ import {
 	renderScreen,
 	startPreview,
 } from "@figma-agent-tool/preview";
-import { DEFAULT_BRIDGE_PORT } from "@figma-agent-tool/protocol";
+import { DEFAULT_BRIDGE_PORT, type FileInfo } from "@figma-agent-tool/protocol";
 import { type Bridge, BridgeRequestError, startBridge } from "./bridge";
 import {
 	DesignSyncError,
+	findDirection,
 	formatCheckError,
 	pullDesignProject,
 	pushDesignProject,
+	pushDirections,
 	relinkDesignProject,
 } from "./design-sync";
 
@@ -42,12 +46,17 @@ const USAGE = `Usage: figma-agent-tool <command> [options]
 Commands:
   init [--size 393x852]     Create a Design Project
   check                     Check Screens, DESIGN.md and modes.yaml
-  render <screen> [--mode <mode>] [--out <file.png>]
-                            Render a Screen as the Preview shows it, in a Mode
+  render <screen> [--direction <direction>] [--mode <mode>] [--out <file.png>]
+                            Render a Screen (or one of its Directions) as the
+                            Preview shows it, in a Mode
   preview [--port 4321]     Serve the Preview, reloading on every change
-  push [<screen>...] [--yes]
+  choose <screen> <direction>
+                            Make a Direction the Screen, deleting the others
+  push [<screen>...] [--directions] [--yes]
                             Push Screens to the Linked File (--yes confirms
-                            linking the Bridged File on the first Push)
+                            linking the Bridged File on the first Push);
+                            --directions copies their Directions to the
+                            Explorations Page instead
   pull                      Pull designers' edits into the Screens
   relink [--yes]            Link the Design Project to the Bridged File instead
   mcp                       Run the MCP server on stdio
@@ -72,7 +81,7 @@ function parseArgs(argv: string[]): Args {
 		const name = arg.slice(2);
 		const next = argv[i + 1];
 		if (
-			["yes", "help"].includes(name) ||
+			["yes", "help", "directions"].includes(name) ||
 			next === undefined ||
 			next.startsWith("--")
 		) {
@@ -107,9 +116,13 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
 				return await render(dir, rest[0], flags, io);
 			case "preview":
 				return await preview(dir, flags, io);
+			case "choose":
+				return await choose(dir, rest, io);
 			case "push":
 				return await withBridge(flags, env, io, (bridge) =>
-					push(dir, bridge, rest, flags.has("yes"), io),
+					flags.has("directions")
+						? pushExplorations(dir, bridge, rest, flags.has("yes"), io)
+						: push(dir, bridge, rest, flags.has("yes"), io),
 				);
 			case "pull":
 				return await withBridge(flags, env, io, (bridge) =>
@@ -171,16 +184,21 @@ async function check(dir: string, io: CliIo): Promise<number> {
 		io.out(`warning: ${formatCheckError(warning)}`);
 	}
 	const warned =
-		warnings.length > 0
-			? `, ${warnings.length} warning${warnings.length === 1 ? "" : "s"}`
+		warnings.length > 0 ? `, ${plural(warnings.length, "warning")}` : "";
+	const directions =
+		project.directions.length > 0
+			? `, ${plural(project.directions.length, "Direction")}`
 			: "";
 	io.out(
 		errors.length === 0
-			? `${project.screens.length} Screen${project.screens.length === 1 ? "" : "s"} and DESIGN.md checked: no errors${warned}.`
-			: `${errors.length} error${errors.length === 1 ? "" : "s"}${warned}.`,
+			? `${plural(project.screens.length, "Screen")}${directions} and DESIGN.md checked: no errors${warned}.`
+			: `${plural(errors.length, "error")}${warned}.`,
 	);
 	return errors.length === 0 ? 0 : 1;
 }
+
+const plural = (count: number, noun: string) =>
+	`${count} ${noun}${count === 1 ? "" : "s"}`;
 
 async function render(
 	dir: string,
@@ -189,24 +207,33 @@ async function render(
 	io: CliIo,
 ): Promise<number> {
 	const project = await loadProject(dir);
-	const screen = project.screens.find((s) => s.name === name);
-	if (!screen) {
+	const found = project.screens.find((s) => s.name === name);
+	if (!found || name === undefined) {
 		io.err(
 			`Name a Screen to render: ${project.screens.map((s) => s.name).join(", ") || "the Design Project has none"}.`,
 		);
 		return 1;
 	}
 	const mode = flags.get("mode");
+	const direction = flags.get("direction");
 	if (mode === true) {
 		io.err(`--mode takes a Mode's name: ${project.modes.names.join(", ")}.`);
 		return 1;
 	}
+	if (direction === true) {
+		io.err("--direction takes a Direction's name.");
+		return 1;
+	}
+	const screen = direction ? findDirection(project, name, direction) : found;
 	const { png, width, height, figmaOwned } = await renderScreen(
 		project,
 		screen,
 		{ mode },
 	);
-	const defaultOut = mode ? `${screen.name}-${mode}.png` : `${screen.name}.png`;
+	let defaultOut = name;
+	if (direction) defaultOut += `-${direction}`;
+	if (mode) defaultOut += `-${mode}`;
+	defaultOut += ".png";
 	const out = resolve(String(flags.get("out") ?? defaultOut));
 	await writeFile(out, png);
 	io.out(`Rendered ${screen.file} at ${width}×${height} to ${out}`);
@@ -227,6 +254,30 @@ async function preview(
 	const server = startPreview({ dir, port });
 	io.out(`Preview of ${resolve(dir)} at ${server.url} (Ctrl+C to stop)`);
 	return new Promise<number>(() => {});
+}
+
+async function choose(
+	dir: string,
+	[screen, name]: string[],
+	io: CliIo,
+): Promise<number> {
+	if (!screen || !name) {
+		io.err(
+			"choose takes a Screen and one of its Directions: choose <screen> <direction>.",
+		);
+		return 1;
+	}
+	const project = await loadProject(dir);
+	const { file, chose, discarded } = await chooseDirection(
+		project,
+		findDirection(project, screen, name),
+	);
+	const deleted =
+		discarded.length > 0
+			? `; deleted the Directions ${discarded.join(", ")}`
+			: "";
+	io.out(`${chose} is now the ${screen} Screen (${file})${deleted}.`);
+	return 0;
 }
 
 async function withBridge(
@@ -273,6 +324,19 @@ async function ask(io: CliIo, question: string): Promise<boolean> {
 	return io.confirm ? io.confirm(question) : false;
 }
 
+/** Whether the user confirms linking the Bridged File on the first Push. */
+async function confirmLink(
+	file: FileInfo,
+	yes: boolean,
+	io: CliIo,
+): Promise<boolean> {
+	const question = `Link the Design Project to the Bridged File, “${file.name}”? Push and Pull will only work with that file.`;
+	const confirmed = yes || (await ask(io, question));
+	if (!confirmed)
+		io.err(`${question}\nNot linked. Run push again with --yes to confirm.`);
+	return confirmed;
+}
+
 async function push(
 	dir: string,
 	bridge: Bridge,
@@ -282,12 +346,7 @@ async function push(
 ): Promise<number> {
 	let result = await pushDesignProject(dir, bridge, { screens });
 	if (result.status === "confirm_link") {
-		const question = `Link the Design Project to the Bridged File, “${result.file.name}”? Push and Pull will only work with that file.`;
-		const confirmed = yes || (await ask(io, question));
-		if (!confirmed) {
-			io.err(`${question}\nNot linked. Run push again with --yes to confirm.`);
-			return 1;
-		}
+		if (!(await confirmLink(result.file, yes, io))) return 1;
 		result = await pushDesignProject(dir, bridge, {
 			screens,
 			confirmLink: true,
@@ -300,6 +359,30 @@ async function push(
 		);
 	}
 	io.out(`Pushed to “${result.linkedFile.name}”, page “${result.page.name}”.`);
+	return 0;
+}
+
+async function pushExplorations(
+	dir: string,
+	bridge: Bridge,
+	screens: string[],
+	yes: boolean,
+	io: CliIo,
+): Promise<number> {
+	let result = await pushDirections(dir, bridge, { screens });
+	if (result.status === "confirm_link") {
+		if (!(await confirmLink(result.file, yes, io))) return 1;
+		result = await pushDirections(dir, bridge, { screens, confirmLink: true });
+	}
+	if (result.status !== "pushed_directions") return 1;
+	for (const { screen, directions } of result.screens) {
+		for (const { direction, frameId } of directions) {
+			io.out(`Copied ${directionName(screen, direction)} (frame ${frameId})`);
+		}
+	}
+	io.out(
+		`Pushed Directions to “${result.linkedFile.name}”, page “${result.page.name}”.`,
+	);
 	return 0;
 }
 
