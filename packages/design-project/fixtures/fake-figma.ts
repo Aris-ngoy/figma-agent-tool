@@ -1,0 +1,752 @@
+// What the Plugin does with a pushed tree, in serialized form: updates the
+// layers it names by ID in place, creates the others, removes pushed layers
+// the tree no longer has and leaves the designers' own layers be. The fake
+// plugin (MCP tests) and the design-project tests share it; the plugin's
+// own tests check the real thing against the mocked `figma` global.
+import {
+	type DesignSystem,
+	type DesignSystemPush,
+	FLOAT_BINDINGS,
+	type LinkedComponentInfo,
+	linkReaction,
+	type Paint,
+	type PushedDesignSystem,
+	type ScreenComponentProperty,
+	type ScreenFill,
+	type ScreenNode,
+	type SyncedDesignSystem,
+	type SyncedNode,
+	type TextStyleInfo,
+	type VariableValue,
+	withPrototypeLink,
+} from "@figma-agent-tool/protocol";
+
+export function applyScreenTree(
+	tree: ScreenNode,
+	previous: SyncedNode | undefined,
+	{
+		nextId,
+		imageHash,
+		designSystem,
+		remove = [],
+		components,
+	}: {
+		nextId: () => string;
+		imageHash: (name: string) => string;
+		/** Where the trees' bindings point; bindings are dropped without it. */
+		designSystem?: FakeDesignSystem;
+		/** Layers to delete. */
+		remove?: string[];
+		/** What INSTANCE nodes are instances of. */
+		components?: FakeComponents;
+	},
+): SyncedNode {
+	const old = new Map<string, SyncedNode>();
+	const index = (node: SyncedNode) => {
+		old.set(node.id, node);
+		node.children?.forEach(index);
+	};
+	if (previous) index(previous);
+	const gone = new Set(remove);
+	const placed = new Set<string>();
+
+	/** A layer Push keeps as it is, placed only when the Screen moved it. */
+	const keep = (spec: ScreenNode): SyncedNode | undefined => {
+		const existing = spec.id ? old.get(spec.id) : undefined;
+		if (!existing || gone.has(existing.id)) return undefined;
+		placed.add(existing.id);
+		const node = { ...structuredClone(existing), key: spec.key };
+		if (!spec.place) return node;
+		const { horizontal, vertical } = spec.sizing;
+		Object.assign(node, {
+			name: spec.name ?? node.name,
+			width: horizontal === "FIXED" ? spec.width : node.width,
+			height: vertical === "FIXED" ? spec.height : node.height,
+			sizing: spec.sizing,
+			x: spec.position?.x ?? node.x,
+			y: spec.position?.y ?? node.y,
+		});
+		if (spec.position) node.absolute = { horizontal: "MIN", vertical: "MIN" };
+		else delete node.absolute;
+		return node;
+	};
+
+	/** An instance: Push sets its properties, name, place and size only. */
+	const instance = (spec: ScreenNode): SyncedNode => {
+		const existing = spec.id ? old.get(spec.id) : undefined;
+		const reuse = existing?.type === "INSTANCE" ? existing : undefined;
+		if (reuse) placed.add(reuse.id);
+		if (!components) throw new Error("No components to make instances of");
+		const node: SyncedNode = {
+			...(reuse
+				? structuredClone(reuse)
+				: {
+						id: nextId(),
+						type: "INSTANCE",
+						visible: true,
+						rotation: 0,
+						opacity: 1,
+						fills: [],
+						strokes: 0,
+						effects: 0,
+						cornerRadius: 0,
+					}),
+			key: spec.key,
+			name: spec.name ?? (spec.component as string),
+			x: spec.position?.x ?? reuse?.x ?? 0,
+			y: spec.position?.y ?? reuse?.y ?? 0,
+			...size(spec, reuse, false),
+			sizing: spec.sizing,
+			instance: components.instance(
+				spec.component as string,
+				spec.properties ?? {},
+			),
+		};
+		if (spec.position) node.absolute = { horizontal: "MIN", vertical: "MIN" };
+		else delete node.absolute;
+		return node;
+	};
+
+	const apply = (spec: ScreenNode, isRoot: boolean): SyncedNode => {
+		if (spec.type === "INSTANCE") return instance(spec);
+		const existing = spec.id ? old.get(spec.id) : undefined;
+		const reuse = existing?.type === spec.type ? existing : undefined;
+		if (reuse) placed.add(reuse.id);
+		const node: SyncedNode = {
+			id: reuse?.id ?? nextId(),
+			key: spec.key,
+			type: spec.type,
+			name: spec.name ?? spec.text?.characters ?? spec.type,
+			visible: true,
+			x: spec.position?.x ?? reuse?.x ?? 0,
+			y: spec.position?.y ?? reuse?.y ?? 0,
+			...size(spec, reuse, isRoot),
+			rotation: 0,
+			opacity: spec.opacity ?? 1,
+			sizing: isRoot ? { horizontal: "FIXED", vertical: "FIXED" } : spec.sizing,
+			fills: spec.fills.map((fill) => paint(fill, imageHash)),
+			strokes: spec.stroke ? 1 : 0,
+			effects: 0,
+			cornerRadius: spec.cornerRadius ?? 0,
+		};
+		if (spec.stroke) {
+			const { color, weight, align, cap, join } = spec.stroke;
+			node.stroke = {
+				paint: { type: "SOLID", color },
+				weight,
+				align,
+				cap: cap ?? "NONE",
+				join: join ?? "MITER",
+				dashed: false,
+				...(spec.type === "FRAME" && { inLayout: true }),
+			};
+		}
+		// Its reactions are the designers' until applyPrototypeLinks.
+		if (reuse?.reactions) node.reactions = structuredClone(reuse.reactions);
+		if (spec.clips !== undefined) node.clips = spec.clips;
+		if (spec.vector) node.vector = structuredClone(spec.vector);
+		if (spec.position) node.absolute = { horizontal: "MIN", vertical: "MIN" };
+		if (spec.layout) node.layout = structuredClone(spec.layout);
+		if (spec.property) node.property = spec.property;
+		if (designSystem && spec.bindings) bind(node, spec.bindings, designSystem);
+		if (spec.text) {
+			const { characters, fontName, fontSize, textAlignHorizontal } = spec.text;
+			node.text = {
+				characters,
+				fontName: { ...fontName },
+				fontSize,
+				textAlignHorizontal,
+			};
+		}
+		if (spec.layout) {
+			const children = (spec.children ?? []).flatMap(
+				(child) =>
+					(child.type === "OWNED" ? keep(child) : apply(child, false)) ?? [],
+			);
+			// The designers' own layers (no key) stay, after the pushed ones.
+			const kept = (reuse?.children ?? []).filter(
+				(child) =>
+					child.key === null && !placed.has(child.id) && !gone.has(child.id),
+			);
+			node.children = [...children, ...kept];
+		}
+		return node;
+	};
+	const frame = apply(tree, true);
+	return designSystem ? designSystem.resolve(frame) : frame;
+}
+
+/**
+ * A pushed layer's size: as the tree gives it on fixed axes (a Screen's
+ * frame is fixed), else as the layer has it, which Figma's layout keeps.
+ */
+function size(
+	spec: ScreenNode,
+	reuse: SyncedNode | undefined,
+	isRoot: boolean,
+): { width: number; height: number } {
+	if (isRoot || !reuse) return { width: spec.width, height: spec.height };
+	return {
+		width: spec.sizing.horizontal === "FIXED" ? spec.width : reuse.width,
+		height: spec.sizing.vertical === "FIXED" ? spec.height : reuse.height,
+	};
+}
+
+/**
+ * Sets the Prototype Link of each layer a tree pushed (its frame's own
+ * reactions are the designers'), as the Plugin does once every frame of a
+ * push is in place: links go to `frameOf` their Screen.
+ */
+export function applyPrototypeLinks(
+	frame: SyncedNode,
+	tree: ScreenNode,
+	{
+		frameOf,
+		screenFrames,
+	}: {
+		frameOf: (screen: string) => string | undefined;
+		/** Every frame a Screen has or had, besides those of the push. */
+		screenFrames: Iterable<string>;
+	},
+) {
+	const layers = new Map<string, SyncedNode>();
+	const index = (node: SyncedNode) => {
+		if (node.key) layers.set(node.key, node);
+		node.children?.forEach(index);
+	};
+	frame.children?.forEach(index);
+	const frames = new Set(screenFrames);
+	const walk = (spec: ScreenNode) => {
+		const node = layers.get(spec.key);
+		if (node && spec.type !== "OWNED") {
+			const { link } = spec;
+			const destination = link && frameOf(link.screen);
+			if (link && !destination)
+				throw new Error(`No frame for Screen ${link.screen}`);
+			const reactions = withPrototypeLink(
+				node.reactions ?? [],
+				link && destination
+					? linkReaction(destination, link.transition)
+					: undefined,
+				frames,
+			);
+			if (reactions.length > 0) node.reactions = reactions;
+			else delete node.reactions;
+		}
+		spec.children?.forEach(walk);
+	};
+	tree.children?.forEach(walk);
+}
+
+export type FakeComponents = ReturnType<typeof createFakeComponents>;
+
+/** A component in the file or a library, for a Linked Component to find. */
+export type FakeLibraryComponent = Omit<LinkedComponentInfo, "component"> & {
+	/** Its name in Figma; "Component" when not given. */
+	name?: string;
+	/** A library's, not the file's own. */
+	remote?: boolean;
+};
+
+/**
+ * A file's Defined Components, as Push makes them and designers edit them,
+ * and the components Linked Components find: by node ID in the file, or by
+ * key in a library.
+ */
+export function createFakeComponents(nextId: () => string) {
+	/** Defined Components' nodes (component sets, or lone components), by name. */
+	const defined = new Map<string, SyncedNode>();
+	const library = new Map<string, FakeLibraryComponent>();
+	/** Linked Components, by name, as the last push found them. */
+	const linked = new Map<string, FakeLibraryComponent>();
+
+	const variantId = (componentId: string, variant: string) =>
+		`${componentId}/${variant}`;
+
+	return {
+		defined,
+		/** Adds a component to the file or a library, for Linked Components. */
+		addLibraryComponent(component: FakeLibraryComponent) {
+			library.set(component.componentId, component);
+			if (component.key) library.set(component.key, component);
+		},
+
+		/** Applies a Defined Component's tree, as push_screens does. */
+		apply(
+			{
+				component,
+				nodeId,
+				tree,
+				remove,
+			}: {
+				component: string;
+				nodeId?: string;
+				tree: ScreenNode;
+				remove: string[];
+			},
+			options: Omit<Parameters<typeof applyScreenTree>[2], "remove">,
+		): SyncedNode {
+			const previous = defined.get(component);
+			const node = applyScreenTree(
+				tree,
+				previous && previous.id === nodeId ? previous : undefined,
+				{ ...options, remove },
+			);
+			defined.set(component, node);
+			return node;
+		},
+
+		/** What read_components finds for each node ID: a variant stands for its set. */
+		read(ids: string[]) {
+			return ids.flatMap((id) => {
+				const found = library.get(id.split("/")[0] as string);
+				if (!found || found.componentId !== id.split("/")[0]) return [];
+				const { name = "Component", remote = false, ...info } = found;
+				return [{ id, name, remote, ...structuredClone(info) }];
+			});
+		},
+
+		/** Finds a Linked Component's component; undefined when it isn't there. */
+		resolve({
+			component,
+			key,
+			id,
+		}: {
+			component: string;
+			key?: string;
+			id?: string;
+		}): LinkedComponentInfo | undefined {
+			const found = library.get(key ?? id ?? "");
+			if (!found) return undefined;
+			linked.set(component, found);
+			const { name: _, remote: __, ...info } = structuredClone(found);
+			return { component, ...info };
+		},
+
+		/** What an instance of a Component with these properties reads as. */
+		instance(
+			component: string,
+			properties: Record<string, string>,
+		): NonNullable<SyncedNode["instance"]> {
+			const link = linked.get(component);
+			if (link) {
+				const values = Object.fromEntries(
+					Object.entries(link.properties).map(([name, property]) => [
+						name,
+						properties[name] ?? property.default,
+					]),
+				);
+				const unknown = Object.keys(properties).find(
+					(name) => !(name in link.properties),
+				);
+				if (unknown) throw new Error(`${component} has no property ${unknown}`);
+				const variant = variantName(link.properties, values);
+				return {
+					mainId: variant
+						? variantId(link.componentId, variant)
+						: link.componentId,
+					mainKey: link.key ?? null,
+					...(variant && { setId: link.componentId, setKey: link.key ?? null }),
+					properties: values,
+				};
+			}
+			const node = defined.get(component);
+			if (!node) throw new Error(`No component ${component}`);
+			if (node.type !== "COMPONENT_SET")
+				return {
+					mainId: node.id,
+					mainKey: null,
+					properties: { ...properties },
+				};
+			const main = (node.children ?? []).find((variant) =>
+				variant.name.split(", ").every((pair) => {
+					const [name = "", value] = pair.split("=");
+					return properties[name] === value;
+				}),
+			);
+			if (!main) throw new Error(`${component} has no such variant`);
+			return {
+				mainId: main.id,
+				mainKey: null,
+				setId: node.id,
+				setKey: null,
+				properties: { ...properties },
+			};
+		},
+
+		nextId,
+	};
+}
+
+/** The variant properties' values as a variant name, or "" without any. */
+function variantName(
+	properties: Record<string, ScreenComponentProperty>,
+	values: Record<string, string>,
+): string {
+	return Object.entries(properties)
+		.filter(([, property]) => property.type === "VARIANT")
+		.map(([name]) => `${name}=${values[name]}`)
+		.join(", ");
+}
+
+/**
+ * Detaches an instance, as a designer would: it becomes a frame (keeping
+ * its ID and key) holding copies of its main component's layers, which
+ * carry no keys.
+ */
+export function detachInstance(
+	frame: SyncedNode,
+	key: string,
+	main: SyncedNode,
+	nextId: () => string,
+) {
+	const node = layerByKey(frame, key);
+	const copy = (layer: SyncedNode): SyncedNode => {
+		const { property: _, children, ...rest } = structuredClone(layer);
+		return {
+			...rest,
+			id: nextId(),
+			key: null,
+			...(children && { children: children.map(copy) }),
+		};
+	};
+	const { id, name, x, y, sizing, absolute } = node;
+	const detached = { ...copy(main), id, key, name, x, y, sizing, absolute };
+	detached.type = "FRAME";
+	if (!absolute) delete detached.absolute;
+	for (const field of Object.keys(node)) delete node[field as keyof SyncedNode];
+	Object.assign(node, detached);
+}
+
+/** Records a pushed layer's bindings by variable and style ID, as Figma reads them. */
+function bind(
+	node: SyncedNode,
+	bindings: NonNullable<ScreenNode["bindings"]>,
+	designSystem: FakeDesignSystem,
+) {
+	const [fill] = node.fills as Paint[];
+	const fillVariable = bindings.fill && designSystem.idOf(bindings.fill);
+	if (fill?.type === "SOLID" && fillVariable) fill.variable = fillVariable;
+	const bound: NonNullable<SyncedNode["bindings"]> = {};
+	for (const field of [...FLOAT_BINDINGS, "textStyle"] as const) {
+		const token = bindings[field];
+		const id = token && designSystem.idOf(token);
+		if (id) bound[field] = id;
+	}
+	if (Object.keys(bound).length > 0) node.bindings = bound;
+}
+
+export type FakeDesignSystem = ReturnType<typeof createFakeDesignSystem>;
+
+export type FakeVariable = {
+	id: string;
+	name: string;
+	type: "COLOR" | "FLOAT";
+	/** The default mode's value. */
+	value: VariableValue;
+	/** The other modes' values, by mode ID. */
+	modes: Record<string, VariableValue>;
+};
+
+/**
+ * A file's variables and text styles, as Push makes them and designers edit
+ * them. Frames read through `resolve` show bound layers with the current
+ * values, as Figma does.
+ */
+export function createFakeDesignSystem(nextId: () => string) {
+	const variables = new Map<string, FakeVariable>();
+	const textStyles = new Map<string, TextStyleInfo>();
+	/** Token path → ID, from the last Push. */
+	const ids = new Map<string, string>();
+	let collectionId: string | undefined;
+	let collectionName = "Design System";
+	/** The collection's modes other than the default, by name → ID. */
+	const modes = new Map<string, string>();
+	let defaultMode: { id: string; name: string } | undefined;
+
+	/** A value with aliases followed, in a mode (default when absent). */
+	const resolved = (
+		value: VariableValue,
+		mode?: string,
+	): VariableValue | null => {
+		if (typeof value === "object" && "alias" in value) {
+			const target = variables.get(value.alias);
+			if (!target) return null;
+			return resolved((mode && target.modes[mode]) || target.value, mode);
+		}
+		return value;
+	};
+
+	return {
+		variables,
+		textStyles,
+		idOf: (token: string) => ids.get(token),
+		/** The ID of the mode with this name. */
+		modeId(name: string): string {
+			const id = defaultMode?.name === name ? defaultMode.id : modes.get(name);
+			if (!id) throw new Error(`No mode ${name}`);
+			return id;
+		},
+		/** The modes' names, the default first. */
+		get modeNames() {
+			return [defaultMode?.name ?? "Mode 1", ...modes.keys()];
+		},
+		/** Deletes a mode, as a designer would. */
+		removeMode(name: string) {
+			const id = modes.get(name);
+			modes.delete(name);
+			for (const variable of variables.values())
+				delete variable.modes[id as string];
+		},
+		/** The variable with this name, as a designer finds it. */
+		variable(name: string): FakeVariable {
+			const found = [...variables.values()].find((v) => v.name === name);
+			if (!found) throw new Error(`No variable ${name}`);
+			return found;
+		},
+		textStyle(name: string): TextStyleInfo {
+			const found = [...textStyles.values()].find((s) => s.name === name);
+			if (!found) throw new Error(`No text style ${name}`);
+			return found;
+		},
+
+		/** Variables and text styles designers made, in a collection with these modes (the default first). */
+		seed({
+			collection,
+			variables: made,
+			textStyles: styles,
+		}: {
+			collection: {
+				id: string;
+				name: string;
+				modes: { id: string; name: string }[];
+			};
+			variables: FakeVariable[];
+			textStyles: TextStyleInfo[];
+		}) {
+			collectionId = collection.id;
+			collectionName = collection.name;
+			const [first, ...others] = collection.modes;
+			defaultMode = first && { ...first };
+			for (const { id, name } of others) modes.set(name, id);
+			for (const variable of made)
+				variables.set(variable.id, structuredClone(variable));
+			for (const style of styles)
+				textStyles.set(style.id, structuredClone(style));
+		},
+
+		/** The collection and text styles as get_design_system lists them. */
+		listed(): Pick<DesignSystem, "collections"> & {
+			textStyles: TextStyleInfo[];
+		} {
+			const modeList = [
+				defaultMode ?? { id: "", name: "Mode 1" },
+				...[...modes].map(([name, id]) => ({ id, name })),
+			];
+			return {
+				collections: collectionId
+					? [
+							{
+								id: collectionId,
+								name: collectionName,
+								modes: modeList,
+								defaultMode: modeList[0]?.name as string,
+								variables: [...variables.values()].map((variable) => ({
+									id: variable.id,
+									name: variable.name,
+									type: variable.type,
+									valuesByMode: Object.fromEntries(
+										modeList.map(({ id, name }, index) => [
+											name,
+											structuredClone(
+												index === 0
+													? variable.value
+													: (variable.modes[id] ?? variable.value),
+											),
+										]),
+									),
+								})),
+							},
+						]
+					: [],
+				textStyles: [...textStyles.values()].map((style) =>
+					structuredClone(style),
+				),
+			};
+		},
+
+		push(spec: DesignSystemPush): PushedDesignSystem {
+			if (!collectionId || spec.collection.id !== collectionId)
+				collectionId = spec.collection.id ?? nextId();
+			for (const id of spec.remove.variables) variables.delete(id);
+			for (const id of spec.remove.textStyles) textStyles.delete(id);
+			for (const id of spec.remove.modes ?? []) {
+				for (const [name, modeId] of modes)
+					if (modeId === id) modes.delete(name);
+			}
+			defaultMode ??= { id: nextId(), name: "Mode 1" };
+			const pushed: PushedDesignSystem = {
+				collectionId,
+				variables: {},
+				textStyles: {},
+			};
+			if (spec.collection.modes) {
+				const [first, ...others] = spec.collection.modes;
+				defaultMode.name = first?.name as string;
+				pushed.modes = { [defaultMode.name]: defaultMode.id };
+				for (const { id, name } of others) {
+					const found =
+						[...modes].find(([, modeId]) => modeId === id) ??
+						[...modes].find(([modeName]) => modeName === name);
+					if (found) modes.delete(found[0]);
+					const modeId = found?.[1] ?? nextId();
+					modes.set(name, modeId);
+					pushed.modes[name] = modeId;
+				}
+			}
+			for (const variable of spec.variables) {
+				const id =
+					variable.id && variables.has(variable.id) ? variable.id : nextId();
+				pushed.variables[variable.token] = id;
+				ids.set(variable.token, id);
+			}
+			const stored = (
+				value: DesignSystemPush["variables"][number]["value"],
+			): VariableValue =>
+				typeof value === "object" && "token" in value
+					? { alias: pushed.variables[value.token] as string }
+					: value;
+			for (const variable of spec.variables) {
+				const id = pushed.variables[variable.token] as string;
+				const value = stored(variable.value);
+				// Like Figma, a mode without a value set has the default's.
+				const byMode: Record<string, VariableValue> = {};
+				for (const modeId of modes.values()) {
+					byMode[modeId] = variables.get(id)?.modes[modeId] ?? value;
+				}
+				for (const [name, modeValue] of Object.entries(variable.modes ?? {})) {
+					const modeId = modes.get(name);
+					if (modeId) byMode[modeId] = stored(modeValue);
+				}
+				variables.set(id, {
+					id,
+					name: variable.name,
+					type: variable.type,
+					value,
+					modes: byMode,
+				});
+			}
+			for (const { token, id: given, ...style } of spec.textStyles) {
+				const id = given && textStyles.has(given) ? given : nextId();
+				pushed.textStyles[token] = id;
+				ids.set(token, id);
+				textStyles.set(id, { id, ...structuredClone(style) });
+			}
+			return pushed;
+		},
+
+		read(params: {
+			variables: string[];
+			textStyles: string[];
+		}): SyncedDesignSystem {
+			return {
+				variables: params.variables.flatMap((id) => {
+					const variable = variables.get(id);
+					if (!variable) return [];
+					const { value, modes: byMode, ...rest } = structuredClone(variable);
+					const read = { ...rest, value, resolved: resolved(value) };
+					if (modes.size === 0) return [read];
+					return [
+						{
+							...read,
+							modes: Object.fromEntries(
+								[...modes.values()].map((modeId) => {
+									const modeValue = byMode[modeId] ?? value;
+									return [
+										modeId,
+										{ value: modeValue, resolved: resolved(modeValue, modeId) },
+									];
+								}),
+							),
+						},
+					];
+				}),
+				textStyles: params.textStyles.flatMap((id) => {
+					const style = textStyles.get(id);
+					return style ? [structuredClone(style)] : [];
+				}),
+			};
+		},
+
+		/** A frame with bound layers showing the variables' and styles' current values. */
+		resolve(frame: SyncedNode): SyncedNode {
+			const value = (id: string | undefined) => {
+				const variable = id ? variables.get(id) : undefined;
+				return variable ? resolved(variable.value) : null;
+			};
+			const walk = (node: SyncedNode) => {
+				if (node.fills !== "mixed") {
+					for (const fill of node.fills) {
+						if (fill.type !== "SOLID") continue;
+						const color = value(fill.variable);
+						if (color && typeof color === "object" && "color" in color)
+							fill.color = color.color;
+					}
+				}
+				const bound = node.bindings ?? {};
+				const number = (id: string | undefined) => {
+					const v = value(id);
+					return typeof v === "number" ? v : undefined;
+				};
+				if (node.layout) {
+					const { layout } = node;
+					layout.itemSpacing = number(bound.itemSpacing) ?? layout.itemSpacing;
+					const { padding } = layout;
+					padding.top = number(bound.paddingTop) ?? padding.top;
+					padding.right = number(bound.paddingRight) ?? padding.right;
+					padding.bottom = number(bound.paddingBottom) ?? padding.bottom;
+					padding.left = number(bound.paddingLeft) ?? padding.left;
+				}
+				const radius = number(bound.cornerRadius);
+				if (radius !== undefined) node.cornerRadius = radius;
+				const style = bound.textStyle
+					? textStyles.get(bound.textStyle)
+					: undefined;
+				if (style && node.text) {
+					node.text.fontName = { ...style.fontName };
+					node.text.fontSize = style.fontSize;
+				}
+				node.children?.forEach(walk);
+			};
+			walk(frame);
+			return frame;
+		},
+	};
+}
+
+function paint(fill: ScreenFill, imageHash: (name: string) => string): Paint {
+	if (fill.type === "SOLID") {
+		return {
+			type: "SOLID",
+			color: fill.color,
+			...(fill.opacity !== undefined &&
+				fill.opacity !== 1 && { opacity: fill.opacity }),
+		};
+	}
+	return {
+		type: "IMAGE",
+		imageHash: "imageHash" in fill ? fill.imageHash : imageHash(fill.image),
+		scaleMode: fill.scaleMode,
+	};
+}
+
+/** Finds a layer in a frame by key, for tests that edit it as a designer would. */
+export function layerByKey(frame: SyncedNode, key: string): SyncedNode {
+	const stack = [frame];
+	while (stack.length > 0) {
+		const node = stack.pop() as SyncedNode;
+		if (node.key === key) return node;
+		stack.push(...(node.children ?? []));
+	}
+	throw new Error(`No layer with key ${key}`);
+}

@@ -1,57 +1,203 @@
 # Figma Agent Tool
 
-An MCP server plus a Figma development plugin that lets any MCP client work on the live Figma document.
-
-## Packages
-
-- `packages/protocol`: runtime-validated (zod) bridge messages and the shared test fixtures.
-- `packages/mcp-server`: the MCP server (stdio) and the localhost WebSocket bridge the plugin connects to.
-- `packages/figma-plugin`: the Figma plugin (sandbox command handler + UI iframe that owns the connection).
-- `packages/handoff`: pure rendering of the prototype graph, screen layers and design system as handoff Markdown.
-- `packages/visual-diff`: pure image comparison (align, mask, pixel-diff, cluster mismatches), with no Figma or device knowledge. Its PNG fixtures are regenerated with `bun run fixtures` in that package.
-
-## Development
-
-```sh
-bun install
-bun run build      # turbo: build every package
-bun run test       # turbo: bun test in every package
-bun run typecheck
-bun run check      # Biome lint + format
-```
+Lets any coding agent design UI as files in your repo, see it in a local Preview, and work on it with designers in Figma. Push sends Screens into Figma as real auto-layout frames, and Pull brings designers' edits back. It runs as an MCP server, or as a CLI for harnesses without MCP. The Figma plugin does every read and write, so any Figma seat works. A v1 toolset also edits live Figma files and covers prototypes, handoff Markdown and visual QA.
 
 ## Setup
 
-1. Build: `bun run build`.
-2. Add the server to your MCP client:
+You need Node 20 or later and Figma desktop.
 
-   ```json
-   {
-     "mcpServers": {
-       "figma-agent-tool": {
-         "command": "bun",
-         "args": ["/path/to/figma-agent-tool/packages/mcp-server/dist/main.js"]
-       }
-     }
-   }
+1. **Add the MCP server** to your Agent:
+
+   ```sh
+   claude mcp add figma-agent-tool -- npx -y figma-agent-tool mcp
    ```
 
-   The bridge listens on `ws://127.0.0.1:3055` and `ws://[::1]:3055` (localhost only); the plugin connects to it as `ws://localhost:3055`, since Figma's manifest accepts host names but not IP addresses, and `localhost` may resolve to either loopback (macOS tries `::1` first). Configure it with environment variables in the server entry (`"env": { ... }`):
+   Other MCP clients take `{ "command": "npx", "args": ["-y", "figma-agent-tool", "mcp"] }`. Without MCP, the Agent runs the same steps as `npx figma-agent-tool <command>` (see the table under Design Projects).
+2. **Install the agent skill**, which teaches the Agent the Screen Subset, DESIGN.md and how to work alongside designers: `npx figma-agent-tool skill`. It writes `.claude/skills/figma-agent-tool/SKILL.md`; pass `--into <folder>` for another harness's skills folder. MCP clients that don't load skills get a short version as the server's instructions.
+3. **Install the Figma plugin.** It isn't on the Figma Community yet, so build it from this repo (`bun install && bun run build`). Then, in Figma desktop, choose Plugins → Development → Import plugin from manifest… and pick `packages/figma-plugin/manifest.json`.
+4. **Open the plugin** in the Figma file you want to design in. Its panel shows when it's connected.
+5. **Ask your Agent** for a screen ("design a login screen for this app"). It creates `design/`, writes the Screen, checks and renders it, and Pushes it when you ask. The first Push asks you to confirm the Figma file.
 
-   - `FIGMA_AGENT_BRIDGE_PORT`: bridge port (default `3055`). Set the same port in the plugin panel's **Bridge port** field, and add `ws://localhost:<port>` to `devAllowedDomains` in `packages/figma-plugin/manifest.json`, since Figma only lets the plugin reach listed origins.
-   - `FIGMA_AGENT_REQUEST_TIMEOUT_MS`: how long a command may wait for the plugin before the tool returns a timeout error (default `30000`).
-   - `FIGMA_AGENT_YOQA_URL`: base URL of the Yoqa runner (default `http://127.0.0.1:7420`, Yoqa's own default port).
+## The workflow
 
-3. In Figma desktop: Plugins → Development → Import plugin from manifest… and pick `packages/figma-plugin/manifest.json`. Run it in the file you want to bridge; the panel shows whether it's connected, which file is bridged and the last command it ran.
+1. **Design in the repo.** The Agent runs `init` once. It then writes `design/DESIGN.md`, the Design System's tokens (it can derive them from your codebase), and one HTML file per Screen in `design/screens/`. Check validates everything, and Render gives the Agent a PNG of its work.
+2. **Look and compare.** `npx figma-agent-tool preview` (or the `open_preview` tool) shows every Screen at its Screen Size and reloads as the Agent edits. Ask for Directions to see alternatives side by side, then choose one.
+3. **Push.** Screens become frames on the Screens Page of the Linked File, and DESIGN.md becomes variables and text styles. Components become component sets, and `href`s become prototype links. Later Pushes update everything in place.
+4. **Designers edit in Figma**, adding what Screens can't express: hover states, shadows, Motion.
+5. **Pull.** Their edits merge into the files against the last sync. What the Screen Subset can't express stays in Figma as a Figma-owned Element. Where both sides changed the same element, the file gets Sync Conflict markers for the Agent to resolve. Push is refused until designers' edits are Pulled, so their work is never overwritten.
 
-   The plugin reconnects on its own (with backoff) if the MCP server restarts, and the server accepts it again after Figma reloads the plugin. Only one plugin window is bridged at a time: opening the plugin in another file replaces the older connection (the server logs a warning, and the older panel offers **Reconnect** to take the bridge back).
-4. Ask your agent to call `get_status` to check the connection.
+Commit `design/`, `design/sync/` included, so teammates share the Linked File and the Baselines. To start from a file designers already made, Adopt it instead of running `init` (see below).
 
-### The official Figma MCP
+### Configuration
+
+The bridge listens on `ws://127.0.0.1:3055` and `ws://[::1]:3055` (localhost only); the plugin connects to it as `ws://localhost:3055`, since Figma's manifest accepts host names but not IP addresses, and `localhost` may resolve to either loopback (macOS tries `::1` first). Configure it with environment variables in the server entry (`"env": { ... }`):
+
+- `FIGMA_AGENT_BRIDGE_PORT`: bridge port (default `3055`). Set the same port in the plugin panel's **Bridge port** field, and add `ws://localhost:<port>` to `devAllowedDomains` in `packages/figma-plugin/manifest.json`, since Figma only lets the plugin reach listed origins.
+- `FIGMA_AGENT_REQUEST_TIMEOUT_MS`: how long a command may wait for the plugin before the tool returns a timeout error (default `30000`).
+- `FIGMA_AGENT_YOQA_URL`: base URL of the Yoqa runner (default `http://127.0.0.1:7420`, Yoqa's own default port).
+- `FIGMA_AGENT_DESIGN_DIR`: the Design Project's folder (default `design`, relative to the working directory).
+- `FIGMA_AGENT_CHROME`: a Chrome or Chromium binary for Render; otherwise Render downloads Chrome for Testing's headless shell into `~/.cache/figma-agent-tool` on first use.
+
+The plugin reconnects on its own (with backoff) if the MCP server restarts, and the server accepts it again after Figma reloads the plugin. Only one plugin window is bridged at a time: opening the plugin in another file replaces the older connection (the server logs a warning, and the older panel offers **Reconnect** to take the bridge back). `get_status` reports the connection.
+
+## The official Figma MCP
 
 Every read and write goes through the plugin and the Plugin API, so this tool works on any Figma seat (free included), without the official Figma MCP server and without the REST API's rate limits. It doesn't proxy or wrap the official server. With a Full or Dev seat you can run both side by side; they don't share state.
 
 Before a release, run the manual [smoke test](docs/smoke-test.md) against real Figma.
+
+## Design Projects (v2)
+
+The Agent designs **Screens** as files in a **Design Project** in the repo, sees them in a local **Preview**, and **Pushes** them to Figma; designers' edits come back with **Pull**. See `CONTEXT.md` for the vocabulary and `docs/adr/` for the decisions.
+
+```
+design/
+  project.json        { "screenSize": { "width": 393, "height": 852 }, "screensPage": "Screens", "explorationsPage": "Explorations" }
+  DESIGN.md           the Design System (Google Labs' DESIGN.md format), in its default Mode
+  modes.yaml          optional: the tokens' values in other Modes (dark, high contrast, …)
+  screens/login.html  one Screen per file
+  screens/login.directions/bold.html
+                      optional: alternative versions (Directions) of a Screen, compared in the Preview
+  components/app-button.html
+                      a Defined Component: one <component> per variant, used in Screens as <app-button>
+  components/app-avatar.json
+                      a Linked Component: { "key": "…" } (a library's) or { "id": "…" } (in the Linked File)
+  assets/             images Screens use
+  sync/               the Linked File, each Screen's, Component's and the Design System's Baseline; commit it so teammates share it
+```
+
+Every tool has a CLI command doing the same thing (`npx figma-agent-tool <command>`):
+
+| MCP tool | CLI | |
+| --- | --- | --- |
+| `init_design_project` | `init [--size 393x852]` | Create the folder above. |
+| `check_design_project` | `check` | Check Screens, DESIGN.md (the DESIGN.md spec's own linter, WCAG contrast included) and `modes.yaml`; each finding names the file, line, element or token and rule. Warnings don't fail it. |
+| `render_screen` | `render <screen> [--direction bold] [--mode Dark] [--out file.png]` | A PNG of the Screen (or one of its Directions) exactly as the Preview shows it, in a Mode. |
+| `open_preview` | `preview [--port 4321]` | Every Screen at its Screen Size with its Directions side by side, in the Mode its switcher picks, reloading as files change. |
+| `choose_direction` | `choose <screen> <direction>` | Make a Direction the Screen and delete the other Directions. |
+| `push` | `push [<screen>…] [--directions] [--yes]` | Screens → frames on the Screens Page, DESIGN.md → variables and text styles, all updated in place. With `directions`, copies the Screens' Directions to the Explorations Page instead. |
+| `pull` | `pull` | Designers' edits → the Screens and DESIGN.md, merged against the Baseline. |
+| `relink_file` | `relink [--yes]` | Link the Bridged File instead of the Linked File. |
+| `adopt_file` | `adopt [<frame>…] [--yes]` | Start the Design Project from an existing Figma file: its variables and text styles, and the frames chosen. |
+| | `skill [--into .claude/skills]` | Install the agent skill. |
+| | `mcp` | Run the MCP server on stdio. |
+
+The CLI's `push`, `pull`, `relink` and `adopt` host the plugin bridge while they run, so they can't run while the MCP server holds its port; use the MCP tools then.
+
+### Screens
+
+A Screen is one `<body>` element in the **Screen Subset**, where everything has an exact Figma equivalent:
+
+```html
+<body style="display:flex; flex-direction:column; gap:var(--spacing-md); padding:24px; background:var(--colors-surface)">
+  <img src="../assets/logo.png" style="width:64px; height:64px; border-radius:var(--rounded-md)">
+  <h1 style="font-size:28px; font-weight:700; color:var(--colors-text)">Welcome back</h1>
+  <div data-name="Button" style="display:flex; justify-content:center; padding:12px 16px; align-self:stretch; background:var(--colors-primary); border-radius:12px">
+    <p style="font-weight:600; color:#ffffff">Sign in</p>
+  </div>
+  <div style="height:1px; align-self:stretch; background:#dddddd"></div>
+</body>
+```
+
+- `<body>` is the Screen's frame, at the project's Screen Size unless it sets both `width` and `height`.
+- `<div style="display:flex">` is an auto-layout frame (`flex-direction`, `gap`, `padding`, `justify-content`, `align-items`, `flex-wrap`); a `<div>` without children or `display` is a rectangle; `<p>`, `<span>` and `<h1>`–`<h6>` are text (`<br>` for line breaks); `<img>` is a rectangle with an image fill (`object-fit: cover | contain`).
+- Sizes: a `px` width or height is fixed, none hugs the content, `flex: 1` fills the parent's main axis and `align-self: stretch` its cross axis.
+- Boxes take `background`, `border-radius`, `opacity` and a solid border (`border: 1px solid #dddddd`, or `border-width` with `border-color`: an inside stroke that takes up room in auto layout); frames take `overflow: hidden` (clip content). Text takes `color`, `font-family`, `font-size`, `font-weight`, `font-style` and `text-align`. There's no inheritance: text styles go on text elements.
+- `position: absolute` with `left` and `top` (both, in px, negative too) takes an element out of its parent's auto layout at that offset (absolute position in Figma, pinned top left). It can't fill its parent.
+- `<svg>` with `<path d="…">`s (`fill-rule` optional) is a vector layer: `width` and `height` are required, `viewBox` scales the paths as a browser does, and its style takes `fill`, `stroke`, `stroke-width`, `stroke-linecap` and `stroke-linejoin`. Paths use M, L, H, V, C, S, Q, T and Z (no arcs). Pull writes vectors in their own pixels, without a `viewBox`.
+- **Prototype Links**: `href="signup.html"` on any element but `<body>` links it to another Screen, an on-click NAVIGATE to that Screen's frame in Figma's prototype; `<a href>` is a frame (with `display:flex`), text (holding text) or a rectangle. `data-transition` animates it, CSS-style: `instant` (the default), or `dissolve`, `smart-animate`, `scroll-animate`, `move-in`, `move-out`, `push`, `slide-in` or `slide-out`, with a direction for move, push and slide (`left`, `right`, `top`, `bottom`), then optionally a duration (`300ms` by default) and an easing (`ease-out` by default; `ease-in`, `ease-in-out`, `linear`, `ease-in-back`, `ease-out-back`, `ease-in-out-back`, `gentle`, `quick`, `bouncy`, `slow`), as in `data-transition="push left 200ms ease-in-out"`. Check rejects links to Screens that don't exist and transitions Figma can't take.
+- `data-name` names the layer. Push writes a `data-key` into each element, which links it to its layer: leave it, and don't copy it onto another element.
+- DESIGN.md's tokens are CSS variables named after their path: `colors.primary` is `var(--colors-primary)`, `typography.title.fontSize` is `var(--typography-title-font-size)`.
+
+### Components
+
+A **Component** is a reusable part Screens use as a custom element named after its file, which is lower case with a hyphen (`app-button`). Instances hold nothing: their attributes set the Component's properties, and their `style` takes only their place and size (`width`, `height`, `flex`, `align-self`, `position`, `left`, `top`; none hugs). They also take `data-name` and Prototype Links.
+
+```html
+<!-- components/app-button.html: a Defined Component, one <component> per variant -->
+<component data-variant="kind=primary" style="display:flex; padding:12px 16px; background:var(--colors-primary); border-radius:12px">
+  <p data-property="label" style="color:#ffffff">Sign in</p>
+</component>
+<component data-variant="kind=secondary" style="display:flex; padding:12px 16px; border:1px solid var(--colors-primary); border-radius:12px">
+  <p data-property="label" style="color:var(--colors-primary)">Sign in</p>
+</component>
+
+<!-- in a Screen -->
+<app-button label="Get started" style="align-self:stretch"></app-button>
+<app-button kind="secondary"></app-button>
+```
+
+- A **Defined Component**'s `<component>`s are frames in the Screen Subset. With variants, each has `data-variant="name=value, …"` (the same property names, in the same order, in each) and the Component pushes as a component set of them on the Screens Page. Without any, it pushes as a lone component. `data-property="label"` on a text makes a text property, defaulting to that text (each variant showing it has the same one). An instance sets each property as an attribute (`kind="secondary"`, `label="…"`); those it leaves out have their defaults (the first variant's values). Components can't hold instances or Prototype Links yet.
+- A **Linked Component** is `components/<name>.json` with `{ "key": "…" }` (a published component or component set, from an enabled library) or `{ "id": "…" }` (one in the Linked File). Push finds it, and refuses to push if it can't, naming it. It then records its properties in `sync/linked/`, after which Check checks instances' attributes against them (Figma's property names as attributes: lower case, spaces as hyphens). The Preview and Render show its instances as grey boxes with its name.
+- Push sends every Component with every Push, before the Screens, keeping node IDs. Pull reads instances back: a property a designer set becomes an attribute, one set back to its default goes, a detached instance becomes plain elements, an instance of a component that isn't the Design Project's becomes a Figma-owned Element, and other overrides of an instance's own layers stay in Figma. Edits to a Defined Component's main component merge into its file (three-way, like Screens), and Push is refused until they're pulled. A Linked Component's own design is never pulled.
+- Check rejects instances of Components the Design Project doesn't have, properties a Component doesn't have and variants it doesn't have. The Preview shows each instance as its variant draws it, with its text properties, and lists each Defined Component's variants side by side.
+
+### Directions
+
+A **Direction** is an alternative version of a Screen, written next to it in `screens/<screen>.directions/<direction>.html` (a Screen that doesn't exist yet can have Directions too). It is a Screen in every other way: the same Screen Subset, Components and Prototype Links, and its images' `src`s are relative to its own folder (`../../assets/logo.png`).
+
+- Check checks Directions; the Preview shows each Screen's Directions side by side with it, and Render takes `direction`. A Direction is designed at its Screen's Screen Size unless its `<body>` sets one.
+- Choosing a Direction (its Choose button in the Preview, `choose_direction`, or `choose`) writes it over the Screen, with its image paths adjusted, and deletes the Screen's Directions folder; git keeps the others. The Screen's frame updates at the next Push, in place for elements whose `data-key` the Direction kept (copy the Screen, keys and all, to start a Direction from it).
+- A regular Push never sends Directions to the Screens Page. `push` with `directions: true` (CLI `push --directions`) copies them for designers to compare: one frame per Direction, labelled `<screen> / <direction>`, side by side in a row per Screen on the Explorations Page (`explorationsPage` in `project.json`). Pushing them again replaces that Screen's copies where they were. Copies aren't linked to anything: Pull never reads them, and edits to them stay in Figma. Tokens are pushed as values (no variable bindings), and Figma-owned Elements copy their Screen's layers. Directions' files get no `data-key`s from it.
+
+### Push and Pull
+
+- The first Push names the Bridged File and asks to confirm it (the `push` tool returns `status: "confirm_link"`; call it again with `confirmLink: true`). The file then is the Linked File: Push and Pull refuse any other Bridged File, naming both, until `relink`.
+- Push creates or updates one frame per Screen on the Screens Page, keeping node IDs (and with them comments and Figma-only interactions), as one undo step. Layers designers added stay. It refuses Screens that fail Check or have Sync Conflicts, and frames with Unpulled Changes.
+- Pull merges each frame's edits into its Screen against the Baseline. A Screen Figma didn't change stays byte for byte; one it did is rewritten in canonical form. Where both sides changed the same element the file gets markers to resolve:
+
+  ```
+  <<<<<<< Design Project
+      <p data-key="e6" style="color:#fff; font-weight:600">Log in</p>
+  =======
+      <p data-key="e6" style="color:#ffffff; font-weight:600">Continue</p>
+  >>>>>>> Figma
+  ```
+
+- A layer the Screen Subset can't express (effects, gradients, boolean shapes, stars, frames without auto layout, rotated or hidden layers, …) becomes a **Figma-owned Element**: `<figma-owned data-key="e8" data-name="Star" style="width:40px; height:38px"></figma-owned>`, at the layer's place and size. Pull lists each with the reason and caches a PNG export of its layer in `sync/exports/`, fetched again only when a designer changed it. The Preview and Render show that export, and say when it's stale (the Screen resized the element since) or missing. The Agent can move, resize, rename (`data-name`) or delete the element, and Push does the same to the layer, never touching its content; it holds nothing and takes only `width`, `height`, `flex`, `align-self`, `position`, `left` and `top`. Push refuses one Pull didn't make (its `data-key` names no layer).
+- Push turns each Prototype Link into its layer's on-click NAVIGATE, and Pull turns on-click NAVIGATEs to a Screen's frame back into `href` and `data-transition`, merged like any other change. Every other interaction (hover, drag, overlays, other actions, custom easing curves, Motion) is Figma-only: Pull leaves it out of the Screen and Push leaves it as the designers made it, as it does every reaction on a Screen's own frame. `trace_flow` and the handoff tools work on the pushed frames like on any others. A Push of only some Screens is refused when they link to a Screen that has no frame yet.
+- `get_status` reports the Design Project, its Linked File, Screens and Components with Unpulled Changes or Sync Conflicts, and the Design System's (`designSystem`).
+
+### Adopting an existing file
+
+**Adopt** starts a Design Project from a Figma file designers already made, which becomes its Linked File. `adopt_file` without `frames` (CLI `adopt`) lists the Bridged File's top-level frames by page; with them (names or node IDs) it says what it would adopt and asks to confirm (`status: "confirm_adopt"`, then `confirm: true`; CLI `--yes`). Nothing is written before that, and Adopt is refused into a folder that already has a Design Project, or for a frame without auto layout.
+
+- The variables of the file's largest color and number collection become DESIGN.md tokens (`Color/Primary` → `colors.primary`; numbers are `rounded` when named or scoped as radii, `spacing` otherwise), aliases references, the collection's other modes `modes.yaml`, and every text style a `typography` token. Push keeps designers' names for them. What DESIGN.md can't hold as Figma has it (string or boolean variables, other collections) stays in Figma and is listed.
+- Each frame becomes `screens/<frame-name>.html`, with `var(--…)` wherever a layer is bound to an adopted variable or text style and its images in `assets/`. Instances become Linked Components (`components/<name>.json`: the file's own components by node ID, a library's by key), on-click NAVIGATEs between adopted frames Prototype Links, and the rest Figma-owned Elements with cached exports.
+- Frames stay where they are: the first one's page is the Screens Page, and pages and frames not chosen stay the designers'. A Push straight after Adopt changes nothing in Figma but the layers' keys, and a Pull finds nothing to merge.
+
+### The Design System
+
+- Push sends DESIGN.md with the Screens: `colors`, `spacing` and `rounded` tokens become variables in a “Design System” collection, named by path (`colors/primary`, `spacing/md`), references (`"{colors.text}"`) become aliases, and each `typography` token becomes a text style (font family, size, weight, line height, letter spacing). Later Pushes update them in place, keeping their IDs, and remove those DESIGN.md dropped.
+- Screen elements written with a token's variable are bound to it: `background`/`color` (fill), `gap`, `padding` and `border-radius` to the variable; text whose `font-size` is a typography token's, and whose family and weight match it, gets that text style.
+- Pull reads those variables and styles back and writes what designers changed into DESIGN.md, merged against its Baseline: only the changed values are edited, so the file stays as written and passes `npx @google/design.md lint`. Where both sides changed a token, the line gets the same Sync Conflict markers. Screens bound to a token Figma changed aren't rewritten: they keep `var(--…)`.
+- Push is refused while the Design System has Unpulled Changes, naming the tokens. A variable or style deleted in Figma isn't a change: the next Push makes it again.
+- Check warns about tokens Figma can't hold (colors other than hex, lengths in units other than px or rem); Push leaves them out.
+
+### Modes
+
+DESIGN.md holds the default Mode and stays spec-pure. Other Modes (dark, high contrast, brand variants) go in `modes.yaml` next to it, which the tool owns until the DESIGN.md spec can express Modes (ADR-0004, ADR-0012):
+
+```yaml
+default: Light            # the default Mode's name: DESIGN.md's values (Default if left out)
+modes:
+  Dark:
+    colors:
+      surface: "#111111"
+      text: "#eeeeee"
+      heading: "{colors.text}"   # references follow the Mode's values
+    spacing:
+      lg: 32px
+  High contrast:
+    colors:
+      text: "#000000"
+```
+
+- A Mode gives other values to DESIGN.md's `colors`, `spacing` and `rounded` tokens, the ones that become variables; every token it leaves out keeps the default's value. Typography stays as DESIGN.md has it in every Mode (Figma's text styles have no modes).
+- Check rejects a token DESIGN.md doesn't have (`unknown-token`), other groups (`mode-group`), values variables can't take (`mode-value`), broken references (`broken-ref`), a Mode named like the default (`duplicate-mode`) and a file that doesn't parse (`modes-file`), and warns about low contrast in each Mode as in the default.
+- Push gives the “Design System” collection a variable mode per Mode: the default mode renamed, the others added, found again by ID on later Pushes (renamed back if a designer renamed them), and removed when the file drops them. Every variable gets a value in every Mode, the default's where the Mode leaves it out. Figma's plan limits how many modes a collection has; Push explains when Figma refuses one.
+- Pull writes designers' edits to a Mode's values into `modes.yaml`, merged against the Baseline like DESIGN.md: only the changed values are edited (a value the Mode left to the default is added under it), conflicts get the usual markers. Edits to the default mode go to DESIGN.md. Modes a designer adds or deletes aren't Pulled: Push makes deleted ones again.
+- The Preview's Mode switcher shows every Screen in a Mode; `render_screen` takes `mode` (the CLI `--mode`). Frames in Figma show the default Mode.
 
 ## Devices (Yoqa)
 
@@ -135,3 +281,26 @@ Each mismatched region lists the visible Figma layers drawn there. A region over
 Each run writes `figma.png`, `device.png`, `diff.png` and `report.md` to its own timestamped folder (`.figma-agent/qa-<timestamp>-<id>/`) and returns their paths. `report.md` covers screen, device, mismatch %, pass/fail, the regions with their layers and the three images, ready to paste into a PR. If the frame and the capture don't share an aspect ratio, the error says so and gives the paths of both images.
 
 Before a release, run the manual [visual QA smoke test](docs/visual-qa-smoke-test.md) against real Figma and devices.
+
+## Packages
+
+- `packages/protocol`: runtime-validated (zod) bridge messages and the shared test fixtures.
+- `packages/design-project`: pure: reads and writes a Design Project, checks Screens against the Screen Subset, converts Screens to and from the node trees the plugin applies, and does Pull's three-way merge. No Figma, network or browser knowledge.
+- `packages/preview`: the local Preview server and the one renderer that both the Preview and Render use.
+- `packages/mcp-server`: the published `figma-agent-tool` npm package: the MCP server (stdio), the localhost WebSocket bridge the plugin connects to, the CLI, and the agent skill (`skill/SKILL.md`, which the server's instructions summarize in `src/instructions.ts`). Its build bundles it and the Preview into one file for Node.
+- `packages/figma-plugin`: the Figma plugin (sandbox command handler + UI iframe that owns the connection).
+- `packages/handoff`: pure rendering of the prototype graph, screen layers and design system as handoff Markdown.
+- `packages/visual-diff`: pure image comparison (align, mask, pixel-diff, cluster mismatches), with no Figma or device knowledge. Its PNG fixtures are regenerated with `bun run fixtures` in that package.
+
+## Development
+
+```sh
+bun install
+bun run build      # turbo: build every package
+bun run test       # turbo: bun test in every package
+bun run typecheck
+bun run check      # Biome lint + format
+bun packages/mcp-server/src/bin.ts <command>   # the CLI from source
+```
+
+CI also packs the npm package and runs it with `npx` on Node, without Bun (`packages/mcp-server/scripts/npx-smoke.mjs`).

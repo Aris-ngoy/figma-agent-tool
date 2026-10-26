@@ -1,0 +1,11 @@
+# Figma-owned Elements are placeholders the Screen places, shown from cached exports
+
+ADR-0006 keeps what Screens can't express as Figma-owned Elements, and widens the Screen Subset where a mapping is exact. The subset now takes `position: absolute` with `left`/`top` (absolute position pinned top left), `<svg>` of `<path>`s (a vector layer, `viewBox` scaled into the layer's own pixels as a browser does), solid borders (an inside stroke counted in auto layout) and `overflow: hidden` (clip content). Everything else (effects, gradients, boolean shapes, stars, pinned constraints, dashed or outside strokes, frames without auto layout) Pulls as `<figma-owned data-key="…">`: an empty element whose only styles are its place and size, linked to its layer by the key like any element. Push sends it as an `OWNED` node naming the layer: it puts the layer in its place in the tree, and only when the Screen moved, resized, renamed or reparented the element since the Baseline does it set the layer's name, size and position. Its content is never touched, and deleting the element deletes the layer.
+
+## Consequences
+
+- Pull caches a 2x PNG export of each Figma-owned layer in `sync/exports/<Screen>/<key>.png`, with a fingerprint of the layer's content and its size, so it fetches an export again only when a designer changed the layer. The Preview and Render draw the export as the element's background and mark it when it's stale (the Screen resized the element since) or missing; `render_screen` and the Preview's index say so in words.
+- Only Pull makes Figma-owned Elements: Push refuses one whose key names no layer (copied, re-keyed, or its frame deleted), since it can't recreate a designer's layer.
+- Gradients and shadows have CSS forms but Figma renders them differently enough (gradient transforms, shadow spread on text) that they stay Figma-owned for now.
+- Child frames now push with clip content off unless the Screen says `overflow: hidden`, as CSS draws them; frames pushed before this read back as clipping, an Unpulled Change, until pulled once.
+- CSS offsets an absolute child from inside its parent's border, Figma from its outer edge, so a bordered frame's absolute children sit a border width apart in the Preview.

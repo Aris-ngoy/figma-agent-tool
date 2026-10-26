@@ -982,6 +982,7 @@ export const handshake = {
 	pluginVersion: "0.0.0",
 	file: { key: document.fileKey, name: document.name },
 	capabilities: { motion: true },
+	linkId: null,
 } satisfies Handshake;
 
 /** A plugin in a Figma version without the Motion API. */

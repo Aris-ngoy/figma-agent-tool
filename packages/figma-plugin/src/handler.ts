@@ -30,7 +30,17 @@ import {
 	reparentNodes,
 	ungroupNodes,
 } from "./restructure";
+import {
+	fileLinkId,
+	getImage,
+	linkFile,
+	pushExplorations,
+	pushScreens,
+	readComponents,
+	readScreens,
+} from "./screens";
 import { serializeNode } from "./serialize";
+import { readDesignSystem } from "./tokens";
 
 type CommandImplementations = {
 	[C in CommandName]: (
@@ -117,6 +127,13 @@ const implementations: CommandImplementations = {
 	get_flow_nodes: getFlowNodes,
 	get_motion: getMotion,
 	set_motion: setMotion,
+	push_screens: pushScreens,
+	push_explorations: pushExplorations,
+	read_screens: readScreens,
+	read_components: readComponents,
+	read_design_system: readDesignSystem,
+	link_file: linkFile,
+	get_image: getImage,
 };
 
 function pageRef(page: PageNode) {
@@ -136,6 +153,7 @@ export function createCommandHandler({
 				pluginVersion,
 				file: { key: figma.fileKey ?? null, name: figma.root.name },
 				capabilities: { motion: motionSupported() },
+				linkId: fileLinkId(),
 			};
 		},
 

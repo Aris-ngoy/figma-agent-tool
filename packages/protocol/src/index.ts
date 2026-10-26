@@ -33,6 +33,9 @@ export const Handshake = z.object({
 	pluginVersion: z.string(),
 	file: FileInfo,
 	capabilities: Capabilities,
+	// The Link ID a Design Project stored in the file on its first Push (null
+	// when none has). It identifies the Linked File even without a file key.
+	linkId: z.string().nullable().optional(),
 });
 export type Handshake = z.infer<typeof Handshake>;
 
@@ -805,6 +808,114 @@ export const Reaction = z.object({
 });
 export type Reaction = z.infer<typeof Reaction>;
 
+/** Transitions a Screen's Prototype Link can give: preset easings, no matched layers. */
+export const SCREEN_TRANSITION_TYPES = [
+	"DISSOLVE",
+	"SMART_ANIMATE",
+	"SCROLL_ANIMATE",
+	"MOVE_IN",
+	"MOVE_OUT",
+	"PUSH",
+	"SLIDE_IN",
+	"SLIDE_OUT",
+] as const;
+
+export const SCREEN_EASINGS = [
+	"EASE_IN",
+	"EASE_OUT",
+	"EASE_IN_AND_OUT",
+	"LINEAR",
+	"EASE_IN_BACK",
+	"EASE_OUT_BACK",
+	"EASE_IN_AND_OUT_BACK",
+	"GENTLE",
+	"QUICK",
+	"BOUNCY",
+	"SLOW",
+] as const;
+
+/**
+ * Where a reaction goes and how, when it's one a Screen can write as a
+ * Prototype Link: on click, one NAVIGATE to a frame, with no transition or
+ * one Screens can express. Undefined for every other reaction, which stays
+ * Figma-only.
+ */
+export function prototypeLink(
+	reaction: Reaction,
+): { destinationId: string; transition: Transition | null } | undefined {
+	const [action, ...more] = reaction.actions;
+	if (reaction.trigger?.type !== "ON_CLICK" || more.length > 0) return;
+	if (action?.type !== "NODE" || action.navigation !== "NAVIGATE") return;
+	const { destinationId, transition } = action;
+	if (!destinationId) return;
+	if (transition) {
+		const types: readonly string[] = SCREEN_TRANSITION_TYPES;
+		const easings: readonly string[] = SCREEN_EASINGS;
+		if (!types.includes(transition.type)) return;
+		if (!easings.includes(transition.easing.type)) return;
+		if ("matchLayers" in transition && transition.matchLayers) return;
+	}
+	return { destinationId, transition };
+}
+
+/** The on-click NAVIGATE reaction a Prototype Link pushes as. */
+export function linkReaction(
+	destinationId: string,
+	transition: Transition | null,
+): Reaction {
+	return {
+		trigger: { type: "ON_CLICK" },
+		actions: [
+			{ type: "NODE", destinationId, navigation: "NAVIGATE", transition },
+		],
+	};
+}
+
+type PrototypeLink = NonNullable<ReturnType<typeof prototypeLink>>;
+
+/** Whether two Prototype Links go to the same frame the same way, durations to the millisecond. */
+function sameLink(a: PrototypeLink, b: PrototypeLink): boolean {
+	const key = ({ transition }: PrototypeLink) =>
+		JSON.stringify(
+			transition && {
+				...transition,
+				duration: Math.round(transition.duration * 1000),
+			},
+		);
+	return a.destinationId === b.destinationId && key(a) === key(b);
+}
+
+/**
+ * A layer's reactions with its Prototype Link replaced by `link` (removed
+ * when undefined). Prototype Links are the on-click NAVIGATEs to a Screen's
+ * frame (`screenFrames`); every other reaction stays as it is, in its place.
+ * An unchanged link is kept as Figma has it.
+ */
+export function withPrototypeLink(
+	reactions: Reaction[],
+	link: Reaction | undefined,
+	screenFrames: ReadonlySet<string>,
+): Reaction[] {
+	const linkOf = (reaction: Reaction) => {
+		const decoded = prototypeLink(reaction);
+		return decoded && screenFrames.has(decoded.destinationId)
+			? decoded
+			: undefined;
+	};
+	const index = reactions.findIndex((reaction) => linkOf(reaction));
+	const current =
+		index === -1 ? undefined : linkOf(reactions[index] as Reaction);
+	const wanted = link && prototypeLink(link);
+	if (current && wanted && sameLink(current, wanted)) {
+		return reactions.filter((reaction, i) => i === index || !linkOf(reaction));
+	}
+	const others = reactions.filter((reaction) => !linkOf(reaction));
+	if (!link) return others;
+	// Where the old link was (nothing before it is one), else last.
+	const at = index === -1 ? others.length : index;
+	return [...others.slice(0, at), link, ...others.slice(at)];
+}
+
 /** Which reactions `remove_reactions` removes; every given field must match. */
 export const ReactionMatch = z.object({
 	trigger: z.enum(TRIGGER_TYPES).optional(),
@@ -1447,6 +1558,468 @@ export function notAGroupError(node: TreeNode): BridgeError {
 	};
 }
 
+// Push and Pull: Screens travel as trees of ScreenNodes, which the server
+// builds from Screens and reads back from frames. The plugin only applies a
+// tree in place and reads frames; the server decides everything else.
+
+/** Shared plugin data namespace for the keys Push stores on layers. */
+export const SYNC_NAMESPACE = "figmaagent";
+
+/** Shared plugin data keys: a frame's Screen, a layer's element key, the file's Link ID. */
+export const SYNC_KEYS = {
+	screen: "screen",
+	element: "key",
+	link: "link",
+	// On a copy of a Direction on the Explorations Page: its Screen's name.
+	exploration: "exploration",
+	// On a Defined Component's component set (or lone component): its name.
+	component: "component",
+} as const;
+
+/**
+ * A Component property as Screens set it: values are strings (booleans as
+ * "true" and "false"), and names are Figma's without their `#id` suffix.
+ */
+export const ScreenComponentProperty = z.discriminatedUnion("type", [
+	z.object({
+		type: z.literal("VARIANT"),
+		default: z.string(),
+		options: z.array(z.string()),
+	}),
+	z.object({ type: z.literal("TEXT"), default: z.string() }),
+	z.object({ type: z.literal("BOOLEAN"), default: z.string() }),
+]);
+export type ScreenComponentProperty = z.infer<typeof ScreenComponentProperty>;
+
+const ScreenSizing = z.object({ horizontal: Sizing, vertical: Sizing });
+
+const Constraints = z.object({
+	horizontal: z.string(),
+	vertical: z.string(),
+});
+
+const ScreenLayout = z.object({
+	mode: z.enum(["HORIZONTAL", "VERTICAL"]),
+	itemSpacing: z.number(),
+	padding: z.object({
+		top: z.number(),
+		right: z.number(),
+		bottom: z.number(),
+		left: z.number(),
+	}),
+	primaryAxisAlignItems: z.enum(["MIN", "CENTER", "MAX", "SPACE_BETWEEN"]),
+	counterAxisAlignItems: z.enum(["MIN", "CENTER", "MAX"]),
+	wrap: z.boolean(),
+});
+
+/**
+ * A fill Push sets: a solid, or an image given by its Figma hash or by a
+ * name in the push's `images`, whose bytes the plugin turns into one.
+ */
+export const ScreenFill = z.union([
+	z.object({
+		type: z.literal("SOLID"),
+		color: HexColor,
+		opacity: z.number().min(0).max(1).optional(),
+	}),
+	z.object({
+		type: z.literal("IMAGE"),
+		scaleMode: z.enum(["FILL", "FIT"]),
+		imageHash: z.string().min(1),
+	}),
+	z.object({
+		type: z.literal("IMAGE"),
+		scaleMode: z.enum(["FILL", "FIT"]),
+		image: z.string().min(1),
+	}),
+]);
+export type ScreenFill = z.infer<typeof ScreenFill>;
+
+/**
+ * The layer fields Push binds to the Design System: `fill` (the first
+ * fill's color), spacing and corner radius to variables, `textStyle` to a
+ * text style. Push gives token paths (`colors.primary`, `typography.title`);
+ * Pull reads the bound variable or style IDs.
+ */
+export const ScreenBindings = z
+	.object({
+		fill: z.string(),
+		itemSpacing: z.string(),
+		paddingTop: z.string(),
+		paddingRight: z.string(),
+		paddingBottom: z.string(),
+		paddingLeft: z.string(),
+		cornerRadius: z.string(),
+		textStyle: z.string(),
+	})
+	.partial();
+export type ScreenBindings = z.infer<typeof ScreenBindings>;
+
+/** The fields of ScreenBindings that bind to FLOAT variables. */
+export const FLOAT_BINDINGS = [
+	"itemSpacing",
+	"paddingTop",
+	"paddingRight",
+	"paddingBottom",
+	"paddingLeft",
+	"cornerRadius",
+] as const;
+
+/** A variable's value as Push gives it: a color, a number, or another variable of the push. */
+const PushedVariableValue = z.union([
+	z.object({
+		color: HexColor,
+		opacity: z.number().min(0).max(1).optional(),
+	}),
+	z.number(),
+	// Another variable of this push, by token path.
+	z.object({ token: z.string().min(1) }),
+]);
+
+/**
+ * The Design System as Push wants it in Figma: variables in one collection
+ * and text styles, each updated in place by ID or created, and named by its
+ * DESIGN.md token path so bindings and aliases can refer to it before it
+ * exists. With Modes, the collection has one variable mode per Mode.
+ */
+export const DesignSystemPush = z.object({
+	// Found by ID, else created.
+	collection: z.object({
+		id: z.string().min(1).optional(),
+		name: z.string(),
+		// The Modes, the default first: each found by ID, else by name, else
+		// added, and named as given. Absent: the modes are left as they are.
+		modes: z
+			.array(z.object({ id: z.string().min(1).optional(), name: z.string() }))
+			.min(1)
+			.optional(),
+	}),
+	variables: z.array(
+		z.object({
+			token: z.string().min(1),
+			id: z.string().min(1).optional(),
+			name: z.string().min(1),
+			type: z.enum(["COLOR", "FLOAT"]),
+			// The default Mode's value.
+			value: PushedVariableValue,
+			// The other Modes' values, by Mode name.
+			modes: z.record(z.string(), PushedVariableValue).optional(),
+		}),
+	),
+	textStyles: z.array(
+		TextStyleInfo.omit({ id: true, description: true }).extend({
+			token: z.string().min(1),
+			id: z.string().min(1).optional(),
+		}),
+	),
+	// Variables, text styles and modes a previous Push made that DESIGN.md
+	// (or the Modes file) dropped.
+	remove: z.object({
+		variables: z.array(z.string().min(1)),
+		textStyles: z.array(z.string().min(1)),
+		modes: z.array(z.string().min(1)).optional(),
+	}),
+});
+export type DesignSystemPush = z.infer<typeof DesignSystemPush>;
+
+/** Where each token of a DesignSystemPush went: collection, variable, style and mode IDs. */
+export const PushedDesignSystem = z.object({
+	collectionId: z.string(),
+	// Token path → ID.
+	variables: z.record(z.string(), z.string()),
+	textStyles: z.record(z.string(), z.string()),
+	// Mode name → mode ID, when the push gave modes.
+	modes: z.record(z.string(), z.string()).optional(),
+});
+export type PushedDesignSystem = z.infer<typeof PushedDesignSystem>;
+
+/**
+ * Variables and text styles as Pull reads them: the default mode's value
+ * (aliases by ID) and the value aliases resolve to, and the same for the
+ * collection's other modes. Deleted ones are left out.
+ */
+export const SyncedDesignSystem = z.object({
+	variables: z.array(
+		z.object({
+			id: z.string(),
+			name: z.string(),
+			type: VariableInfo.shape.type,
+			value: VariableValue.nullable(),
+			resolved: VariableValue.nullable(),
+			// Mode ID → the value in that mode, for modes other than the default.
+			modes: z
+				.record(
+					z.string(),
+					z.object({
+						value: VariableValue.nullable(),
+						resolved: VariableValue.nullable(),
+					}),
+				)
+				.optional(),
+		}),
+	),
+	textStyles: z.array(TextStyleInfo),
+});
+export type SyncedDesignSystem = z.infer<typeof SyncedDesignSystem>;
+
+const VectorPaths = z.array(
+	z.object({
+		// Absolute M, L, C, Q and Z commands, in the layer's own coordinates.
+		data: z.string(),
+		windingRule: z.enum(["NONZERO", "EVENODD"]),
+	}),
+);
+
+/**
+ * A solid stroke: INSIDE on boxes (taking up room in auto layout, like a
+ * CSS border), CENTER on vectors (like an SVG stroke).
+ */
+const ScreenStroke = z.object({
+	color: HexColor,
+	weight: z.number().positive(),
+	align: z.enum(["INSIDE", "CENTER"]),
+	cap: z.enum(["NONE", "ROUND", "SQUARE"]).optional(),
+	join: z.enum(["MITER", "ROUND", "BEVEL"]).optional(),
+});
+
+const SCREEN_NODE_TYPES = [
+	"FRAME",
+	"TEXT",
+	"RECTANGLE",
+	"VECTOR",
+	"OWNED",
+	"INSTANCE",
+	"COMPONENT",
+	"COMPONENT_SET",
+] as const;
+
+export type ScreenNode = {
+	// The layer to update in place; absent to create one.
+	id?: string;
+	// The Screen element's stable key, stored in the layer's shared plugin data.
+	key: string;
+	// OWNED: a Figma-owned Element's layer `id`, of any type, which Push
+	// leaves as it is apart from placing it in the tree and, with `place`,
+	// naming, sizing and positioning it like any layer.
+	// COMPONENT_SET and COMPONENT: a Defined Component's tree, laid out like
+	// a FRAME; a COMPONENT_SET holds one COMPONENT per variant.
+	// INSTANCE: an instance of `component`, of which Push sets only the
+	// properties, name, place and size.
+	type: (typeof SCREEN_NODE_TYPES)[number];
+	place?: boolean;
+	// Absent on TEXT: Figma names it after its characters.
+	name?: string;
+	// The size on FIXED axes.
+	width: number;
+	height: number;
+	// Ignored on the top-level frame, which is FIXED.
+	sizing: z.infer<typeof ScreenSizing>;
+	// Absolutely positioned in its auto-layout parent, at this offset.
+	position?: { x: number; y: number };
+	layout?: z.infer<typeof ScreenLayout>;
+	fills: ScreenFill[];
+	// No stroke when absent.
+	stroke?: z.infer<typeof ScreenStroke>;
+	// Frames: whether they clip their content.
+	clips?: boolean;
+	cornerRadius?: z.infer<typeof CornerRadius>;
+	opacity?: number;
+	vector?: { paths: z.infer<typeof VectorPaths> };
+	text?: {
+		characters: string;
+		fontName: z.infer<typeof FontName>;
+		fontSize: number;
+		textAlignHorizontal: "LEFT" | "CENTER" | "RIGHT" | "JUSTIFIED";
+	};
+	// Fields bound to the Design System, by token path.
+	bindings?: ScreenBindings;
+	// Its Prototype Link: an on-click NAVIGATE to this Screen's frame. Without
+	// one, Push removes the layer's Prototype Link; other reactions stay.
+	link?: ScreenLink;
+	// INSTANCE: the Component's name, and every property's value.
+	component?: string;
+	properties?: Record<string, string>;
+	// TEXT in a Component: the text property its characters show.
+	property?: string;
+	children?: ScreenNode[];
+};
+
+const ScreenLink = z.object({
+	screen: z.string().min(1),
+	// Null is instant.
+	transition: Transition.nullable(),
+});
+type ScreenLink = z.infer<typeof ScreenLink>;
+
+/** A layer as Push wants it; the whole state, not a patch. */
+export const ScreenNode: z.ZodType<ScreenNode> = z
+	.object({
+		id: z.string().min(1).optional(),
+		key: z.string().min(1),
+		type: z.enum(SCREEN_NODE_TYPES),
+		place: z.boolean().optional(),
+		name: z.string().optional(),
+		width: z.number().positive(),
+		height: z.number().positive(),
+		sizing: ScreenSizing,
+		position: z.object({ x: z.number(), y: z.number() }).optional(),
+		layout: ScreenLayout.optional(),
+		fills: z.array(ScreenFill),
+		stroke: ScreenStroke.optional(),
+		clips: z.boolean().optional(),
+		cornerRadius: CornerRadius.optional(),
+		opacity: z.number().min(0).max(1).optional(),
+		vector: z.object({ paths: VectorPaths }).optional(),
+		text: z
+			.object({
+				characters: z.string(),
+				fontName: FontName,
+				fontSize: z.number().positive(),
+				textAlignHorizontal: z.enum(["LEFT", "CENTER", "RIGHT", "JUSTIFIED"]),
+			})
+			.optional(),
+		bindings: ScreenBindings.optional(),
+		link: ScreenLink.optional(),
+		component: z.string().min(1).optional(),
+		properties: z.record(z.string(), z.string()).optional(),
+		property: z.string().min(1).optional(),
+		get children() {
+			return z.array(ScreenNode).optional();
+		},
+	})
+	.refine(
+		(node) => node.type !== "OWNED" || node.id !== undefined,
+		"An OWNED node names the layer it keeps by `id`.",
+	)
+	.refine(
+		(node) => node.type !== "INSTANCE" || node.component !== undefined,
+		"An INSTANCE node names its `component`.",
+	);
+
+const SyncedStroke = z.object({
+	paint: Paint,
+	weight: z.union([z.number(), Mixed]),
+	align: z.string(),
+	cap: z.union([z.string(), Mixed]),
+	join: z.union([z.string(), Mixed]),
+	dashed: z.boolean(),
+	// Frames: whether strokes take up room in auto layout.
+	inLayout: z.boolean().optional(),
+});
+
+export type SyncedNode = {
+	id: string;
+	// The element key in the layer's shared plugin data; null if it has none.
+	key: string | null;
+	type: string;
+	name: string;
+	visible: boolean;
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+	rotation: number;
+	opacity: number;
+	sizing?: z.infer<typeof ScreenSizing>;
+	// Absolutely positioned in its auto-layout parent: its constraints.
+	absolute?: z.infer<typeof Constraints>;
+	// Frames only; mode NONE is a frame without auto layout.
+	layout?: Omit<
+		z.infer<typeof ScreenLayout>,
+		"mode" | "primaryAxisAlignItems" | "counterAxisAlignItems"
+	> & {
+		mode: string;
+		primaryAxisAlignItems: string;
+		counterAxisAlignItems: string;
+	};
+	fills: Paint[] | "mixed";
+	strokes: number;
+	// How the first stroke is drawn; present when there are strokes.
+	stroke?: z.infer<typeof SyncedStroke>;
+	// Frames: whether they clip their content.
+	clips?: boolean;
+	effects: number;
+	cornerRadius: z.infer<typeof CornerRadius>;
+	// Vectors: their paths; windingRule NONE is an open, unfilled path.
+	vector?: { paths: { data: string; windingRule: string }[] };
+	text?: TextInfo;
+	// Variable and text style IDs; a fill's variable is on the fill.
+	bindings?: Omit<ScreenBindings, "fill">;
+	// Its prototype reactions, when it has any.
+	reactions?: Reaction[];
+	// An INSTANCE's main component (and its component set, for a variant)
+	// and its property values; an instance's own layers aren't read.
+	instance?: z.infer<typeof SyncedInstance>;
+	// TEXT in a component: the text property its characters show.
+	property?: string;
+	children?: SyncedNode[];
+};
+
+const SyncedInstance = z.object({
+	mainId: z.string(),
+	mainKey: z.string().nullable(),
+	setId: z.string().optional(),
+	setKey: z.string().nullable().optional(),
+	// As ScreenComponentProperty names and writes them; instance-swap
+	// properties are left out.
+	properties: z.record(z.string(), z.string()),
+});
+
+/**
+ * A layer as Pull reads it, at full depth: everything a Screen element can
+ * express, plus enough to tell when a layer uses more than that.
+ */
+export const SyncedNode: z.ZodType<SyncedNode> = z.object({
+	id: z.string(),
+	key: z.string().nullable(),
+	type: z.string(),
+	name: z.string(),
+	visible: z.boolean(),
+	x: z.number(),
+	y: z.number(),
+	width: z.number(),
+	height: z.number(),
+	rotation: z.number(),
+	opacity: z.number(),
+	sizing: ScreenSizing.optional(),
+	absolute: Constraints.optional(),
+	layout: ScreenLayout.extend({
+		mode: z.string(),
+		primaryAxisAlignItems: z.string(),
+		counterAxisAlignItems: z.string(),
+	}).optional(),
+	fills: z.union([z.array(Paint), Mixed]),
+	strokes: z.number().int(),
+	stroke: SyncedStroke.optional(),
+	clips: z.boolean().optional(),
+	effects: z.number().int(),
+	cornerRadius: CornerRadius,
+	vector: z
+		.object({
+			paths: z.array(z.object({ data: z.string(), windingRule: z.string() })),
+		})
+		.optional(),
+	text: TextInfo.optional(),
+	bindings: ScreenBindings.omit({ fill: true }).optional(),
+	reactions: z.array(Reaction).optional(),
+	instance: SyncedInstance.optional(),
+	property: z.string().optional(),
+	get children() {
+		return z.array(SyncedNode).optional();
+	},
+});
+
+/** A Linked Component as Push found it: the node its instances come from, and its properties. */
+export const LinkedComponentInfo = z.object({
+	component: z.string(),
+	componentId: z.string(),
+	key: z.string().optional(),
+	properties: z.record(z.string(), ScreenComponentProperty),
+	// Its variants' names, when it's a component set.
+	variants: z.array(z.string()).optional(),
+});
+export type LinkedComponentInfo = z.infer<typeof LinkedComponentInfo>;
+
 /** How many levels of children to include below each returned node. */
 export const Depth = z.number().int().min(0).max(100);
 export const DEFAULT_DEPTH = 2;
@@ -1616,6 +2189,170 @@ export const commands = {
 		}),
 		result: NodeMotion,
 	},
+	// Push: applies each Screen's tree to its frame in place (creating the
+	// frame on the Screens Page when it has none), as one undo step.
+	push_screens: {
+		params: z.object({
+			// The Screens Page: found by ID, else by name, else created.
+			page: z.object({ id: z.string().min(1).optional(), name: z.string() }),
+			screens: z
+				.array(
+					z.object({
+						screen: z.string().min(1),
+						frameId: z.string().min(1).optional(),
+						tree: ScreenNode,
+						// Layers to delete: those of elements the Screen deleted.
+						remove: z.array(z.string().min(1)).default([]),
+					}),
+				)
+				.min(1),
+			// Image bytes (base64) by the name IMAGE fills give in `image`.
+			images: z.record(z.string(), z.base64()).default({}),
+			// Prototype Links: the frames of Screens outside this push that
+			// links go to, by Screen; and every frame a Screen has (or had), so
+			// the plugin knows which on-click NAVIGATEs are Prototype Links.
+			frames: z.record(z.string(), z.string().min(1)).default({}),
+			screenFrames: z.array(z.string().min(1)).default([]),
+			// Applied first, so the trees' bindings can refer to its tokens.
+			designSystem: DesignSystemPush.optional(),
+			// Defined Components, applied before the Screens (whose INSTANCEs
+			// use them) like Screens' trees: to their node (a component set,
+			// or a lone component) on the Screens Page, else to a new one.
+			components: z
+				.array(
+					z.object({
+						component: z.string().min(1),
+						nodeId: z.string().min(1).optional(),
+						tree: ScreenNode,
+						remove: z.array(z.string().min(1)).default([]),
+					}),
+				)
+				.default([]),
+			// Linked Components: found by node ID in the file, or imported
+			// from a library by key; nothing is pushed if one isn't found.
+			linked: z
+				.array(
+					z.object({
+						component: z.string().min(1),
+						key: z.string().min(1).optional(),
+						id: z.string().min(1).optional(),
+					}),
+				)
+				.default([]),
+		}),
+		result: z.object({
+			page: PageRef,
+			// The Figma image hash each entry of `images` became.
+			images: z.record(z.string(), z.string()),
+			screens: z.array(z.object({ screen: z.string(), frame: SyncedNode })),
+			designSystem: PushedDesignSystem.optional(),
+			components: z
+				.array(z.object({ component: z.string(), node: SyncedNode }))
+				.default([]),
+			// What each Linked Component is in this file.
+			linked: z.array(LinkedComponentInfo).default([]),
+		}),
+	},
+	// Pushing Directions: replaces each Screen's copies of its Directions on
+	// the Explorations Page with new frames, side by side, as one undo step.
+	// The copies aren't linked to their Screens, so Pull never finds them.
+	push_explorations: {
+		params: z.object({
+			// The Explorations Page: found by ID, else by name, else created.
+			page: z.object({ id: z.string().min(1).optional(), name: z.string() }),
+			screens: z
+				.array(
+					z.object({
+						screen: z.string().min(1),
+						directions: z
+							.array(
+								z.object({
+									direction: z.string().min(1),
+									// Figma-owned Elements' layers (by `id`) are copied.
+									tree: ScreenNode,
+								}),
+							)
+							.min(1),
+					}),
+				)
+				.min(1),
+			images: z.record(z.string(), z.base64()).default({}),
+			// The node (component set or component) each INSTANCE's Component is.
+			components: z.record(z.string(), z.string().min(1)).default({}),
+		}),
+		result: z.object({
+			page: PageRef,
+			screens: z.array(
+				z.object({
+					screen: z.string(),
+					frames: z.array(
+						z.object({ direction: z.string(), frameId: z.string() }),
+					),
+				}),
+			),
+		}),
+	},
+	// Pull: reads the variables and text styles Push made, by ID.
+	read_design_system: {
+		params: z.object({
+			variables: z.array(z.string().min(1)),
+			textStyles: z.array(z.string().min(1)),
+		}),
+		result: SyncedDesignSystem,
+	},
+	// Pull: reads frames, found by ID or else by the Screen in their shared
+	// plugin data (a cut and pasted frame gets a new ID).
+	read_screens: {
+		params: z.object({
+			screens: z.array(
+				z.object({ screen: z.string().min(1), frameId: z.string().min(1) }),
+			),
+			// Defined Components' nodes, found by ID or else by the Component
+			// in their shared plugin data.
+			components: z
+				.array(
+					z.object({
+						component: z.string().min(1),
+						nodeId: z.string().min(1),
+					}),
+				)
+				.default([]),
+		}),
+		result: z.object({
+			screens: z.array(
+				z.object({ screen: z.string(), frame: SyncedNode.nullable() }),
+			),
+			components: z
+				.array(z.object({ component: z.string(), node: SyncedNode.nullable() }))
+				.default([]),
+		}),
+	},
+	// Adopt: the component sets (or lone components) of nodes instances come
+	// from (a variant stands for its set), as a Linked Component records
+	// them, with their name and whether they're a library's. Nodes that
+	// aren't components are left out.
+	read_components: {
+		params: z.object({ ids: z.array(z.string().min(1)) }),
+		result: z.object({
+			components: z.array(
+				LinkedComponentInfo.omit({ component: true }).extend({
+					// The node ID asked for.
+					id: z.string(),
+					name: z.string(),
+					remote: z.boolean(),
+				}),
+			),
+		}),
+	},
+	// Stores a Design Project's Link ID in the file.
+	link_file: {
+		params: z.object({ linkId: z.string().min(1) }),
+		result: z.object({ file: FileInfo, linkId: z.string() }),
+	},
+	get_image: {
+		params: z.object({ imageHash: z.string().min(1) }),
+		result: z.object({ bytes: z.base64() }),
+	},
 } as const;
 
 export type CommandName = keyof typeof commands;
@@ -1635,6 +2372,8 @@ const commandNames = Object.keys(commands) as [CommandName, ...CommandName[]];
 export const DEADLINE_COMMANDS: readonly CommandName[] = [
 	"create_nodes",
 	"update_nodes",
+	"push_screens",
+	"push_explorations",
 ];
 
 /**

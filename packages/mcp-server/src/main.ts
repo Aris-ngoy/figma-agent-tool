@@ -1,4 +1,3 @@
-#!/usr/bin/env bun
 // MCP server entry point: stdio transport for the MCP client, plus the
 // localhost WebSocket bridge the Figma plugin connects to. stdout belongs to
 // the MCP protocol, so all logging goes to stderr.
@@ -35,7 +34,7 @@ function urlEnv(name: string, fallback: string): string {
 	return raw;
 }
 
-const bridge = startBridge({
+const bridge = await startBridge({
 	port: integerEnv("FIGMA_AGENT_BRIDGE_PORT", DEFAULT_BRIDGE_PORT, {
 		min: 0,
 		max: 65535,
@@ -55,6 +54,7 @@ const server = createMcpServer({
 		baseUrl: urlEnv("FIGMA_AGENT_YOQA_URL", DEFAULT_YOQA_URL),
 	}),
 	artifactsDir: process.env.FIGMA_AGENT_ARTIFACTS_DIR || undefined,
+	designDir: process.env.FIGMA_AGENT_DESIGN_DIR || undefined,
 });
 await server.connect(new StdioServerTransport());
 

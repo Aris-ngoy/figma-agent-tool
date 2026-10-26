@@ -78,18 +78,91 @@ export function installMockFigma(
 	const loadedFonts = new Set<string>();
 	let created = 0;
 
-	const collections = document.collections.map((collection) => ({
-		id: collection.id,
-		name: collection.name,
-		modes: collection.modes.map(({ id, name }) => ({ modeId: id, name })),
-		defaultModeId: modeId(collection, collection.defaultMode),
-		variableIds: collection.variables.map((variable) => variable.id),
-	}));
-	const variables = new Map(
+	/** Like Figma's VariableCollection: modes added, renamed and removed. */
+	function mockCollection(collection: {
+		id: string;
+		name: string;
+		modes: { modeId: string; name: string }[];
+		defaultModeId: string;
+		variableIds: string[];
+	}) {
+		let added = 0;
+		return {
+			...collection,
+			/** Copies the default mode's values into the new mode, as Figma does. */
+			addMode(name: string): string {
+				const id = `${this.id}/mode-${++added}`;
+				this.modes.push({ modeId: id, name });
+				for (const variableId of this.variableIds) {
+					const variable = variables.get(variableId);
+					if (variable)
+						variable.valuesByMode[id] =
+							variable.valuesByMode[this.defaultModeId];
+				}
+				return id;
+			},
+			renameMode(id: string, name: string) {
+				const mode = this.modes.find((m) => m.modeId === id);
+				if (!mode) throw new Error(`No mode ${id}`);
+				mode.name = name;
+			},
+			removeMode(id: string) {
+				if (id === this.defaultModeId)
+					throw new Error("Can't remove the default mode");
+				this.modes = this.modes.filter((m) => m.modeId !== id);
+				for (const variableId of this.variableIds)
+					delete variables.get(variableId)?.valuesByMode[id];
+			},
+		};
+	}
+	const collections = document.collections.map((collection) =>
+		mockCollection({
+			id: collection.id,
+			name: collection.name,
+			modes: collection.modes.map(({ id, name }) => ({ modeId: id, name })),
+			defaultModeId: modeId(collection, collection.defaultMode),
+			variableIds: collection.variables.map((variable) => variable.id),
+		}),
+	);
+	type MockCollection = (typeof collections)[number];
+	type MockVariable = {
+		id: string;
+		name: string;
+		resolvedType: string;
+		description: string;
+		scopes: string[];
+		variableCollectionId: string;
+		valuesByMode: Record<string, unknown>;
+		setValueForMode(modeId: string, value: unknown): void;
+		remove(): void;
+	};
+	/** Like Figma's Variable: values set per mode, and removable. */
+	function mockVariable(
+		variable: Omit<MockVariable, "setValueForMode" | "remove">,
+	): MockVariable {
+		return {
+			...variable,
+			setValueForMode(modeId: string, value: unknown) {
+				this.valuesByMode[modeId] = value;
+			},
+			remove() {
+				variables.delete(this.id);
+				const collection = collections.find(
+					(c) => c.id === this.variableCollectionId,
+				);
+				if (collection) {
+					collection.variableIds = collection.variableIds.filter(
+						(id) => id !== this.id,
+					);
+				}
+			},
+		};
+	}
+	const variables = new Map<string, MockVariable>(
 		document.collections.flatMap((collection) =>
 			collection.variables.map((variable) => [
 				variable.id,
-				{
+				mockVariable({
 					id: variable.id,
 					name: variable.name,
 					resolvedType: variable.type,
@@ -102,11 +175,10 @@ export function installMockFigma(
 							toVariableValue(value as VariableValue),
 						]),
 					),
-				},
+				}),
 			]),
 		),
 	);
-	type MockVariable = NonNullable<ReturnType<typeof variables.get>>;
 
 	/** A variable's value in its collection's default mode, aliases followed. */
 	function resolve(variable: MockVariable): unknown {
@@ -163,6 +235,45 @@ export function installMockFigma(
 			...(motion ? customAnimationStyles : []),
 		].map((style) => [style.id, style]),
 	);
+	/** Like Figma's TextStyle: its font must be loaded to change it. */
+	function mockTextStyle(style: (typeof styles.text)[number]) {
+		let { fontName } = style;
+		const requireLoaded = (font: Font) => {
+			if (!loadedFonts.has(fontKey(font))) {
+				throw new Error(
+					`Cannot write to style with unloaded font "${fontKey(font)}"`,
+				);
+			}
+		};
+		const mocked = Object.assign(style, {
+			remove() {
+				stylesById.delete(style.id);
+				styles.text.splice(styles.text.indexOf(mocked), 1);
+			},
+		});
+		for (const key of ["fontSize", "lineHeight", "letterSpacing"] as const) {
+			let value = style[key];
+			Object.defineProperty(mocked, key, {
+				enumerable: true,
+				get: () => value,
+				set: (next) => {
+					requireLoaded(fontName);
+					value = next;
+				},
+			});
+		}
+		Object.defineProperty(mocked, "fontName", {
+			enumerable: true,
+			get: () => fontName,
+			set: (next: Font) => {
+				requireLoaded(fontName);
+				requireLoaded(next);
+				fontName = next;
+			},
+		});
+		return mocked;
+	}
+	styles.text.forEach(mockTextStyle);
 
 	/** Binding and style setters, which need the file's variables and styles. */
 	function bindable(node: MockNode) {
@@ -331,6 +442,12 @@ export function installMockFigma(
 	function register(node: MockNode, parent?: MockNode): MockNode {
 		node.parent = parent;
 		byId.set(node.id, node);
+		sharedPluginData(node);
+		if (node.type === "TEXT") autoRename(node);
+		if (node.type !== "PAGE") {
+			guardSizing(node);
+			guardPositioning(node);
+		}
 		// Every canvas node exports the fixture PNG; tests check the settings.
 		node.exportAsync = async (settings: unknown) => {
 			exports.push({ nodeId: node.id, settings });
@@ -363,23 +480,26 @@ export function installMockFigma(
 			node.createInstance = () => {
 				const source = findNode(node.id, document) as SerializedNode;
 				const id = createdNodeId(++created);
-				return place(
-					toFigmaNode({
-						...source,
-						id,
-						type: "INSTANCE",
-						x: 0,
-						y: 0,
-						component: undefined,
-						instance: {
-							mainComponent: { id: node.id, name: String(node.name) },
-							properties: {},
-						},
-						// Figma prefixes instance sublayer IDs with the instance's.
-						children: source.children?.map((child) =>
-							prefixIds(child, `I${id};`),
-						),
-					}),
+				return instanceProperties(
+					place(
+						toFigmaNode({
+							...source,
+							id,
+							type: "INSTANCE",
+							x: 0,
+							y: 0,
+							component: undefined,
+							instance: {
+								mainComponent: { id: node.id, name: String(node.name) },
+								properties: {},
+							},
+							// Figma prefixes instance sublayer IDs with the instance's.
+							children: source.children?.map((child) =>
+								prefixIds(child, `I${id};`),
+							),
+						}),
+					),
+					node,
 				);
 			};
 		}
@@ -488,7 +608,172 @@ export function installMockFigma(
 		return place(toFigmaNode({ id: createdNodeId(++created), ...node }));
 	}
 
-	const pages = document.pages.map((page) => {
+	/** A published component (or set) by key, as importing finds it; throws like Figma when there's none. */
+	function byKey(key: string, type: string): MockNode {
+		const found = [...byId.values()].find(
+			(node) => node.type === type && node.key === key && !node.removed,
+		);
+		if (!found) throw new Error(`Failed to import component with key ${key}`);
+		return found;
+	}
+
+	/**
+	 * Like Figma's components made by a plugin: a component set's variant
+	 * properties come from its variants' names, text properties are added
+	 * to the set (or a lone component), and instances set them.
+	 */
+	function mockComponent(node: MockNode): MockNode {
+		const texts = new Map<string, { type: string; defaultValue: unknown }>();
+		let added = 0;
+		const inSet = () =>
+			(node.parent as MockNode | undefined)?.type === "COMPONENT_SET";
+		node.key = "";
+		node.remote = false;
+		Object.defineProperty(node, "componentPropertyDefinitions", {
+			get: () => {
+				if (node.type === "COMPONENT" && inSet())
+					throw new Error("read definitions from the component set");
+				const definitions: Record<string, Record<string, unknown>> = {};
+				for (const variant of node.type === "COMPONENT_SET"
+					? childrenOf(node)
+					: []) {
+					for (const [name, value] of Object.entries(
+						variant.variantProperties as Record<string, string>,
+					)) {
+						const definition = definitions[name] ?? {
+							type: "VARIANT",
+							defaultValue: value,
+							variantOptions: [],
+						};
+						definitions[name] = definition;
+						const options = definition.variantOptions as string[];
+						if (!options.includes(value)) options.push(value);
+					}
+				}
+				for (const [key, definition] of texts)
+					definitions[key] = { ...definition };
+				return definitions;
+			},
+		});
+		node.addComponentProperty = (
+			name: string,
+			type: string,
+			defaultValue: unknown,
+		) => {
+			if (inSet()) throw new Error("add properties to the component set");
+			const key = `${name}#${node.id}-${++added}`;
+			texts.set(key, { type, defaultValue });
+			return key;
+		};
+		node.editComponentProperty = (
+			key: string,
+			{ defaultValue }: { defaultValue: unknown },
+		) => {
+			const definition = texts.get(key);
+			if (!definition) throw new Error(`No property ${key}`);
+			definition.defaultValue = defaultValue;
+			return key;
+		};
+		node.deleteComponentProperty = (key: string) => {
+			if (!texts.delete(key)) throw new Error(`No property ${key}`);
+		};
+		if (node.type !== "COMPONENT") return node;
+		Object.defineProperty(node, "variantProperties", {
+			get: () =>
+				inSet()
+					? Object.fromEntries(
+							String(node.name)
+								.split(", ")
+								.map((pair) => pair.split("=")),
+						)
+					: null,
+		});
+		node.createInstance = () => mockInstance(node);
+		return node;
+	}
+
+	/** An instance of a mocked component, which holds none of its layers. */
+	function mockInstance(component: MockNode): MockNode {
+		const parent = component.parent as MockNode;
+		const instance = create({
+			name: String((parent.type === "COMPONENT_SET" ? parent : component).name),
+			type: "INSTANCE",
+			x: 0,
+			y: 0,
+			width: component.width as number,
+			height: component.height as number,
+			fills: [],
+		});
+		instance.layoutMode = component.layoutMode;
+		return instanceProperties(instance, component);
+	}
+
+	/** An instance's variant and text properties, read and set like Figma's. */
+	function instanceProperties(instance: MockNode, component: MockNode) {
+		let main = component;
+		const overrides = new Map<string, unknown>();
+		const holder = () =>
+			((main.parent as MockNode).type === "COMPONENT_SET"
+				? main.parent
+				: main) as MockNode;
+		instance.getMainComponentAsync = async () => main;
+		Object.defineProperty(instance, "componentProperties", {
+			get: () =>
+				Object.fromEntries(
+					Object.entries(
+						holder().componentPropertyDefinitions as Record<
+							string,
+							{ type: string; defaultValue: unknown }
+						>,
+					).map(([key, { type, defaultValue }]) => [
+						key,
+						{
+							type,
+							value:
+								type === "VARIANT"
+									? (main.variantProperties as Record<string, string>)[key]
+									: overrides.has(key)
+										? overrides.get(key)
+										: defaultValue,
+						},
+					]),
+				),
+		});
+		instance.setProperties = (properties: Record<string, unknown>) => {
+			const definitions = holder().componentPropertyDefinitions as Record<
+				string,
+				{ type: string }
+			>;
+			const variant = { ...(main.variantProperties as Record<string, string>) };
+			for (const [key, value] of Object.entries(properties)) {
+				const definition = definitions[key];
+				if (!definition)
+					throw new Error(
+						`Could not find a component property with name: '${key}'`,
+					);
+				if (definition.type === "VARIANT") variant[key] = String(value);
+				else overrides.set(key, value);
+			}
+			if (holder() === main) return;
+			const swapped = childrenOf(holder()).find((sibling) =>
+				Object.entries(variant).every(
+					([name, value]) =>
+						(sibling.variantProperties as Record<string, string>)[name] ===
+						value,
+				),
+			);
+			if (!swapped) throw new Error("No variant with these properties");
+			main = swapped;
+		};
+		return instance;
+	}
+
+	function mockPage(page: {
+		id: string;
+		name: string;
+		children: SerializedNode[];
+		flows: { nodeId: string; name: string }[];
+	}): MockNode {
 		const children = page.children.map(toFigmaNode);
 		const mockPage: MockNode = {
 			id: page.id,
@@ -524,10 +809,14 @@ export function installMockFigma(
 		};
 		Object.defineProperty(mockPage, RAW_CHILDREN, { value: children });
 		canAppend(mockPage);
+		sharedPluginData(mockPage);
 		for (const child of children) register(child, mockPage);
 		byId.set(page.id, mockPage);
 		return mockPage;
-	});
+	}
+
+	const pages = document.pages.map(mockPage);
+	const images = new Map<string, Uint8Array>();
 
 	const currentPage = pages.find((page) => page.id === document.currentPageId);
 	if (currentPage) {
@@ -543,8 +832,37 @@ export function installMockFigma(
 				storage.set(key, value);
 			},
 		},
-		root: { id: "0:0", name: document.name, type: "DOCUMENT", children: pages },
+		root: sharedPluginData({
+			id: "0:0",
+			name: document.name,
+			type: "DOCUMENT",
+			children: pages,
+		}),
 		currentPage,
+		createPage() {
+			const page = mockPage({
+				id: createdNodeId(++created),
+				name: "Page",
+				children: [],
+				flows: [],
+			});
+			loadedPages.add(page.id);
+			page.parent = mock.root;
+			pages.push(page);
+			return page;
+		},
+		createImage(bytes: Uint8Array) {
+			const hash = `image-${images.size + 1}`;
+			images.set(hash, bytes);
+			return { hash };
+		},
+		getImageByHash(hash: string) {
+			const bytes = images.get(hash);
+			return bytes ? { hash, getBytesAsync: async () => bytes } : null;
+		},
+		base64Decode(data: string) {
+			return new Uint8Array(Buffer.from(data, "base64"));
+		},
 		async getNodeByIdAsync(id: string) {
 			return byId.get(id) ?? null;
 		},
@@ -556,6 +874,21 @@ export function installMockFigma(
 		},
 		getLocalPaintStylesAsync: async () => styles.paint,
 		getLocalTextStylesAsync: async () => styles.text,
+		createTextStyle() {
+			const style = mockTextStyle({
+				id: `S:created-${++created}`,
+				name: "Text style",
+				description: "",
+				type: "TEXT",
+				fontName: { family: "Inter", style: "Regular" },
+				fontSize: 12,
+				lineHeight: { unit: "AUTO" },
+				letterSpacing: { value: 0, unit: "PERCENT" },
+			} as (typeof styles.text)[number]);
+			styles.text.push(style);
+			stylesById.set(style.id, style);
+			return style;
+		},
 		getLocalEffectStylesAsync: async () => styles.effect,
 		...(motion && {
 			motion: {
@@ -569,6 +902,42 @@ export function installMockFigma(
 			getLocalVariablesAsync: async () => [...variables.values()],
 			async getVariableByIdAsync(id: string) {
 				return variables.get(id) ?? null;
+			},
+			async getVariableCollectionByIdAsync(id: string) {
+				return collections.find((collection) => collection.id === id) ?? null;
+			},
+			createVariableCollection(name: string): MockCollection {
+				const id = `VariableCollectionId:created-${++created}`;
+				const collection = mockCollection({
+					id,
+					name,
+					modes: [{ modeId: `${id}/mode`, name: "Mode 1" }],
+					defaultModeId: `${id}/mode`,
+					variableIds: [] as string[],
+				});
+				collections.push(collection);
+				return collection;
+			},
+			createVariable(
+				name: string,
+				collection: MockCollection,
+				resolvedType: string,
+			) {
+				const variable = mockVariable({
+					id: `VariableID:created-${++created}`,
+					name,
+					resolvedType,
+					description: "",
+					scopes: ["ALL_SCOPES"],
+					variableCollectionId: collection.id,
+					valuesByMode: {},
+				});
+				variables.set(variable.id, variable);
+				collection.variableIds.push(variable.id);
+				return variable;
+			},
+			createVariableAlias(variable: MockVariable) {
+				return { type: "VARIABLE_ALIAS", id: variable.id };
 			},
 			setBoundVariableForPaint(
 				paint: Record<string, unknown>,
@@ -615,6 +984,49 @@ export function installMockFigma(
 				...newGeometry,
 				fills: [{ type: "SOLID", color: "#d9d9d9" }],
 			}),
+		createVector: () =>
+			create({
+				name: "Vector",
+				type: "VECTOR",
+				...newGeometry,
+				fills: [],
+			}),
+		createStar: () =>
+			create({
+				name: "Star",
+				type: "STAR",
+				...newGeometry,
+				fills: [{ type: "SOLID", color: "#ffcc00" }],
+			}),
+		createComponent: () =>
+			mockComponent(
+				create({
+					name: "Component",
+					type: "COMPONENT",
+					...newGeometry,
+					fills: [{ type: "SOLID", color: "#ffffff" }],
+					children: [],
+				}),
+			),
+		/** Like Figma, puts the components in a new set in `parent`, named after their variants. */
+		combineAsVariants(components: MockNode[], parent: MockNode) {
+			const set = mockComponent(
+				create({
+					name: "Component 1",
+					type: "COMPONENT_SET",
+					...newGeometry,
+					fills: [],
+					children: [],
+				}),
+			);
+			(parent.appendChild as (node: MockNode) => void)(set);
+			for (const component of components)
+				(set.appendChild as (node: MockNode) => void)(component);
+			return set;
+		},
+		importComponentByKeyAsync: async (key: string) => byKey(key, "COMPONENT"),
+		importComponentSetByKeyAsync: async (key: string) =>
+			byKey(key, "COMPONENT_SET"),
 		createText: () =>
 			create({
 				name: "Text",
@@ -643,6 +1055,82 @@ export function installMockFigma(
 }
 
 const newGeometry = { x: 0, y: 0, width: 100, height: 100 };
+
+/** Shared plugin data, which Figma keeps per node and namespace. */
+function sharedPluginData<T extends Record<string, unknown>>(node: T): T {
+	const data = new Map<string, string>();
+	Object.assign(node, {
+		setSharedPluginData(namespace: string, key: string, value: string) {
+			if (!/^[A-Za-z0-9_.]{3,}$/.test(namespace)) {
+				throw new Error(`Invalid namespace "${namespace}"`);
+			}
+			data.set(`${namespace}/${key}`, value);
+		},
+		getSharedPluginData: (namespace: string, key: string) =>
+			data.get(`${namespace}/${key}`) ?? "",
+	});
+	return node;
+}
+
+/** Like Figma, a text layer with `autoRename` is named after its characters. */
+function autoRename(node: MockNode) {
+	let name = node.name as string;
+	node.autoRename = false;
+	Object.defineProperty(node, "name", {
+		enumerable: true,
+		get: () => (node.autoRename ? node.characters : name),
+		set: (value: string) => {
+			name = value;
+			node.autoRename = false;
+		},
+	});
+}
+
+/**
+ * Like Figma: only children of auto-layout frames can FILL, and only text
+ * and auto-layout frames can HUG.
+ */
+function guardSizing(node: MockNode) {
+	for (const axis of ["layoutSizingHorizontal", "layoutSizingVertical"]) {
+		let sizing = node[axis] ?? "FIXED";
+		Object.defineProperty(node, axis, {
+			enumerable: true,
+			get: () => sizing,
+			set: (value: string) => {
+				const parent = node.parent as MockNode | undefined;
+				if (value === "FILL" && (parent?.layoutMode ?? "NONE") === "NONE") {
+					throw new Error(
+						"FILL can only be set on children of auto-layout frames",
+					);
+				}
+				const hugs =
+					node.type === "TEXT" || (node.layoutMode ?? "NONE") !== "NONE";
+				if (value === "HUG" && !hugs) {
+					throw new Error("HUG can only be set on auto-layout frames and text");
+				}
+				sizing = value;
+			},
+		});
+	}
+}
+
+/** Like Figma: only children of auto-layout frames can be positioned absolutely. */
+function guardPositioning(node: MockNode) {
+	let positioning = "AUTO";
+	Object.defineProperty(node, "layoutPositioning", {
+		enumerable: true,
+		get: () => positioning,
+		set: (value: string) => {
+			const parent = node.parent as MockNode | undefined;
+			if (value === "ABSOLUTE" && (parent?.layoutMode ?? "NONE") === "NONE") {
+				throw new Error(
+					"ABSOLUTE can only be set on children of auto-layout frames",
+				);
+			}
+			positioning = value;
+		},
+	});
+}
 
 /**
  * Like Figma with dynamic-page access: `reactions` is read-only and
@@ -729,6 +1217,11 @@ function toFigmaNode(node: SerializedNode): MockNode {
 			mock.width = width;
 			mock.height = height;
 		},
+		strokeAlign: "INSIDE",
+		strokeCap: "NONE",
+		strokeJoin: "MITER",
+		dashPattern: [],
+		constraints: { horizontal: "MIN", vertical: "MIN" },
 		effects: [],
 		effectStyleId: node.styles?.effect ?? "",
 		boundVariables: Object.fromEntries(
@@ -743,6 +1236,7 @@ function toFigmaNode(node: SerializedNode): MockNode {
 	if (node.type !== "TEXT") cornerRadius(mock, node);
 	if (node.text) {
 		const { fontName, fontSize } = node.text;
+		mock.componentPropertyReferences = null;
 		Object.assign(mock, {
 			characters: node.text.characters,
 			fontName: fontName === "mixed" ? mixed : fontName,
@@ -763,15 +1257,22 @@ function toFigmaNode(node: SerializedNode): MockNode {
 			primaryAxisAlignItems: layout?.primaryAxisAlignItems ?? "MIN",
 			counterAxisAlignItems: layout?.counterAxisAlignItems ?? "MIN",
 			layoutWrap: layout?.wrap ? "WRAP" : "NO_WRAP",
+			// Figma's default for new frames.
+			clipsContent: true,
+			strokesIncludedInLayout: false,
 			layoutSizingHorizontal: layout?.sizing.horizontal ?? "FIXED",
 			layoutSizingVertical: layout?.sizing.vertical ?? "FIXED",
 		});
 		mock.children = node.children.map(toFigmaNode);
 	}
+	if (node.type === "VECTOR") mock.vectorPaths = [];
+	if (node.type === "STAR") mock.pointCount = 5;
 	sources.set(mock, node);
 	if (node.component) {
 		const { key, description, properties, variantProperties } = node.component;
 		mock.key = key;
+		// The fixture's components are the file's own.
+		mock.remote = false;
 		mock.description = description ?? "";
 		if (node.type === "COMPONENT") {
 			mock.variantProperties = variantProperties ?? null;
